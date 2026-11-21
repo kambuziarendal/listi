@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+#include "AdaptiveScrollView.h"
 #include "ColumnRows.h"
 #include "FolderCompare.h"
 #include "ThemeTextView.h"
@@ -6,7 +7,7 @@
 #include <Application.h>
 #include <Button.h>
 #include <CheckBox.h>
-#include <ColumnListView.h>
+#include "AdaptiveColumnList.h"
 #include <ColumnTypes.h>
 #include <FilePanel.h>
 #include <LayoutBuilder.h>
@@ -175,7 +176,7 @@ public:
     cancel = new BButton("Cancel", new BMessage(kCancel));
     matches = new BCheckBox("Show matching entries", new BMessage(kFilter));
     matches->SetName("compare show matches");
-    rows = new BColumnListView("folder comparison results",
+    rows = new Listi::AdaptiveColumnList("folder comparison results",
                                B_WILL_DRAW | B_NAVIGABLE, B_FANCY_BORDER);
     rows->AddColumn(
         new BStringColumn("Relative path", 280, 120, 2000, B_TRUNCATE_MIDDLE),
@@ -194,7 +195,7 @@ public:
         "sizes only; SHA-256 also reads file contents.");
     detail = Text("compare detail", 85);
     auto scroll =
-        new BScrollView("compare detail scroll", detail, 0, false, true);
+        new Listi::AdaptiveScrollView("compare detail scroll", detail, false);
     BLayoutBuilder::Group<>(this, B_VERTICAL, 8)
         .SetInsets(10)
         .AddGroup(B_HORIZONTAL, 8)

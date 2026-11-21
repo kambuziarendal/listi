@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+#include <stdexcept>
 #include "MainWindow.h"
 #include "FlatView.h"
 #include "MainWindowMenu.h"
@@ -162,7 +163,7 @@ class MainWindow : public BWindow {
       }
       break;
     case Listi::kFlatView:
-      split->ToggleFlat(shelf.Model());
+      split->OpenFlat(shelf.Model());
       break;
     case kSearch:
       if (prefs.IsSmidja()) {
@@ -278,7 +279,7 @@ public:
   MainWindow(const Preferences &p, BMessenger svc,
              const Listi::SavedPlaces &saved, bool writable,
              const Listi::SavedSearches &queries, bool queriesWritable)
-      : BWindow(BRect(70, 70, 1170, 710), "Listi 0.37.1", B_TITLED_WINDOW,
+      : BWindow(BRect(70, 70, 1170, 710), "Listi 0.38.0", B_TITLED_WINDOW,
                 B_AUTO_UPDATE_SIZE_LIMITS),
         prefs(p), service(svc),
         savedNavigation(svc, saved, writable, queries, queriesWritable) {
@@ -341,7 +342,7 @@ public:
         !actionArea->Pending() && Listi::CanSaveClipboardIn(path);
     const bool canUndoBulkRename =
         !actionArea->Pending() && queue.CanUndoBulkRename();
-    menu->SetFileActions(pane.CurrentView(), flat, split->CanToggleFlat(),
+    menu->SetFileActions(pane.CurrentView(), flat, split->CanOpenFlat(),
                          canSaveClipboard, canUndoBulkRename);
   }
 
@@ -366,6 +367,17 @@ public:
     return true;
   }
   void MessageReceived(BMessage *m) override {
+    if (m->what == Listi::kFlatContext) {
+      const int pane = m->GetInt32("pane", -1);
+      if (pane >= 0 && pane < 2 && split->Panel(pane).Current() == PanelPage::Flat &&
+          !PromptBlocksCommand()) {
+        auto *view = split->Panel(pane).Page(PanelPage::Flat);
+        split->FollowFocus(view);
+        if (split->Source() == pane)
+          view->MessageReceived(m);
+      }
+      return;
+    }
     const int source = split->Source();
     if (Listi::HandleWindowScript(*m, prefs.workspace, *panes[source],
                                   *panes[1 - source], queue))
@@ -375,9 +387,30 @@ public:
       return;
     }
     auto &panel = split->Panel(source);
-    if (m->what == Listi::kAddToShelf && panel.Current() == PanelPage::Flat) {
-      panel.Page(PanelPage::Flat)->MessageReceived(m);
-      return;
+    if (panel.Current() == PanelPage::Flat) {
+      auto *flat = panel.Page(PanelPage::Flat);
+      switch (m->what) {
+      case kCopy:
+      case kMove:
+        if (!PromptBlocksCommand()) {
+          try {
+            if (prefs.SinglePane())
+              throw std::runtime_error("Use Copy or Cut, then navigate and Paste.");
+            auto job = Listi::FlatSelection(*flat);
+            job.action = m->what == kCopy ? Listi::Action::Copy : Listi::Action::Move;
+            job.destination = panes[1 - source]->Path();
+            fileOperations.SubmitTransfer(std::move(job));
+          } catch (const std::exception &e) {
+            PostMainWindowNotice(e.what());
+          }
+        }
+        return;
+      case kOpenSystem: case kClipboardCopy: case kClipboardCut: case kCopyPaths:
+      case kAll: case kNone: case kInvert: case Listi::kAddToShelf:
+        if (!PromptBlocksCommand())
+          flat->MessageReceived(m);
+        return;
+      }
     }
     auto &pane = *panes[source];
     if (fileOperations.Handle(*m, pane, *panes[1 - source], prefs.SinglePane()) ||

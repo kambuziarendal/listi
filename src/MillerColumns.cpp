@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "MillerColumns.h"
+#include "AdaptiveScrollView.h"
 #include "DirectoryScanner.h"
 #include "FileDrop.h"
 #include "Pane.h"
@@ -70,11 +71,14 @@ public:
     Invalidate();
   }
 
+  float ContentHeight() const { return float(Visible().size()) * height; }
   void Refresh(bool reveal = false) {
     font_height font;
     GetFontHeight(&font);
     height = std::max(24.f, std::ceil(font.ascent + font.descent) + 8);
-    const float content = float(Visible().size()) * height;
+    const float content = ContentHeight();
+    if (Parent())
+      Parent()->InvalidateLayout();
     if (auto bar = ScrollBar(B_VERTICAL)) {
       const float visible = Bounds().Height() + 1;
       bar->SetRange(0, std::max(0.f, content - visible));
@@ -401,8 +405,8 @@ struct MillerColumns::State {
     label->SetTruncation(B_TRUNCATE_MIDDLE);
     label->SetToolTip(path.c_str());
     label->SetExplicitMinSize(BSize(0, B_SIZE_UNSET));
-    auto scroll = new BScrollView("Miller vertical scroll", rows, 0, false,
-                                  true, B_FANCY_BORDER);
+    auto scroll = new Listi::AdaptiveScrollView("Miller vertical scroll", rows, false, true,
+        [rows](float) { return BSize(0, rows->ContentHeight()); });
     auto container = new BGroupView(B_VERTICAL, 2);
     BLayoutBuilder::Group<>(container).Add(label, 0).Add(scroll);
     owner->AddChild(container);
@@ -610,9 +614,19 @@ void MillerColumns::MakeFocus(bool focused) {
     state->columns[state->current].rows->MakeFocus(focused);
 }
 
+static float ColumnWidth(float viewport) {
+  return std::clamp(std::floor(viewport / 2), 130.f, 225.f);
+}
+
+float MillerColumns::ContentWidth(float viewport) const {
+  return ColumnWidth(viewport) * state->columns.size();
+}
+
 void MillerColumns::LayoutColumns() {
+  if (Parent())
+    Parent()->InvalidateLayout();
   const float viewport = Bounds().Width() + 1;
-  const float width = std::clamp(std::floor(viewport / 2), 130.f, 225.f);
+  const float width = ColumnWidth(viewport);
   for (size_t i = 0; i < state->columns.size(); ++i) {
     auto view = state->columns[i].container;
     view->MoveTo(float(i) * width, 0);

@@ -1,5 +1,5 @@
 resource app_signature "application/x-vnd.Kambuzi-Lister";
 resource app_flags B_SINGLE_LAUNCH;
-resource app_version { major = 0, middle = 37, minor = 1, variety = B_APPV_ALPHA, internal = 1, short_info = "Listi 0.37.1", long_info = "Native Haiku file manager with independent panels, native file clipboard and live BFS searches" };
+resource app_version { major = 0, middle = 38, minor = 0, variety = B_APPV_ALPHA, internal = 1, short_info = "Listi 0.38.0", long_info = "Native Haiku file manager with independent panels, native file clipboard and live BFS searches" };
 
 #include "ListiIcon.rdef"

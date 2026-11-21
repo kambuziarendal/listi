@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+#include "AdaptiveScrollView.h"
 #include "InspectorEditor.h"
 #include "ExplicitSubmit.h"
 #include "InspectorDocument.h"
@@ -352,7 +353,7 @@ public:
     body = new Inspector::InspectorTextView(path, document->Text());
     wrapItem->SetMarked(body->DoesWordWrap());
     auto scroll =
-        new BScrollView("editor scroll", body, 0, true, true, B_NO_BORDER);
+        new Listi::AdaptiveScrollView("editor scroll", body, true, B_NO_BORDER);
     scroll->SetExplicitMinSize(BSize(360, 140));
     scroll->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
 
@@ -621,6 +622,7 @@ public:
       return true;
     case kWrap:
       body->SetWordWrap(!body->DoesWordWrap());
+      body->Parent()->InvalidateLayout();
       wrapItem->SetMarked(body->DoesWordWrap());
       return true;
     case kTick:

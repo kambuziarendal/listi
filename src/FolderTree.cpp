@@ -5,7 +5,7 @@
 #include <LayoutBuilder.h>
 #include <Looper.h>
 #include <OutlineListView.h>
-#include <ScrollView.h>
+#include "AdaptiveScrollView.h"
 #include <StringItem.h>
 #include <Window.h>
 #include <algorithm>
@@ -64,6 +64,7 @@ public:
       : BOutlineListView("folder tree"), owner(o) {}
   void ExpandOrCollapse(BListItem *item, bool expand) override {
     BOutlineListView::ExpandOrCollapse(item, expand);
+    Parent()->InvalidateLayout();
     auto tree = dynamic_cast<TreeItem *>(item);
     if (expand && tree)
       owner->ExpandPath(tree->path);
@@ -99,7 +100,7 @@ FolderTree::FolderTree(BHandler *target)
       navigationTarget(target),
       generation(std::make_shared<std::atomic<int64>>(0)) {
   list = new TreeList(this);
-  auto scroll = new BScrollView("folder tree scroll", list, 0, true, true);
+  auto scroll = new Listi::AdaptiveScrollView("folder tree scroll", list, true);
   BLayoutBuilder::Group<>(this, B_VERTICAL, 0).Add(scroll);
   SetExplicitMinSize(BSize(110, 96));
   SetExplicitPreferredSize(BSize(170, 300));
@@ -115,6 +116,7 @@ void FolderTree::Clear() {
   for (int32 i = 0; i < list->FullListCountItems(); ++i)
     all.push_back(list->FullListItemAt(i));
   list->MakeEmpty();
+  list->Parent()->InvalidateLayout();
   for (auto item : all)
     delete item;
   items.clear();
@@ -218,6 +220,7 @@ void FolderTree::MessageReceived(BMessage *m) {
   auto found = items.find(m->GetString("path", ""));
   if (found == items.end())
     return;
+  list->Parent()->InvalidateLayout();
   auto parent = found->second;
   parent->pending = false;
   while (auto child = list->ItemUnderAt(parent, true, 0)) {

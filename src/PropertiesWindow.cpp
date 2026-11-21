@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+#include "AdaptiveScrollView.h"
 #include "ColumnRows.h"
 #include "PropertiesWindow.h"
 #include "FileProperties.h"
@@ -8,7 +9,7 @@
 #include <Volume.h>
 #include <Application.h>
 #include <algorithm>
-#include <ColumnListView.h>
+#include "AdaptiveColumnList.h"
 #include <ColumnTypes.h>
 #include <LayoutBuilder.h>
 #include <MenuField.h>
@@ -214,7 +215,7 @@ public:
                                    "Permissions (octal):", "", nullptr);
     apply = new BButton("Apply permissions", new BMessage(kPermissions));
     refresh = new BButton("Refresh", new BMessage(kRefresh));
-    attributes = new BColumnListView("property attributes",
+    attributes = new Listi::AdaptiveColumnList("property attributes",
                                      B_WILL_DRAW | B_NAVIGABLE, B_FANCY_BORDER);
     attributes->AddColumn(
         new BStringColumn("Attribute", 215, 80, 800, B_TRUNCATE_MIDDLE), 0);
@@ -250,7 +251,7 @@ public:
                               B_DOCUMENT_TEXT_COLOR);
     value->SetMaxBytes(4096);
     value->SetWordWrap(true);
-    auto scroll = new BScrollView("attribute editor", value, 0, false, true);
+    auto scroll = new Listi::AdaptiveScrollView("attribute editor", value, false);
     scroll->SetExplicitMinSize(BSize(0, 70));
     scroll->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, 100));
     save = new BButton("Save attribute", new BMessage(kSave));

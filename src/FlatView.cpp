@@ -1,8 +1,13 @@
 // SPDX-License-Identifier: MIT
 #include "ColumnRows.h"
+#include "AdaptiveColumnList.h"
 #include "FlatView.h"
 #include "Common.h"
 #include "FileSearch.h"
+#include "FileDrop.h"
+#include "JobSnapshot.h"
+#include "MainWindow.h"
+#include "MainWindowMenu.h"
 #include "NameFilter.h"
 #include "SearchWorker.h"
 #include "Shelf.h"
@@ -12,7 +17,12 @@
 #include <ColumnTypes.h>
 #include <GroupView.h>
 #include <LayoutBuilder.h>
+#include <MenuField.h>
+#include <MenuItem.h>
+#include <PopUpMenu.h>
+#include "WorkspaceLayout.h"
 #include <Message.h>
+#include <MessageFilter.h>
 #include <MessageRunner.h>
 #include <StorageDefs.h>
 #include <StringView.h>
@@ -21,6 +31,7 @@
 #include <Window.h>
 #include <deque>
 #include <exception>
+#include <stdexcept>
 #include <map>
 #include <string>
 #include <utility>
@@ -40,24 +51,106 @@ public:
   }
 };
 
-class FlatResults : public BColumnListView {
-  BButton *collect;
+class FlatContextClick : public BMessageFilter {
+  BColumnListView &list;
+  const int32 pane;
 
 public:
-  explicit FlatResults(BButton *action)
-      : BColumnListView("flat results", B_WILL_DRAW | B_NAVIGABLE,
+  FlatContextClick(BColumnListView &list, int32 pane)
+      : BMessageFilter(B_MOUSE_DOWN), list(list), pane(pane) {}
+  filter_result Filter(BMessage *click, BHandler **) override {
+    if (!(click->GetInt32("buttons", 0) & B_SECONDARY_MOUSE_BUTTON))
+      return B_DISPATCH_MESSAGE;
+    BPoint point;
+    if (click->FindPoint("where", &point) != B_OK)
+      return B_SKIP_MESSAGE;
+    if (auto *row = list.RowAt(point)) {
+      list.MakeFocus();
+      if (!row->IsSelected()) {
+        list.DeselectAll();
+        list.AddToSelection(row);
+      }
+      list.SetFocusRow(row);
+      list.SelectionChanged();
+      BMessage context(kFlatContext);
+      context.AddInt32("pane", pane);
+      context.AddPoint("point", list.ScrollView()->ConvertToScreen(point));
+      list.Window()->MessageReceived(&context);
+    }
+    return B_SKIP_MESSAGE;
+  }
+};
+
+class FlatResults : public AdaptiveColumnList {
+  BButton *collect;
+  const int32 pane;
+
+public:
+  FlatResults(BButton *action, int32 panel)
+      : AdaptiveColumnList("flat results", B_WILL_DRAW | B_NAVIGABLE,
                         B_FANCY_BORDER),
-        collect(action) {
+        collect(action), pane(panel) {
     AddColumn(new BStringColumn("Name", 230, 100, 1000, B_TRUNCATE_MIDDLE), 0);
     AddColumn(
         new BStringColumn("Relative folder", 360, 120, 1600, B_TRUNCATE_MIDDLE),
         1);
     SetSelectionMode(B_MULTIPLE_SELECTION_LIST);
+    SetInvocationMessage(new BMessage(kInvoke));
+    ScrollView()->AddFilter(new FlatContextClick(*this, pane));
   }
 
+  void NotifyPreview() {
+    if (Window()) {
+      BMessage changed(kPreviewSelection);
+      changed.AddInt32("pane", pane);
+      Window()->PostMessage(&changed);
+    }
+  }
+
+  Job SelectedEntries() const {
+    Job selection;
+    for (auto row = CurrentSelection(); row; row = CurrentSelection(row)) {
+      const auto &hit = static_cast<const FlatRow *>(row)->hit;
+      selection.sources.push_back(hit.path);
+      selection.expectedSources.emplace(hit.path, NodeIdentity{int32(hit.device), hit.node});
+    }
+    return selection;
+  }
+
+  void SelectVisible(uint32 command) {
+    if (command == kNone)
+      DeselectAll();
+    else {
+      for (int32 i = 0; i < CountRows(); ++i) {
+        auto *row = RowAt(i);
+        if (command == kInvert && row->IsSelected())
+          Deselect(row);
+        else
+          AddToSelection(row);
+      }
+    }
+    SelectionChanged();
+  }
+
+  bool InitiateDrag(BPoint point, bool) override {
+    try {
+      const auto selected = SelectedEntries();
+      BMessage drag = MakeFileDrag(selected.sources, selected.expectedSources);
+      DragMessage(&drag, BRect(point.x, point.y, point.x + 90, point.y + 22));
+      return true;
+    } catch (const std::exception &e) {
+      PostMainWindowNotice(e.what());
+      return false;
+    }
+  }
+
+  float ContentHeight() override {
+    return CountRows() > 0 ? (RowAt(0)->Height() + 1) * CountRows() : 0;
+  }
   void SelectionChanged() override {
     BColumnListView::SelectionChanged();
     collect->SetEnabled(CurrentSelection() != nullptr);
+    NotifyPreview();
   }
 };
 
@@ -109,6 +202,7 @@ class FlatView : public BGroupView {
   }
 
   void UpdateStatus() {
+    results->InvalidateLayout();
     std::string text = std::to_string(results->CountRows()) + " of " +
                        std::to_string(files.size()) + " files shown. " +
                        scanState;
@@ -122,6 +216,7 @@ class FlatView : public BGroupView {
   void StartScan() {
     generation->fetch_add(1);
     Listi::ClearColumnRows(*results);
+    results->NotifyPreview();
     files.clear();
     shelfStatus->SetText("");
     shelfStatus->SetToolTip("");
@@ -148,22 +243,22 @@ class FlatView : public BGroupView {
     UpdateStatus();
   }
 
+  void Open(const std::string &path) {
+    BMessage open(kOpenPaths);
+    open.AddString("path", path.c_str());
+    open.AddString("mode", "system");
+    owner.SendMessage(&open, (BHandler *)nullptr, 0);
+  }
+
   void Collect() {
-    std::vector<std::string> paths;
-    std::map<std::string, NodeIdentity> expected;
-    for (auto row = results->CurrentSelection(); row;
-         row = results->CurrentSelection(row)) {
-      const auto &hit = static_cast<FlatRow *>(row)->hit;
-      paths.push_back(hit.path);
-      expected.emplace(hit.path, NodeIdentity{int32(hit.device), hit.node});
-    }
-    if (paths.empty())
+    auto selected = results->SelectedEntries();
+    if (selected.sources.empty())
       return;
     std::string text;
     try {
       // Do not re-capture identities after the scan or consult the active pane.
       // Shelf validates the entire selected set before adding any references.
-      auto count = shelf->Add(paths, expected);
+      auto count = shelf->Add(selected.sources, selected.expectedSources);
       text = count ? std::to_string(count) + " added to Shelf."
                    : "Selection is already on the Shelf.";
       BMessage refresh(kRefreshShelf);
@@ -188,10 +283,20 @@ class FlatView : public BGroupView {
 
 public:
   FlatView(BMessenger target, std::shared_ptr<Shelf> collection,
-           const char *path)
+           const char *path, int32 pane)
       : BGroupView("flat view", B_VERTICAL, 5), rootPath(path), owner(target),
         shelf(std::move(collection)) {
     auto root = Line("flat root", (std::string("Folder: ") + path).c_str());
+    auto *modes = new BPopUpMenu("View");
+    for (int32 i = 0; i <= FlatMode; ++i) {
+      auto *choice = new BMessage(kGridMode);
+      choice->AddInt32("mode", i);
+      auto *item = new BMenuItem(ViewModeLabel(i), choice);
+      modes->AddItem(item);
+      item->SetTarget(owner);
+      item->SetMarked(i == FlatMode);
+    }
+    auto *display = new BMenuField("flat display mode", "", modes);
     filter = new BTextControl("flat filter", "Filter:", "", nullptr);
     filter->SetToolTip("Filter by file name or relative folder");
     filter->SetModificationMessage(new BMessage(kFilterChanged));
@@ -202,10 +307,13 @@ public:
         new BButton("cancel flat scan", "Stop scan", new BMessage(kSearchStop));
     collect = new BButton("add flat selection", "Add to Shelf",
                           new BMessage(kCollect));
-    results = new FlatResults(collect);
+    results = new FlatResults(collect, pane);
     BLayoutBuilder::Group<>(this)
         .SetInsets(5)
+        .AddGroup(B_HORIZONTAL, 8)
         .Add(root)
+        .Add(display)
+        .End()
         .AddGroup(B_HORIZONTAL, 8)
         .Add(filter)
         .Add(stop)
@@ -219,10 +327,20 @@ public:
     Colors();
   }
 
+  std::string SelectedFile() const {
+    auto *row = static_cast<FlatRow *>(results->CurrentSelection());
+    if (!row || results->CurrentSelection(row) || !SameSearchEntry(row->hit))
+      return {};
+    return row->hit.path;
+  }
+
+  Job SelectedEntries() const { return results->SelectedEntries(); }
+
   void AllAttached() override {
     BGroupView::AllAttached();
     filter->SetTarget(this);
     stop->SetTarget(this);
+    results->SetTarget(this);
     collect->SetTarget(this);
     if (!worker)
       StartScan();
@@ -247,8 +365,71 @@ public:
       needle = filter->Text();
       for (auto &file : files)
         UpdateRow(file);
+      results->NotifyPreview();
       UpdateStatus();
       break;
+    case kAll:
+    case kNone:
+    case kInvert:
+      results->SelectVisible(message->what);
+      break;
+    case kFlatContext: {
+      auto *first = results->CurrentSelection();
+      if (!first)
+        break;
+      BPopUpMenu menu("Flat View file actions", false, false);
+      auto *open = new BMenuItem("Open", new BMessage(kOpenSystem));
+      open->SetEnabled(results->CurrentSelection(first) == nullptr);
+      menu.AddItem(open);
+      menu.AddItem(new BMenuItem("Copy", new BMessage(kClipboardCopy)));
+      menu.AddItem(new BMenuItem("Cut", new BMessage(kClipboardCut)));
+      menu.AddItem(new BMenuItem("Copy paths", new BMessage(kCopyPaths)));
+      menu.AddSeparatorItem();
+      menu.AddItem(new BMenuItem("Add to Shelf", new BMessage(kAddToShelf)));
+      if (auto *choice = menu.Go(message->GetPoint("point", BPoint()), false, true, false))
+        Window()->MessageReceived(choice->Message());
+      break;
+    }
+    case kInvoke: {
+      auto *row = static_cast<FlatRow *>(results->FocusRow());
+      if (!row)
+        break;
+      if (!SameSearchEntry(row->hit)) {
+        shelfStatus->SetText("The selected file changed. Refresh the view.");
+        break;
+      }
+      Open(row->hit.path);
+      break;
+    }
+    case kOpenSystem:
+    case kClipboardCopy:
+    case kClipboardCut:
+    case kCopyPaths: {
+      try {
+        auto selected = results->SelectedEntries();
+        if (message->what == kOpenSystem) {
+          if (selected.sources.size() != 1)
+            throw std::runtime_error("Select exactly one file.");
+          FreezeLocalJob(selected);
+          Open(selected.sources.front());
+        } else {
+          if (message->what == kCopyPaths)
+            PutPathsAsText(selected.sources);
+          else
+            PutFileClipboard(selected.sources, message->what == kClipboardCut,
+                             be_clipboard, selected.expectedSources);
+          const char *notice = message->what == kCopyPaths ? "Paths copied as text."
+                               : message->what == kClipboardCut ? "Files marked for moving."
+                                                               : "Files copied to clipboard.";
+          shelfStatus->SetText(notice);
+          shelfStatus->SetToolTip(notice);
+        }
+      } catch (const std::exception &e) {
+        shelfStatus->SetText(e.what());
+        shelfStatus->SetToolTip(e.what());
+      }
+      break;
+    }
     case kAddToShelf:
     case kCollect:
       Collect();
@@ -317,8 +498,16 @@ public:
 };
 }
 
+Job FlatSelection(const BView &view) {
+  return static_cast<const FlatView &>(view).SelectedEntries();
+}
+
 BView *CreateFlatView(BMessenger owner, std::shared_ptr<Shelf> shelf,
-                        const char *root) {
-  return new FlatView(owner, std::move(shelf), root);
+                      const char *root, int32 pane) {
+  return new FlatView(owner, std::move(shelf), root, pane);
+}
+
+std::string FlatSelectedFile(const BView &view) {
+  return static_cast<const FlatView &>(view).SelectedFile();
 }
 }

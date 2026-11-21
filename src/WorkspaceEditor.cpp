@@ -12,7 +12,7 @@
 #include <MenuField.h>
 #include <MenuItem.h>
 #include <PopUpMenu.h>
-#include <ScrollView.h>
+#include "AdaptiveScrollView.h"
 #include <StringItem.h>
 #include <StringView.h>
 #include <TabView.h>
@@ -43,7 +43,7 @@ constexpr uint32 kReset = 'wrst';
 constexpr uint32 kSave = 'wsav';
 
 BScrollView *ScrollList(const char *name, BListView *list) {
-  auto scroll = new BScrollView(name, list, 0, false, true, B_FANCY_BORDER);
+  auto scroll = new Listi::AdaptiveScrollView(name, list, true);
   scroll->SetExplicitMinSize(BSize(155, 125));
   scroll->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
   return scroll;
@@ -66,6 +66,8 @@ void AddLabel(BListView *list, const char *label) {
 }
 
 void SelectRow(BListView *list, int32 index) {
+  if (list->Parent())
+    list->Parent()->InvalidateLayout();
   if (index >= 0 && index < list->CountItems()) {
     list->Select(index);
     list->ScrollToSelection();

@@ -64,7 +64,7 @@ bool SearchResultsView::Before(HitRow *left, HitRow *right,
 }
 
 SearchResultsView::SearchResultsView(BMessenger target, int32 which)
-    : BColumnListView("search results", B_WILL_DRAW | B_NAVIGABLE,
+    : AdaptiveColumnList("search results", B_WILL_DRAW | B_NAVIGABLE,
                       B_FANCY_BORDER),
       owner(target), pane(which) {
   // Haiku starts an unjoined native sort thread even on initial attachment.
@@ -91,6 +91,7 @@ void SearchResultsView::ShowOriginal(const SearchHit &hit) {
 }
 
 void SearchResultsView::Add(const SearchHit &hit) {
+  InvalidateLayout();
   auto row = new HitRow(hit, sequence++);
   if (!order) {
     AddRow(row);
@@ -153,6 +154,7 @@ const SearchHit *SearchResultsView::SelectedHit() {
 }
 
 void SearchResultsView::Reconcile(const std::vector<SearchHit> &hits) {
+  InvalidateLayout();
   using Key = std::tuple<std::string, int64, int64>;
   std::set<Key> next;
   for (const auto &hit : hits)

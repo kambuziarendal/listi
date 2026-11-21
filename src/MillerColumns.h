@@ -17,6 +17,7 @@ public:
   void MakeFocus(bool = true) override;
   void MessageReceived(BMessage *) override;
 
+  float ContentWidth(float viewport) const;
   void SetLocation(const std::string &);
   void Refresh();
   void RedrawRows();

@@ -92,6 +92,15 @@ void FileOperationFlow::ShowBulkRename(const Pane &source) {
   bulkRenameWindow = OpenBulkRenameWindow(std::move(job), owner);
 }
 
+void FileOperationFlow::SubmitTransfer(Job job) {
+  auto transfer = PrepareTransfer(std::move(job));
+  if (transfer.action == Action::MoveArchive ||
+      transfer.action == Action::EditArchive)
+    ConfirmArchiveAddition(transfer);
+  else
+    queue.Enqueue(transfer);
+}
+
 void FileOperationFlow::BeginOperation(Action action, const Pane &source,
                                        const Pane &target, bool singlePane) {
   if (!CanBegin())
@@ -143,12 +152,7 @@ void FileOperationFlow::BeginOperation(Action action, const Pane &source,
     return;
   }
   if (isTransfer) {
-    auto transfer = PrepareTransfer(std::move(job));
-    if (transfer.action == Action::MoveArchive ||
-        transfer.action == Action::EditArchive)
-      ConfirmArchiveAddition(transfer);
-    else
-      queue.Enqueue(transfer);
+    SubmitTransfer(std::move(job));
     return;
   }
   FreezeLocalJob(job);

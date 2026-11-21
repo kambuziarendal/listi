@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "FileSearch.h"
+#include "Common.h"
+#include "FileClipboard.h"
 #include "FlatView.h"
 #include "SearchWorker.h"
 #include "SearchWindow.h"
@@ -102,10 +104,25 @@ std::set<std::string> Folders(const BColumnListView &results) {
   return folders;
 }
 
+class TestWindow : public BWindow {
+public:
+  std::string opened;
+  int contextClicks = 0;
+  TestWindow() : BWindow(BRect(50, 50, 700, 450), "Test lister", B_TITLED_WINDOW,
+                         B_ASYNCHRONOUS_CONTROLS) {}
+  void MessageReceived(BMessage *message) override {
+    if (message->what == kFlatContext)
+      ++contextClicks;
+    else if (message->what == kOpenPaths)
+      opened = message->GetString("path", "");
+    else
+      BWindow::MessageReceived(message);
+  }
+};
+
 BMessenger HostFlatView(const std::shared_ptr<Shelf> &shelf, const char *path) {
-  auto *window = new BWindow(BRect(50, 50, 700, 450), "Test lister",
-                             B_TITLED_WINDOW, B_ASYNCHRONOUS_CONTROLS);
-  BLayoutBuilder::Group<>(window, B_VERTICAL).Add(CreateFlatView(BMessenger(window), shelf, path));
+  auto *window = new TestWindow();
+  BLayoutBuilder::Group<>(window, B_VERTICAL).Add(CreateFlatView(BMessenger(window), shelf, path, 0));
   BMessenger host(window);
   window->Show();
   return host;
@@ -172,6 +189,8 @@ int main() {
           rows->AddToSelection(row);
       }
       rows->SelectionChanged();
+      Check(FlatSelectedFile(*window.FindView("flat view")) == first,
+            "Inspector selection uses the exact original path");
     }
     SetFilter(window, "KITCHEN");
     return true;
@@ -181,6 +200,7 @@ int main() {
             auto rows = Results(window);
             return rows && rows->CountRows() == 1 &&
                    !rows->CurrentSelection() &&
+                   FlatSelectedFile(*window.FindView("flat view")).empty() &&
                    Folders(*rows) == std::set<std::string>{"Kitchen"};
           });
         }),
@@ -197,6 +217,8 @@ int main() {
             rows->AddToSelection(rows->RowAt(0));
             rows->AddToSelection(rows->RowAt(1));
             rows->SelectionChanged();
+            Check(FlatSelectedFile(*window.FindView("flat view")).empty(),
+                  "Inspector clears for multiple selected files");
             auto button =
                 static_cast<BButton *>(window.FindView("add flat selection"));
             button->Invoke();
@@ -212,6 +234,77 @@ int main() {
           return paths == std::set<std::string>{first, second};
         }),
         "multi-selection adds the exact originals to the shared Shelf");
+
+  Check(Inspect(flat, [&](BWindow &window) {
+    auto *view = window.FindView("flat view");
+    auto *rows = Results(window);
+    BMessage none(kNone), all(kAll), invert(kInvert), copy(kClipboardCopy);
+    view->MessageReceived(&none);
+    if (rows->CurrentSelection())
+      return false;
+    view->MessageReceived(&all);
+    auto selected = FlatSelection(*view);
+    if (std::set<std::string>(selected.sources.begin(), selected.sources.end()) !=
+        std::set<std::string>{first, second})
+      return false;
+    view->MessageReceived(&invert);
+    if (rows->CurrentSelection())
+      return false;
+    for (int32 i = 0; i < rows->CountRows(); ++i) {
+      auto *row = rows->RowAt(i);
+      if (BString(static_cast<BStringField *>(row->GetField(1))->String()) == "Kitchen")
+        rows->SetFocusRow(row, true);
+    }
+    if (!be_clipboard->Lock())
+      return false;
+    const BMessage previous(*be_clipboard->Data());
+    be_clipboard->Unlock();
+    view->MessageReceived(&copy);
+    if (!be_clipboard->Lock())
+      return false;
+    const auto copied = ReadFileClipboard(*be_clipboard->Data());
+    *be_clipboard->Data() = previous;
+    be_clipboard->Commit();
+    be_clipboard->Unlock();
+    rows->ItemInvoked();
+    return copied.size() == 1 && copied.front().path == second;
+  }), "selection commands, native file clipboard and invocation use the selected nested file");
+  Check(Await([&] { return Inspect(flat, [&](BWindow &window) {
+    return static_cast<TestWindow &>(window).opened == second;
+  }); }), "double-click dispatches the actual nested file to the opener");
+
+  auto rightClickRootFile = [&](bool selectAll) {
+    return Inspect(flat, [&](BWindow &window) {
+      auto *rows = Results(window);
+      if (selectAll) {
+        BMessage all(kAll);
+        window.FindView("flat view")->MessageReceived(&all);
+      }
+      for (int32 i = 0; i < rows->CountRows(); ++i) {
+        auto *row = rows->RowAt(i);
+        BRect rect;
+        if (BString(static_cast<BStringField *>(row->GetField(1))->String()) == "." &&
+            rows->GetRowRect(row, &rect)) {
+          BMessage click(B_MOUSE_DOWN);
+          click.AddInt32("buttons", B_SECONDARY_MOUSE_BUTTON);
+          click.AddPoint("where", BPoint(10, (rect.top + rect.bottom) / 2));
+          return window.PostMessage(&click, rows->ScrollView()) == B_OK;
+        }
+      }
+      return false;
+    });
+  };
+  auto contextSelection = [&](int clicks, const std::set<std::string> &expected) {
+    return Await([&] { return Inspect(flat, [&](BWindow &window) {
+      const auto selected = FlatSelection(*window.FindView("flat view"));
+      return static_cast<TestWindow &>(window).contextClicks == clicks &&
+             std::set<std::string>(selected.sources.begin(), selected.sources.end()) == expected;
+    }); });
+  };
+  Check(rightClickRootFile(false) && contextSelection(1, {first}),
+        "right-clicking an unselected row targets that file only");
+  Check(rightClickRootFile(true) && contextSelection(2, {first, second}),
+        "right-clicking within a multi-selection preserves both file references");
 
   shelf->Clear();
   rename(second.c_str(), (second + ".old").c_str());

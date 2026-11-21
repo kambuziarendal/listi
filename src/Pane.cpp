@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "Pane.h"
+#include "AdaptiveScrollView.h"
+#include "FlatView.h"
 #include "PanelAppearance.h"
 #include "DirectoryScanner.h"
 #include "PropertiesWindow.h"
@@ -84,46 +86,8 @@ public:
 };
 constexpr uint32 kExpireProgress = 'expr', kActivityFrame = 'actf',
                  kCheckScanDelivery = 'scdl', kColumnNavigate = 'mnav';
-constexpr int32 kRememberViewItem = ViewModeCount + 1;
-constexpr int32 kForgetViewItem = ViewModeCount + 2;
-
-class GridScroll : public BScrollView {
-  FileGrid *grid;
-  Pane *pane;
-  BRect laidOutBounds;
-  float fullWidth = 0;
-  bool laidOut = false, barVisible = true;
-
-public:
-  GridScroll(FileGrid *target, Pane *owner)
-      : BScrollView("icons scroll", target, 0, false, true), grid(target),
-        pane(owner) {}
-  void DoLayout() override {
-    auto bar = ScrollBar(B_VERTICAL);
-    const bool resized = !laidOut || laidOutBounds != Bounds();
-    if (resized) {
-      BScrollView::DoLayout();
-      fullWidth = grid->Bounds().Width() + bar->PreferredSize().Width();
-      laidOutBounds = Bounds();
-      laidOut = true;
-    }
-    bool show = !pane->IsSinglePane() ||
-                grid->ContentHeight(fullWidth) > grid->Bounds().Height() + 1;
-    if (resized || show != barVisible) {
-      if (!resized)
-        BScrollView::DoLayout();
-      barVisible = show;
-      if (!show)
-        grid->ResizeTo(fullWidth, grid->Bounds().Height());
-    }
-    if (show == bar->IsHidden(this)) {
-      if (show)
-        bar->Show();
-      else
-        bar->Hide();
-    }
-  }
-};
+constexpr int32 kRememberViewItem = FlatMode + 2;
+constexpr int32 kForgetViewItem = FlatMode + 3;
 }
 Pane::Pane(int32 number, const Preferences &p,
            std::shared_ptr<Listi::Shelf> sharedShelf)
@@ -160,16 +124,17 @@ Pane::Pane(int32 number, const Preferences &p,
   list = CreateFileDetails(this, &entries, p);
   list->SetExplicitMinSize(BSize(220, 96));
   grid = CreateFileGrid(this, &entries);
-  auto gridScroll = new GridScroll(grid, this);
+  auto gridScroll = new Listi::AdaptiveScrollView("icons scroll", grid, false, true,
+      [this](float width) { return BSize(0, grid->ContentHeight(width - 1)); });
   columns = new MillerColumns(this, &entries);
-  auto columnScroll = new BScrollView("Miller horizontal scroll", columns, 0,
-                                      true, false, B_NO_BORDER);
+  auto columnScroll = new Listi::AdaptiveScrollView("Miller horizontal scroll", columns, true, false,
+      [this](float width) { return BSize(columns->ContentWidth(width), 0); }, B_NO_BORDER);
   cards = new BCardView("panel views");
   cards->AddChild(list);
   cards->AddChild(gridScroll);
   cards->AddChild(columnScroll);
   auto modes = new BPopUpMenu("View");
-  for (int32 i = 0; i < ViewModeCount; ++i) {
+  for (int32 i = 0; i <= FlatMode; ++i) {
     auto message = new BMessage(kGridMode);
     message->AddInt32("mode", i);
     modes->AddItem(new BMenuItem(ViewModeLabel(i), message));
@@ -361,6 +326,7 @@ void Pane::SetDisplayMode(int32 value) {
   auto menu = display->Menu();
   for (int i = 0; i < ViewModeCount; ++i)
     menu->ItemAt(i)->SetMarked(mode == i);
+  menu->ItemAt(FlatMode)->SetEnabled(path[0] == '/' && !Listi::IsVirtual(path.String()));
   menu->Superitem()->SetLabel(menu->ItemAt(mode)->Label());
   menu->ItemAt(kRememberViewItem)
       ->SetMarked(prefs.folderModes.count(path.String()));
@@ -430,7 +396,6 @@ void Pane::SetWorkspace(const Preferences &settings) {
     // Keep the filter directly adjacent to the file list on either side.
     layout->AddView(filterAtBottom ? 3 : 2, filterRow, 0.0f);
   }
-  list->SetSinglePane(prefs.SinglePane());
   if (chromeVisible == einn) {
     chromeVisible = !einn;
     for (BView *control :
@@ -817,8 +782,13 @@ void Pane::MessageReceived(BMessage *m) {
     break;
   }
   case kGridMode: {
-    attributeDetails = false;
     auto requestedMode = m->GetInt32("mode", 0);
+    if (requestedMode == FlatMode) {
+      Activate();
+      Window()->PostMessage(Listi::kFlatView);
+      break;
+    }
+    attributeDetails = false;
     prefs.SetPaneMode(id, requestedMode);
     const bool remembered = prefs.folderModes.count(path.String());
     if (remembered) {

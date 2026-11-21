@@ -18,6 +18,8 @@ public:
   FileOperationFlow(InlineAction &actionArea, OperationQueue &queue,
                     ClipboardFlow &clipboard, BMessenger owner);
 
+  void SubmitTransfer(Job job);
+
   // Completion messages submit their frozen job, never the current pane selection.
   bool Handle(const BMessage &message, const Pane &source, const Pane &other,
               bool singlePane);

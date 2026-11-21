@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT
 #pragma once
-#include <TextView.h>
+#include "ScrollTextView.h"
 // BTextView stores glyph colours independently of BView's HighColor.
 // Refresh existing text runs as well as the background on a live theme change.
-class ThemeTextView : public BTextView {
+class ThemeTextView : public ScrollTextView {
 public:
   ThemeTextView(const char *name, color_which background,
                 color_which foreground)
-      : BTextView(name), foreground(foreground) {
+      : ScrollTextView(name), foreground(foreground) {
     SetViewUIColor(background);
     SetLowUIColor(background);
     SetHighUIColor(foreground);

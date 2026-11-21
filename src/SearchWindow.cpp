@@ -456,6 +456,7 @@ public:
         Filters({});
       }
       results->Clear();
+      results->InvalidateLayout();
       show->SetEnabled(false);
       selected->SetText("");
       selected->SetToolTip("");
@@ -546,6 +547,7 @@ public:
       resultRevision = 0;
       pending.clear();
       results->Clear();
+      results->InvalidateLayout();
       show->SetEnabled(false);
       selected->SetText("");
       selected->SetToolTip("");

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+#include "AdaptiveScrollView.h"
 #include "JobResultsView.h"
 #include "OperationQueue.h"
 #include "ThemeTextView.h"
@@ -58,7 +59,7 @@ JobResultsView::JobResultsView(OperationQueue *owner)
   text->MakeEditable(false);
   text->MakeSelectable(true);
   text->SetWordWrap(true);
-  auto scroll = new BScrollView("history-scroll", text, 0, false, true);
+  auto scroll = new Listi::AdaptiveScrollView("history-scroll", text, false);
   scroll->SetExplicitMinSize(BSize(260, 85));
   scroll->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, 135));
   BLayoutBuilder::Group<>(this, B_VERTICAL, 3)

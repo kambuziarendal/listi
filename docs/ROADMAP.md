@@ -105,9 +105,8 @@ are session information, not a persistent audit log or an undo mechanism.
 - **Direct Paste:** ordinary Paste in a local file panel now accepts file
   references, text and images. Text and images open a filename prompt; Paste
   in an editable field retains its normal meaning.
-- **Flat View:** files from a local folder tree appear in one read-only list
-  with relative parent folders. Filter, stop the scan or collect selected
-  originals on the Shelf. Multi-folder rename is still a future extension.
+- **Flat View:** files from a local folder tree appear in one recursive list
+  with relative parent folders. Inspect, open or copy selected originals, or collect them on the Shelf. Multi-folder rename is still a future extension.
 - **Bulk rename:** dependency-ordered chains, swaps, exact row overrides and
   guarded undo of the last eligible batch in this session. Regex, date/time
   and typed BFS placeholders remain possible extensions.

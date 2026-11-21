@@ -12,7 +12,6 @@ public:
   virtual void Sort(PaneSort) = 0;
   virtual void SetActive(bool) = 0;
   virtual bool CancelSelectionGesture() = 0;
-  virtual void SetSinglePane(bool) = 0;
   virtual void Apply(const Preferences &) = 0;
   virtual void SetAttributes(const std::vector<std::string> &) = 0;
   virtual void Refresh() = 0;

@@ -181,19 +181,25 @@ bool WorkspaceSplit::ActivateFiles(int pane) {
 
 bool WorkspaceSplit::AllowsCommand(uint32 action) const {
   switch (action) {
-  case kCopy: case kMove: case kSame: case kCreateLink: case kDuplicate:
+  case kCopy: case kMove:
+    return (Panel(source).Current() == PanelPage::Files ||
+            Panel(source).Current() == PanelPage::Flat) &&
+           Panel(1 - source).Current() == PanelPage::Files;
+  case kSame: case kCreateLink: case kDuplicate:
   case kCompareFolders: case kCreateArchive: case kExtractArchive:
     return Panel(0).Current() == PanelPage::Files &&
            Panel(1).Current() == PanelPage::Files;
-  case kClipboardCopy: case kClipboardCut: case kClipboardPaste: case kCopyPaths:
+  case kClipboardPaste:
   case kClipboardSaveText: case kClipboardSaveImage: case kUndoBulkRename:
   case kEdit: case kEditExternally: case kView: case kPreviewOtherPanel:
-  case kOpenWith: case kOpenSystem: case kProperties:
+  case kOpenWith: case kProperties:
   case kDelete: case kRestore: case kPermanentDelete: case kRename:
   case kBulkRename: case kMkdir: case kAddArchive: case kRemoveArchive:
-  case kAll: case kNone: case kInvert: case kSelectType: case kSelectPattern:
+  case kSelectType: case kSelectPattern:
   case Listi::kApplyPattern: case kNetwork:
     return Panel(source).Current() == PanelPage::Files;
+  case kAll: case kNone: case kInvert:
+  case kClipboardCopy: case kClipboardCut: case kCopyPaths: case kOpenSystem:
   case kGridMode:
   case Listi::kAddToShelf:
   case Listi::kFlatView:
@@ -286,19 +292,17 @@ void WorkspaceSplit::HandlePageCommand(const BMessage &message) {
   }
 }
 
-bool WorkspaceSplit::CanToggleFlat() const {
+bool WorkspaceSplit::CanOpenFlat() const {
   const auto &panel = Panel(source);
   const char *path = panel.Files().Path();
   return panel.Current() == PanelPage::Flat ||
          (panel.Current() == PanelPage::Files && path[0] == '/' && !IsVirtual(path));
 }
 
-void WorkspaceSplit::ToggleFlat(const std::shared_ptr<Shelf> &shelf) {
-  if (!CanToggleFlat())
+void WorkspaceSplit::OpenFlat(const std::shared_ptr<Shelf> &shelf) {
+  if (!CanOpenFlat())
     return;
-  if (Panel(source).Current() == PanelPage::Flat)
-    ClosePanelTool(source);
-  else {
+  if (Panel(source).Current() != PanelPage::Flat) {
     Panel(source).OpenFlat(shelf);
     RefreshAndFocus();
   }
@@ -422,8 +426,13 @@ bool WorkspaceSplit::HandlePanelCommand(BMessage *m) {
     FocusFilter();
     break;
   case kGridMode:
-    if (Panel(source).Current() == PanelPage::Flat)
+    if (m->GetInt32("mode", -1) == FlatMode)
+      break; // Already in Flat View.
+    if (Panel(source).Current() == PanelPage::Flat) {
       ClosePanelTool(source);
+      if (m->GetInt32("mode", -1) == Panel(source).Files().CurrentView())
+        break;
+    }
     Panel(source).Files().MessageReceived(m);
     break;
   default:

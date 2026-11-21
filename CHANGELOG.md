@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.38.0-1 alpha test candidate
+
+- Choose Flat View in the panel’s view selector. Select a file to inspect it, double-click to open it, or select multiple originals to copy.
+- File panels reclaim space from scrollbars when their contents fit.
+
 ## [0.37.1-2 alpha test candidate](https://github.com/kambuziarendal/listi/releases/tag/v0.37.1-2)
 
 - Connect suggests the first readable standard SSH identity in your home directory. You can still enter a custom path. Connect prompts locally to unlock encrypted SSH keys. Text entry opens with a blinking insertion point.

@@ -370,6 +370,10 @@ int main(int argc, char **argv) {
       const auto otherPage = other->Current();
       const auto windows = app.CountWindows();
       auto *flat = menu->FindItem("Flat View");
+      auto *modeField = dynamic_cast<BMenuField *>(active->FindView("display mode"));
+      assert(modeField && modeField->Menu()->FindItem("Flat View"));
+      if (index == 1)
+        flat = modeField->Menu()->FindItem("Flat View");
       assert(flat && flat->IsEnabled() && static_cast<BInvoker *>(flat)->Invoke() == B_OK);
       waitFor([&] {
         auto *rows = dynamic_cast<BColumnListView *>(active->FindView("flat results"));
@@ -378,6 +382,12 @@ int main(int argc, char **argv) {
       assert(app.CountWindows() == windows && other->Current() == otherPage);
       assert(!other->FindView("flat results") && active->Files().IsHidden());
       if (mode == Workspace::tviskipt && index == 0) {
+        auto *split = dynamic_cast<Listi::WorkspaceSplit *>(active->Parent());
+        assert(split);
+        const bool inspectorWasVisible = split->InspectorVisible();
+        if (!inspectorWasVisible)
+          send(kPreviewToggle);
+        assert(split->InspectorVisible());
         auto *filter = dynamic_cast<BTextControl *>(active->FindView("flat filter"));
         assert(filter && filter->ModificationMessage());
         filter->SetText("another");
@@ -387,6 +397,26 @@ int main(int argc, char **argv) {
         waitFor([&] { return rows->CountRows() == 1; });
         rows->SetFocusRow(rows->RowAt(0), true);
         assert(rows->CurrentSelection());
+        const auto nestedPath = std::string(active->Files().Path()) + "/elsewhere/another.zip";
+        waitFor([&] { return split->Inspector().File() == nestedPath; });
+
+        char copyTarget[] = "/boot/home/Listi-flat-copy-XXXXXX";
+        assert(mkdtemp(copyTarget));
+        const std::string priorTarget = rightPane->Path();
+        rightPane->Navigate(copyTarget);
+        waitFor([&] { return !rightPane->IsScanning(); });
+        assert(static_cast<BInvoker *>(item(kCopy))->Invoke() == B_OK);
+        const std::string copy = std::string(copyTarget) + "/another.zip";
+        waitFor([&] {
+          char bytes[sizeof(emptyZip)];
+          std::ifstream file(copy, std::ios::binary);
+          return file.read(bytes, sizeof(bytes)) && !memcmp(bytes, emptyZip, sizeof(bytes)) &&
+                 file.peek() == std::ifstream::traits_type::eof();
+        });
+        assert(access((std::string(copyTarget) + "/visible.txt").c_str(), F_OK) != 0);
+        rightPane->Navigate(priorTarget.c_str());
+        waitFor([&] { return !rightPane->IsScanning(); });
+        assert(unlink(copy.c_str()) == 0 && rmdir(copyTarget) == 0);
 
         const auto newFile = otherFolder + "/another-new.txt";
         assert(std::ofstream(newFile) << "new since the snapshot");
@@ -399,11 +429,16 @@ int main(int argc, char **argv) {
         });
         assert(std::string(filter->Text()) == "another");
         assert(!rows->CurrentSelection() && !rows->FocusRow());
+        waitFor([&] { return split->Inspector().File().empty(); });
+        if (!inspectorWasVisible)
+          send(kPreviewToggle);
         assert(unlink(newFile.c_str()) == 0);
       }
-      BMessage closeFlat(Listi::kClosePanelPage);
-      closeFlat.AddInt32("pane", index);
-      window->MessageReceived(&closeFlat);
+      auto *modeFieldFlat = dynamic_cast<BMenuField *>(active->FindView("flat display mode"));
+      assert(modeFieldFlat && modeFieldFlat->Menu()->FindItem("Flat View")->IsMarked());
+      auto *restore = modeFieldFlat->Menu()->ItemAt(active->Files().CurrentView());
+      assert(static_cast<BInvoker *>(restore)->Invoke() == B_OK);
+      waitFor([&] { return active->Current() == Page::Files; });
       assert(active->Current() == Page::Files && !active->Files().IsHidden());
       assert(!active->FindView("flat results") && pane->Selected() == selected);
       if (index == 1)

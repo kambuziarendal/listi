@@ -170,7 +170,7 @@ filtering and frozen Shelf selection, and stops a deliberately paused scan.
 For a manual workspace check, select files in either panel, set a panel filter,
 and choose **View > File view > Flat View**. Confirm that results appear in
 that panel without opening a window, and the opposite panel remains usable.
-Close the tab and check that the original selection and filter are restored.
+Choose the original view in the panel selector and check that its selection and filter are restored.
 
 ### BFS attribute columns
 

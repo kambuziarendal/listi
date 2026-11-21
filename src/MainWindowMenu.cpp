@@ -107,12 +107,11 @@ void MainWindowMenu::AddViewMenu() {
     choice->AddInt32("mode", i);
     fileView->AddItem(new BMenuItem(ViewModeLabel(i), choice));
   }
+  flatViewItem = AddCommand(fileView, ViewModeLabel(FlatMode), Listi::kFlatView);
   auto resetView = new BMessage(kGridMode);
   resetView->AddInt32("mode", -1);
   fileView->AddSeparatorItem();
   fileView->AddItem(new BMenuItem("Use workspace default", resetView));
-  fileView->AddSeparatorItem();
-  flatViewItem = AddCommand(fileView, "Flat View", Listi::kFlatView);
   viewMenu->AddItem(fileView);
   bankToggle = AddCommand(viewMenu, "Show function buttons", kToggleBank);
   compactActions = new BMenu("Function actions");

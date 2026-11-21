@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+#include "AdaptiveScrollView.h"
 #include "ImagePreview.h"
 #include "ViewVisibility.h"
 #include "BitmapMailbox.h"
@@ -389,8 +390,9 @@ ImagePreview::ImagePreview(bool standalone)
   text->SetFontAndColor(be_fixed_font);
   text->MakeEditable(false);
   text->SetWordWrap(true);
+  text->SetInsets(4, 3, 4, 3);
   text->SetResizingMode(B_FOLLOW_ALL);
-  textScroll = new BScrollView("preview scroll", text, 0, false, true);
+  textScroll = new Listi::AdaptiveScrollView("preview scroll", text, false);
   AddChild(textScroll);
   textScroll->Hide();
 
@@ -801,7 +803,6 @@ void ImagePreview::LayoutControls() {
   }
   textScroll->MoveTo(8, 35);
   textScroll->ResizeTo(std::max(32.f, width - 16), std::max(32.f, height - 70));
-  text->SetTextRect(text->Bounds().OffsetToCopy(0, 0).InsetByCopy(4, 3));
   const float buttonTop = height - 44 - previous->Bounds().Height();
   previous->MoveTo(12, buttonTop);
   next->MoveTo(20 + previous->Bounds().Width(), buttonTop);

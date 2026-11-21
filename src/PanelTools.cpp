@@ -17,7 +17,7 @@ PanelTools::PanelTools(int32 index, Pane &list)
   pages[0] = &files;
   tabs = new BGroupView(B_HORIZONTAL, 2);
   tabs->SetName("panel tabs");
-  const char *labels[] = {"Files", "Search", "Preview", "Flat View"};
+  const char *labels[] = {"Files", "Search", "Preview"};
   for (int32 i = 0; i < int32(buttons.size()); ++i) {
     auto *choose = new BMessage(kPanelPage);
     choose->AddInt32("pane", pane);
@@ -99,7 +99,7 @@ void PanelTools::FocusCurrent() {
 void PanelTools::OpenFlat(const std::shared_ptr<Shelf> &shelf) {
   if (current == PanelPage::Files)
     Open(PanelPage::Flat,
-         CreateFlatView(BMessenger(Window()), shelf, files.Path()));
+         CreateFlatView(BMessenger(Window()), shelf, files.Path(), pane));
 }
 
 bool PanelTools::OpenSearch(const BMessage &store) {
@@ -134,6 +134,8 @@ void PanelTools::UpdatePreview(const PanelTools &opposite) {
 }
 
 std::string PanelTools::SelectedFile() const {
+  if (current == PanelPage::Flat)
+    return FlatSelectedFile(*Page(current));
   return current == PanelPage::Files ? files.SelectedPath() : "";
 }
 
@@ -166,12 +168,12 @@ void PanelTools::ShowPage(PanelPage page) {
 
 void PanelTools::UpdateTabs() {
   const bool otherTools = Page(PanelPage::Search) || Page(PanelPage::Preview);
-  SetViewVisible(tabs, current == PanelPage::Flat || (toolsEnabled && otherTools));
+  SetViewVisible(tabs, toolsEnabled && otherTools);
   for (size_t i = 0; i < buttons.size(); ++i) {
     const auto page = PanelPage(i);
-    const bool available = toolsEnabled || page == PanelPage::Files || page == PanelPage::Flat;
-    SetViewVisible(buttons[i], pages[i] && available);
-    buttons[i]->SetValue(i == size_t(current) ? B_CONTROL_ON : B_CONTROL_OFF);
+    SetViewVisible(buttons[i], pages[i] != nullptr);
+    const auto selectedTab = current == PanelPage::Flat ? PanelPage::Files : current;
+    buttons[i]->SetValue(page == selectedTab ? B_CONTROL_ON : B_CONTROL_OFF);
   }
   closeButton->SetEnabled(current != PanelPage::Files);
 }

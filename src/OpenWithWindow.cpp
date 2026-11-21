@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "OpenWith.h"
 #include <Button.h>
-#include <ColumnListView.h>
+#include "AdaptiveColumnList.h"
 #include <ColumnTypes.h>
 #include <FilePanel.h>
 #include <LayoutBuilder.h>
@@ -103,7 +103,7 @@ public:
                 B_AUTO_UPDATE_SIZE_LIMITS) {
     auto location = Line("open path", path.c_str());
     type = Line("open type", "Reading file type...");
-    apps = new BColumnListView("open applications", B_WILL_DRAW | B_NAVIGABLE,
+    apps = new Listi::AdaptiveColumnList("open applications", B_WILL_DRAW | B_NAVIGABLE,
                                B_FANCY_BORDER);
     apps->AddColumn(
         new BStringColumn("Application", 210, 90, 600, B_TRUNCATE_END), 0);
@@ -197,6 +197,7 @@ public:
       scope->SetToolTip(explanation.c_str());
       for (auto &app : info.applications)
         apps->AddRow(new AppRow(app, info));
+      apps->InvalidateLayout();
       if (apps->CountRows())
         apps->AddToSelection(apps->RowAt(0));
       Status(
@@ -258,6 +259,7 @@ public:
         }
         auto row = new AppRow(*delivery->chosen, delivery->info);
         apps->AddRow(row);
+        apps->InvalidateLayout();
         apps->DeselectAll();
         apps->AddToSelection(row);
         delivery->chosen.reset();

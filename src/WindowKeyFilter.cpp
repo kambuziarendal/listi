@@ -105,8 +105,13 @@ filter_result WindowKeyFilter::Filter(BMessage *m, BHandler **target) {
   if (!text && (modifiers & B_COMMAND_KEY) && !(modifiers & B_SHIFT_KEY) &&
       strchr("cCxXvV", raw) && raw != 0) {
     auto pane = OwningPane(window ? window->CurrentFocus() : nullptr);
-    if (!pane)
+    if (!pane) {
+      for (auto *view = window ? window->CurrentFocus() : nullptr; view; view = view->Parent()) {
+        if (view->Name() && !strcmp(view->Name(), "flat results"))
+          return B_DISPATCH_MESSAGE;
+      }
       return B_SKIP_MESSAGE;
+    }
   }
   if (bytes[0] == B_TAB) {
     auto view = dynamic_cast<BView *>(*target);

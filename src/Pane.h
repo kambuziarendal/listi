@@ -73,7 +73,6 @@ public:
   void FocusFilter();
   void Activate();
   bool IsEinn() const { return einn; }
-  bool IsSinglePane() const { return prefs.SinglePane(); }
   bool IsScanning() const { return scanning; }
   void SendSelection(bool gesture = false);
   void ContextMenu(const std::string &entry, BPoint screen);

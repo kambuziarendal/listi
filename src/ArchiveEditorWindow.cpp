@@ -4,7 +4,7 @@
 #include <Alert.h>
 #include <Application.h>
 #include <Button.h>
-#include <ColumnListView.h>
+#include "AdaptiveColumnList.h"
 #include <ColumnTypes.h>
 #include <FindDirectory.h>
 #include <LayoutBuilder.h>
@@ -311,7 +311,7 @@ public:
       : BWindow(BRect(130, 110, 960, 510), "Listi: Resume archive edits",
                 B_TITLED_WINDOW, B_AUTO_UPDATE_SIZE_LIMITS),
         editor(application) {
-    list = new BColumnListView("archive edit sessions",
+    list = new Listi::AdaptiveColumnList("archive edit sessions",
                                B_WILL_DRAW | B_NAVIGABLE, B_FANCY_BORDER);
     list->AddColumn(
         new BStringColumn("Archive file", 760, 100, 2000, B_TRUNCATE_MIDDLE),
@@ -356,6 +356,7 @@ public:
       busy = false;
       for (auto &r : records->values)
         list->AddRow(new EditRow(r));
+      list->InvalidateLayout();
       status->SetText(records->error.empty()
                           ? (records->values.empty()
                                  ? "No retained archive edits."

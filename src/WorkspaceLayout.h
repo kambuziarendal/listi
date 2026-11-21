@@ -45,10 +45,12 @@ inline const char *WorkspaceMenuLabel(Workspace workspace) {
 }
 constexpr int32 MillerMode = 4;
 constexpr int32 ViewModeCount = 5;
+// A recursive scan is explicitly requested, not restored as a folder default.
+constexpr int32 FlatMode = ViewModeCount;
 inline const char *ViewModeLabel(int32 mode) {
   static const char *const labels[] = {"Details", "Icons", "Large icons",
-                                       "Thumbnails", "Miller columns"};
-  return mode >= 0 && mode < ViewModeCount ? labels[mode] : "Details";
+                                       "Thumbnails", "Miller columns", "Flat View"};
+  return mode >= 0 && mode <= FlatMode ? labels[mode] : "Details";
 }
 
 // Persisted sidebar mode IDs. Append new modes without reordering.

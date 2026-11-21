@@ -30,8 +30,8 @@ public:
   bool ApplyWorkspaceEdit(const BMessage &message);
   bool PrepareLayoutChange();
   bool HandlePanelCommand(BMessage *message);
-  bool CanToggleFlat() const;
-  void ToggleFlat(const std::shared_ptr<Shelf> &shelf);
+  bool CanOpenFlat() const;
+  void OpenFlat(const std::shared_ptr<Shelf> &shelf);
   void OpenSearch(const BMessage &store);
   void TogglePanelPreview();
   bool DismissPanelTool();

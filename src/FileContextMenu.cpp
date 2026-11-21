@@ -40,6 +40,7 @@ void FolderActions(BMenu &menu, const ContextMenuOptions &options) {
   auto views = new BMenu("View");
   for (int32 mode = 0; mode < ViewModeCount; ++mode)
     add(*views, ViewModeLabel(mode), kGridMode, true, mode, options.view == mode);
+  add(*views, ViewModeLabel(FlatMode), kGridMode, options.folderLocal, FlatMode);
   views->AddSeparatorItem();
   add(*views, "Remember view for this folder", kRememberView, true, 0,
       options.rememberView);

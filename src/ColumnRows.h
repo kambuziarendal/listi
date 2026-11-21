@@ -10,5 +10,6 @@ inline void ClearColumnRows(BColumnListView &list) {
     delete row;
   }
   list.Clear();
+  list.InvalidateLayout();
 }
 }

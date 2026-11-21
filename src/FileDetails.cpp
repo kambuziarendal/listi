@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "FileDrop.h"
+#include "AdaptiveColumnList.h"
 // Only this renderer depends on Haiku's private ColumnListView API.
 #include "FileDetails.h"
 #include "PanelAppearance.h"
@@ -230,19 +231,7 @@ public:
     return B_SKIP_MESSAGE;
   }
 };
-constexpr uint32 kScrollLayout = 'sbar';
-class ColumnResizeFinished : public BMessageFilter {
-  BHandler *target;
-
-public:
-  explicit ColumnResizeFinished(BHandler *owner)
-      : BMessageFilter(B_MOUSE_UP), target(owner) {}
-  filter_result Filter(BMessage *, BHandler **) override {
-    BMessenger(target).SendMessage(kScrollLayout);
-    return B_DISPATCH_MESSAGE;
-  }
-};
-class DetailsList : public BColumnListView {
+class DetailsList : public Listi::AdaptiveColumnList {
   Listi::TypeToSelect typeSelect;
 
 public:
@@ -251,13 +240,12 @@ public:
   NameColumn *name;
   SizeColumn *size;
   DateColumn *date;
-  bool syncing = false, singlePane = false, arranging = false;
+  bool syncing = false;
   RubberBand *band;
   DetailsList(Pane *p, PaneModel *state, const Preferences &prefs)
-      : BColumnListView("files", B_WILL_DRAW | B_NAVIGABLE | B_DRAW_ON_CHILDREN,
+      : AdaptiveColumnList("files", B_WILL_DRAW | B_NAVIGABLE | B_DRAW_ON_CHILDREN,
                         B_FANCY_BORDER),
         pane(p), model(state) {
-    singlePane = prefs.SinglePane();
     name = new NameColumn(prefs);
     name->batchTarget = ScrollView();
     AddColumn(name, 0);
@@ -313,67 +301,6 @@ public:
       }
     };
     ScrollView()->AddFilter(band);
-    auto horizontal =
-        static_cast<BScrollBar *>(FindView("horizontal_scroll_bar"));
-    horizontal->Target()->AddFilter(new ColumnResizeFinished(this));
-  }
-  void UpdateScrollBars() { DoLayout(); }
-  void DoLayout() override {
-    if (arranging)
-      return;
-    arranging = true;
-    BColumnListView::DoLayout();
-    auto vertical = static_cast<BScrollBar *>(FindView("vertical_scroll_bar"));
-    auto horizontal =
-        static_cast<BScrollBar *>(FindView("horizontal_scroll_bar"));
-    auto body = ScrollView();
-    auto heading = horizontal->Target();
-    const float verticalWidth = vertical->Frame().Width();
-    const float horizontalHeight = horizontal->Frame().Height();
-    const float fullWidth = body->Bounds().Width() + verticalWidth;
-    const float fullHeight = body->Bounds().Height() + horizontalHeight;
-    // Obtain the native column margins through PreferredSize, not private
-    // constants. PreferredSize includes hidden columns, which we subtract.
-    float contentWidth = BColumnListView::PreferredSize().width -
-                         (Bounds().Width() - heading->Frame().Width());
-    for (int32 i = 0; i < CountColumns(); ++i)
-      if (!ColumnAt(i)->IsVisible())
-        contentWidth -= ColumnAt(i)->Width();
-    float contentHeight = 0;
-    for (int32 i = 0; i < CountRows(); ++i)
-      contentHeight += RowAt(i)->Height() + 1;
-    bool showVertical = !singlePane, showHorizontal = false;
-    {
-      // Adding one scrollbar can make the other necessary. Start without
-      // either to avoid retaining mutually unnecessary bars at the boundary.
-      for (int i = 0; i < 3; ++i) {
-        showHorizontal =
-            contentWidth > fullWidth - (showVertical ? verticalWidth : 0);
-        showVertical = !singlePane ||
-                       contentHeight >
-                           fullHeight - (showHorizontal ? horizontalHeight : 0);
-      }
-    }
-    const float extraWidth = showVertical ? 0 : verticalWidth;
-    const float extraHeight = showHorizontal ? 0 : horizontalHeight;
-    body->ResizeBy(extraWidth, extraHeight);
-    heading->ResizeBy(extraWidth, 0);
-    vertical->ResizeBy(0, extraHeight);
-    horizontal->ResizeBy(extraWidth, 0);
-    for (auto item : {std::make_pair(vertical, showVertical),
-                      std::make_pair(horizontal, showHorizontal)}) {
-      if (item.second == item.first->IsHidden(this)) {
-        if (item.second)
-          item.first->Show();
-        else
-          item.first->Hide();
-      }
-    }
-    vertical->SetRange(0,
-                       std::max(0.f, contentHeight - body->Bounds().Height()));
-    horizontal->SetRange(
-        0, std::max(0.f, contentWidth - heading->Bounds().Width()));
-    arranging = false;
   }
   void DrawAfterChildren(BRect) override {
     // One completion barrier for all row icons, before model-owned bitmaps can
@@ -395,17 +322,13 @@ public:
     SetTarget(this);
   }
   void MessageReceived(BMessage *message) override {
-    if (message->what == kScrollLayout) {
-      UpdateScrollBars();
-      return;
-    }
     if (message->what == kInvoke) {
       auto row = static_cast<FileRow *>(FocusRow());
       model->SetSelection(model->Selected(), row ? row->entry->path : "");
       pane->MessageReceived(message);
       return;
     }
-    BColumnListView::MessageReceived(message);
+    AdaptiveColumnList::MessageReceived(message);
   }
   void MakeFocus(bool focus = true) override {
     if (!focus)
@@ -527,10 +450,6 @@ public:
     auto found = rows.find(path);
     if (found != rows.end())
       list->UpdateRow(found->second);
-  }
-  void SetSinglePane(bool value) override {
-    list->singlePane = value;
-    list->UpdateScrollBars();
   }
   void SetActive(bool value) override {
     active = value;

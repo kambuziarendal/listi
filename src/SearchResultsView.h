@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 #pragma once
-#include <ColumnListView.h>
+#include "AdaptiveColumnList.h"
 #include <Messenger.h>
 #include <vector>
 
@@ -9,7 +9,7 @@ struct SearchHit;
 
 constexpr uint32 kSearchResultPicked = 'spik', kShowSearchResult = 'sshw';
 
-class SearchResultsView : public BColumnListView {
+class SearchResultsView : public Listi::AdaptiveColumnList {
 public:
   SearchResultsView(BMessenger target, int32 pane);
   void SetReceiver(BHandler *target);

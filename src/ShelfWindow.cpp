@@ -9,7 +9,7 @@
 #include "VirtualFile.h"
 #include <Alert.h>
 #include <Button.h>
-#include <ColumnListView.h>
+#include "AdaptiveColumnList.h"
 #include <ColumnTypes.h>
 #include <FilePanel.h>
 #include <FindDirectory.h>
@@ -117,10 +117,10 @@ public:
   }
 };
 
-class ShelfList : public BColumnListView {
+class ShelfList : public Listi::AdaptiveColumnList {
 public:
   ShelfList()
-      : BColumnListView("shelf entries", B_WILL_DRAW | B_NAVIGABLE,
+      : AdaptiveColumnList("shelf entries", B_WILL_DRAW | B_NAVIGABLE,
                         B_FANCY_BORDER) {}
 
   void MessageDropped(BMessage *message, BPoint) override {
@@ -196,6 +196,7 @@ class ShelfWindow : public BWindow {
         auto row = new ShelfRow(entry);
         displayed.emplace(entry.path, row);
         rows->AddRow(row);
+        rows->InvalidateLayout();
       }
     }
     // Remove through the control so it adjusts its focus and selection pointers.
@@ -204,6 +205,7 @@ class ShelfWindow : public BWindow {
         ++it;
       } else {
         rows->RemoveRow(it->second);
+        rows->InvalidateLayout();
         delete it->second;
         it = displayed.erase(it);
       }

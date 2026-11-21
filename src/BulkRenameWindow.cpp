@@ -6,7 +6,7 @@
 #include "JobSnapshot.h"
 #include <Button.h>
 #include <CheckBox.h>
-#include <ColumnListView.h>
+#include "AdaptiveColumnList.h"
 #include <ColumnTypes.h>
 #include <LayoutBuilder.h>
 #include <String.h>
@@ -166,7 +166,7 @@ public:
     start->SetEnabled(false);
     digits->SetEnabled(false);
     number = new BCheckBox("Add number", new BMessage(kOptionsChanged));
-    rows = new BColumnListView("rename preview", B_WILL_DRAW | B_NAVIGABLE,
+    rows = new Listi::AdaptiveColumnList("rename preview", B_WILL_DRAW | B_NAVIGABLE,
                                B_FANCY_BORDER);
     rows->AddColumn(
         new BStringColumn("Current name", 215, 100, 1000, B_TRUNCATE_MIDDLE), 0);

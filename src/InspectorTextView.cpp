@@ -14,7 +14,7 @@ namespace Inspector {
 
 InspectorTextView::InspectorTextView(const std::string &path,
                                      const std::string &text)
-    : BTextView("editor text"), language(Syntax::Language(path, text)) {
+    : ScrollTextView("editor text"), language(Syntax::Language(path, text)) {
   SetFontAndColor(be_fixed_font);
   SetViewUIColor(B_DOCUMENT_BACKGROUND_COLOR);
   SetLowUIColor(B_DOCUMENT_BACKGROUND_COLOR);
@@ -104,7 +104,7 @@ void InspectorTextView::InsertText(const char *text, int32 size, int32 at,
   if (recording && size > 0)
     pending.push_back({at, true, std::string(text, size)});
   // Files are plain text. Never import font runs from a rich clipboard.
-  BTextView::InsertText(text, size, at, nullptr);
+  ScrollTextView::InsertText(text, size, at, nullptr);
   ++revision;
   needsColour = true;
 }
@@ -112,7 +112,7 @@ void InspectorTextView::InsertText(const char *text, int32 size, int32 at,
 void InspectorTextView::DeleteText(int32 from, int32 to) {
   if (recording && to > from)
     pending.push_back({from, false, std::string(Text() + from, to - from)});
-  BTextView::DeleteText(from, to);
+  ScrollTextView::DeleteText(from, to);
   ++revision;
   needsColour = true;
 }

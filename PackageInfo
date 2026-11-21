@@ -1,5 +1,5 @@
 name listi
-version 0.37.1-2
+version 0.38.0-1
 architecture x86_64
 summary "Listi: a native Haiku file manager with four workspaces"
 description "Two resizable panels with folder trees, icons and previews, local archive browsing, SMB/SFTP/FTP connections, background file operations and inline conflict handling. Alpha / WIP for bug testing. Workspaces: Einn, Askr, Tvískipt and Smiðja. Data loss is possible; use at your own risk. Inspired by Directory Opus 5 workflows; independently implemented with Haiku BeAPI."
@@ -8,10 +8,10 @@ vendor "Kambuzi EDB"
 copyrights { "2026 Kambuzi EDB" }
 licenses { "MIT" "LGPL-2.1" }
 provides {
- listi = 0.37.1
- lister = 0.37.1
- app:listi = 0.37.1
- app:lister = 0.37.1
+ listi = 0.38.0
+ lister = 0.38.0
+ app:listi = 0.38.0
+ app:lister = 0.38.0
 }
 requires {
  haiku >= r1~beta6
@@ -25,4 +25,4 @@ urls { "https://github.com/kambuziarendal/listi" }
 
 # Rename the package without leaving the predecessor installed beside it.
 replaces { lister }
-conflicts { lister < 0.37.1 }
+conflicts { lister < 0.38.0 }

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 #pragma once
-#include <TextView.h>
+#include "ScrollTextView.h"
 #include <deque>
 #include <string>
 #include <string_view>
@@ -13,7 +13,7 @@ enum class Family;
 
 // Plain-text editing surface shared by the embedded and detached editor.
 // Each native input event (including a selection replacement) is one undo.
-class InspectorTextView : public BTextView {
+class InspectorTextView : public ScrollTextView {
 public:
   InspectorTextView(const std::string &path, const std::string &text);
   void MessageReceived(BMessage *) override;

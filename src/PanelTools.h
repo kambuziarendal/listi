@@ -51,6 +51,6 @@ private:
   BGroupView *tabs;
   BButton *closeButton;
   std::array<BView *, 4> pages{};
-  std::array<BButton *, 4> buttons{};
+  std::array<BButton *, 3> buttons{};
 };
 } // namespace Listi

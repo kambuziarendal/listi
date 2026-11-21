@@ -13,7 +13,7 @@
 #include <MenuItem.h>
 #include <MessageFilter.h>
 #include <PopUpMenu.h>
-#include <ScrollView.h>
+#include "AdaptiveScrollView.h"
 #include <StringItem.h>
 #include <Window.h>
 #include <algorithm>
@@ -193,8 +193,7 @@ PaneSidebar::PaneSidebar(Pane &pane, int32 paneId, BMenu &goMenu,
   tree = new FolderTree(&pane);
   favorites =
       new DestinationList(&pane, "favorite destinations", kFavoriteNavigate);
-  favoriteScroll = new BScrollView("favorite destinations scroll", favorites, 0,
-                                   false, true);
+  favoriteScroll = new Listi::AdaptiveScrollView("favorite destinations scroll", favorites, true);
   favoriteScroll->SetExplicitMinSize(BSize(0, 32));
   auto navigation = new BGroupView(B_VERTICAL, 3);
   navigation->GroupLayout()->AddView(favoriteScroll, 0.35f);
@@ -203,11 +202,11 @@ PaneSidebar::PaneSidebar(Pane &pane, int32 paneId, BMenu &goMenu,
   AddChild(navigation);
   shelfList = new ShelfSidebarList(&pane);
   auto shelfScroll =
-      new BScrollView("sidebar shelf scroll", shelfList, 0, false, true);
+      new Listi::AdaptiveScrollView("sidebar shelf scroll", shelfList, true);
   AddChild(shelfScroll);
   recentFolders = new DestinationList(&pane, "recent folders", kRecentNavigate);
   auto recentScroll =
-      new BScrollView("recent folders scroll", recentFolders, 0, false, true);
+      new Listi::AdaptiveScrollView("recent folders scroll", recentFolders, true);
   AddChild(recentScroll);
   InstallSidebarInput(this, this);
   CardLayout()->SetVisibleItem(0);
@@ -384,6 +383,7 @@ void PaneSidebar::RefreshShelf() {
     empty->SetEnabled(false);
     shelfList->AddItem(empty);
   }
+  shelfList->Parent()->InvalidateLayout();
 }
 void PaneSidebar::UpdateMode(const WorkspaceLayout &layout) {
   SidebarMode wanted = pane.Sidebar();
@@ -438,6 +438,7 @@ void PaneSidebar::SetPlaces(const Listi::SavedPlaces &value, bool writable) {
     empty->SetEnabled(false);
     favorites->AddItem(empty);
   }
+  favoriteScroll->InvalidateLayout();
   if (pane.Window())
     placesMenu->SetTargetForItems(&pane);
   UpdatePlaces();
@@ -476,6 +477,7 @@ void PaneSidebar::RefreshRecentFolders() {
     empty->SetEnabled(false);
     recentFolders->AddItem(empty);
   }
+  recentFolders->Parent()->InvalidateLayout();
   recentFolders->ScrollTo(0, 0);
 }
 
