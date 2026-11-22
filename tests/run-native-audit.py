@@ -14,7 +14,7 @@ SRC = ROOT / "src"
 OUTPUT = ROOT / "build/native-audit-tests"
 REQUIRED = """
 file-operation-faults worker-lifecycle virtual-operation-faults archive-read-scope
-operation-queue archive-move-scaling directory-delivery search-filters
+operation-queue removable-copy archive-move-scaling directory-delivery search-filters
 archive-local-move-faults archive-local-move same-file-type folder-compare
 archive-editor-faults archive-editor archive-move-faults archive-move
 archive-folder-operations transfer-races archive-ambiguity archive-volumes
@@ -31,6 +31,7 @@ audit-io theme-text connection-defaults ssh-key-format
 """.split()
 
 WRAPS = {
+    "removable-copy": ["fsync", "write"],
     "archive-move-faults": ['rename'],
     "archive-editor-faults": ['rename'],
     "archive-local-move-faults": ['rename', 'unlink'],

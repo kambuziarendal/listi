@@ -14,7 +14,7 @@ Download the **[0.37.1-2 alpha test candidate for Haiku x86_64](https://github.c
 pkgman install ./Listi-0.37.1-2-x86_64.hpkg
 ```
 
-This is alpha software. See the release notes for what was tested, and try it on copies of your files. To transfer files between disks, use **Copy**, remount the destination and check the copy before removing the original. In the virtual USB disconnect test, the copy job kept waiting after **Cancel**. The [physical USB test](docs/VERIFICATION.md#physical-usb-disconnect-during-copy) has not been run.
+This is alpha software. See the release notes for what was tested, and try it on copies of your files. To transfer files between disks, use **Copy**, remount the destination and check the copy before removing the original. In 0.36.1-3 a virtual USB disconnect could leave a regular-file copy waiting after **Cancel**. Newer candidates isolate staged data writes and flushes on USB destinations so a stalled request cannot later publish the file. The [physical USB test](docs/VERIFICATION.md#physical-usb-disconnect-during-copy) has not been run.
 
 ## Basic workflow
 

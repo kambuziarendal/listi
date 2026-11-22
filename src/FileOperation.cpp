@@ -7,6 +7,7 @@
 #include "NamedEntry.h"
 #include "JobSnapshot.h"
 #include "MoveVolume.h"
+#include "RemovableCopy.h"
 #include "Trash.h"
 #include <Directory.h>
 #include <Entry.h>
@@ -84,6 +85,7 @@ struct Runner {
   struct BackingDevice {
     std::string path;
     NodeIdentity node;
+    bool removable = false;
   };
   std::map<dev_t, BackingDevice> backingDevices;
   void CheckDestinationDevice(dev_t volume) {
@@ -93,8 +95,11 @@ struct Runner {
       if (fs_stat_dev(volume, &info))
         throw std::runtime_error("The destination volume is no longer available.");
       BackingDevice backing;
-      if (strncmp(info.device_name, "/dev/disk/", 10) == 0)
+      if (strncmp(info.device_name, "/dev/disk/", 10) == 0) {
         backing.path = info.device_name;
+        backing.removable = (info.flags & B_FS_IS_REMOVABLE) ||
+                            backing.path.rfind("/dev/disk/usb/", 0) == 0;
+      }
       it = backingDevices.emplace(volume, std::move(backing)).first;
     }
     auto &backing = it->second;
@@ -105,10 +110,14 @@ struct Runner {
     struct stat st;
     if (stat(backing.path.c_str(), &st) ||
         (backing.node.device >= 0 &&
-         (backing.node.device != st.st_dev || backing.node.inode != st.st_ino)))
-      throw std::runtime_error(
+         (backing.node.device != st.st_dev || backing.node.inode != st.st_ino))) {
+      const char *message =
           "Destination device disconnected or changed. Copy not confirmed; "
-          "check the destination after reconnecting.");
+          "check the destination after reconnecting.";
+      if (backing.removable)
+        throw RemovableCopyInterrupted(message);
+      throw std::runtime_error(message);
+    }
     backing.node = {st.st_dev, st.st_ino};
   }
   size_t mutations = 0;
@@ -548,38 +557,61 @@ struct Runner {
         if (fstat(in.n, &opened) || !S_ISREG(opened.st_mode) ||
             !SameEntry(opened, st))
           throw std::runtime_error(src + ": source changed before copying");
-        std::vector<char> buf(131072);
-        for (;;) {
-          Check();
-          ssize_t n = read(in.n, buf.data(), buf.size());
-          if (n == 0)
-            break;
-          if (n < 0) {
-            if (errno == EINTR)
-              continue;
+        const auto &backing = backingDevices.at(stagingIdentity.st_dev);
+        if (backing.removable) {
+          Attributes(src, tmp);
+          // No filename is passed to the worker: only this queue thread can
+          // replace the final target, after checking both identities again.
+          const std::function<void(size_t)> checkpoint = [&](size_t bytes) {
+            CheckDestinationDevice(stagingIdentity.st_dev);
+            if (bytes)
+              Tick(src, bytes);
+            else
+              Check();
+          };
+          const int input = dup(in.n);
+          if (input < 0)
             Fail(src);
+          const int stage = out.n;
+          out.n = -1;
+          WriteRemovableStagingFile(input, stage, st, checkpoint);
+          struct stat after;
+          if (fstat(in.n, &after) || !SameEntry(after, st))
+            throw std::runtime_error(src + ": source changed while copying");
+        } else {
+          std::vector<char> buf(131072);
+          for (;;) {
+            Check();
+            ssize_t n = read(in.n, buf.data(), buf.size());
+            if (n == 0)
+              break;
+            if (n < 0) {
+              if (errno == EINTR)
+                continue;
+              Fail(src);
+            }
+            ssize_t at = 0;
+            while (at < n) {
+              ssize_t w = write(out.n, buf.data() + at, n - at);
+              if (w < 0 && errno == EINTR)
+                continue;
+              if (w <= 0)
+                Fail(dst);
+              at += w;
+            }
+            Tick(src, n);
           }
-          ssize_t at = 0;
-          while (at < n) {
-            ssize_t w = write(out.n, buf.data() + at, n - at);
-            if (w < 0 && errno == EINTR)
-              continue;
-            if (w <= 0)
-              Fail(dst);
-            at += w;
-          }
-          Tick(src, n);
+          struct stat after;
+          if (fstat(in.n, &after) || !SameEntry(after, st))
+            throw std::runtime_error(src + ": source changed while copying");
+          Attributes(src, tmp);
+          if (fchmod(out.n, st.st_mode & 07777))
+            Fail(tmp);
+          struct timespec times[2] = {st.st_atim, st.st_mtim};
+          CheckDestinationDevice(stagingIdentity.st_dev);
+          if (futimens(out.n, times) || fsync(out.n))
+            Fail(tmp);
         }
-        struct stat after;
-        if (fstat(in.n, &after) || !SameEntry(after, st))
-          throw std::runtime_error(src + ": source changed while copying");
-        Attributes(src, tmp);
-        if (fchmod(out.n, st.st_mode & 07777))
-          Fail(tmp);
-        struct timespec times[2] = {st.st_atim, st.st_mtim};
-        CheckDestinationDevice(stagingIdentity.st_dev);
-        if (futimens(out.n, times) || fsync(out.n))
-          Fail(tmp);
       }
       Check();
       struct stat current;
@@ -592,7 +624,14 @@ struct Runner {
       CheckDestinationDevice(stagingIdentity.st_dev);
       Commit(tmp, dst, existed, before);
       Done(src, dst, staged);
+    } catch (const RemovableCopyInterrupted &) {
+      // The mount may still answer cached lookups or hang on cleanup. Never
+      // remove a similarly named stage by path on a reconnected disk.
+      throw;
     } catch (...) {
+      const auto device = backingDevices.find(stagingIdentity.st_dev);
+      if (device != backingDevices.end() && device->second.removable)
+        CheckDestinationDevice(stagingIdentity.st_dev);
       struct stat current;
       if (lstat(tmp.c_str(), &current) == 0 &&
           current.st_dev == stagingIdentity.st_dev && current.st_ino == stagingIdentity.st_ino)
@@ -782,6 +821,11 @@ struct Runner {
             for (auto &entry : copied)
               h.fileDone(entry.first, entry.second.destination);
         }
+      } catch (const RemovableCopyInterrupted &e) {
+        Problem(source, e.what());
+        if (h.fileFailed)
+          h.fileFailed(source, e.what());
+        throw; // Later selected roots must not enter the disconnected mount.
       } catch (const std::runtime_error &e) {
         Problem(source, e.what());
         result.errors.push_back(e.what());
