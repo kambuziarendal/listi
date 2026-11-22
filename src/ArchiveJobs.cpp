@@ -70,6 +70,7 @@ struct Stage {
   std::string path, leaf;
   node_ref identity;
   Result &result;
+  bool published = false;
   Stage(const std::string &folder, Result &result)
       : parent(folder.c_str()), result(result) {
     Require(parent.InitCheck() == B_OK, "Cannot open destination folder.");
@@ -89,6 +90,8 @@ struct Stage {
   ~Stage() {
     try {
       ForgetArchiveStage(path);
+      if (published)
+        return;
       BEntry entry(&parent, leaf.c_str(), false);
       node_ref named;
       if (entry.GetNodeRef(&named) == B_OK &&
@@ -884,7 +887,7 @@ Result RunArchiveJob(const Job &job, const Hooks &hooks) {
         publish.MoveTo(&stage.parent, job.entryName.c_str(), false) == B_OK,
         "Could not publish the result. The destination may already exist; it was not replaced.");
     if (job.action == Action::ExtractArchive)
-      stage.dir.Unset();
+      stage.published = true;
     result.completed = 1;
     completedPaths.insert(job.sources.begin(), job.sources.end());
     for (const auto &source : completedPaths)
