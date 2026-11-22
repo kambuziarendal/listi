@@ -249,7 +249,7 @@ void Pane::AfterInterruptedCopy(const char *folder) {
   locationValid = false;
   ClearRows();
   UpdateNavigation();
-  SetNavigationError("Copy stopped on this disk. Choose another folder, or reconnect and reload.");
+  SetNavigationError("Transfer stopped on this disk. Choose another folder, or reconnect and reload.");
 }
 void Pane::Activate() {
   if (Window()) {

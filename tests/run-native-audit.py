@@ -31,7 +31,7 @@ audit-io theme-text connection-defaults ssh-key-format
 """.split()
 
 WRAPS = {
-    "removable-copy": ["fsync", "write"],
+    "removable-copy": ["fsync", "write", "read"],
     "archive-move-faults": ['rename'],
     "archive-editor-faults": ['rename'],
     "archive-local-move-faults": ['rename', 'unlink'],

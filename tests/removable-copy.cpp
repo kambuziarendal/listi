@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cerrno>
 #include <condition_variable>
 #include <cstdlib>
 #include <fcntl.h>
@@ -19,7 +20,7 @@ using namespace std::chrono_literals;
 std::mutex mutex;
 std::condition_variable changed;
 bool entered = false, release = false, returned = false;
-std::atomic<int> park{-1};
+std::atomic<int> park{-1}, failRead{-1};
 bool stallWrite = false;
 std::atomic<int> writeCalls{0};
 void Hold() {
@@ -53,6 +54,15 @@ extern "C" ssize_t __wrap_write(int fd, const void *bytes, size_t count) {
     return __real_write(fd, bytes, std::min(count, size_t(1)));
   }
   return __real_write(fd, bytes, count);
+}
+
+extern "C" ssize_t __real_read(int, void *, size_t);
+extern "C" ssize_t __wrap_read(int fd, void *bytes, size_t count) {
+  if (fd == failRead.load()) {
+    errno = EIO;
+    return -1;
+  }
+  return __real_read(fd, bytes, count);
 }
 
 int main() {
@@ -138,5 +148,19 @@ int main() {
   Require(cancelled && fcntl(out, F_GETFD) == -1 &&
               std::filesystem::file_size(root / "cancel") < payload.size(),
           "cancellation at a chunk boundary stops writes and closes staging before return");
+  in = open(source.c_str(), O_RDONLY);
+  out = open((root / "read-error").c_str(), O_CREAT | O_EXCL | O_WRONLY, 0600);
+  Require(in >= 0 && out >= 0 && fstat(in, &before) == 0, "prepare read failure");
+  failRead = in;
+  bool interrupted = false;
+  try {
+    Listi::WriteRemovableStagingFile(in, out, before, [](size_t) {});
+  } catch (const Listi::RemovableCopyInterrupted &) {
+    interrupted = true;
+  }
+  failRead = -1;
+  Require(interrupted && fcntl(out, F_GETFD) == -1 &&
+              std::filesystem::file_size(root / "read-error") == 0,
+          "removable read failure suspends the endpoint before devfs notices");
   std::filesystem::remove_all(root);
 }

@@ -152,6 +152,12 @@ void WriteRemovableStagingFile(int source, int staging, const struct stat &befor
     throw;
   }
   io.join();
+  // The driver can fail the descriptor before its devfs node disappears.
+  // Suspend the suspected endpoint even if the last devfs checkpoint passed.
+  if (state->error == EIO || state->error == ENODEV || state->error == ENXIO)
+    throw RemovableCopyInterrupted(
+        "Removable disk I/O failed; no final file was published for this "
+        "entry. Check for a temporary copy after reconnecting.");
   if (state->error)
     throw std::runtime_error(std::string("Transfer involving removable disk: ") +
                              strerror(state->error));
