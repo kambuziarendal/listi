@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.38.0-6 alpha test candidate
+
+- Network copies read the staged upload back before replacing the destination.
+  A mismatch, unreadable stage, or cancelled verification leaves the previous
+  target untouched. This requires read access and an additional download.
+- Editing an existing archive checks every rebuilt member before replacing the
+  archive. A failed content check leaves the original archive in place.
+
 ## 0.38.0-5 alpha test candidate
 
 - Move between local volumes now keeps each completed original in its source
