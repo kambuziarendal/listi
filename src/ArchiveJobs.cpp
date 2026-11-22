@@ -7,6 +7,7 @@
 #include "ArchiveWriting.h"
 #include "JobSnapshot.h"
 #include "LocalMoveTree.h"
+#include "RecoveryInventory.h"
 #include "VirtualFile.h"
 #include <Directory.h>
 #include <Entry.h>
@@ -70,6 +71,7 @@ struct Stage {
   std::string path, leaf;
   node_ref identity;
   Result &result;
+  std::optional<RecoveryRecord> recovery;
   bool published = false;
   Stage(const std::string &folder, Result &result)
       : parent(folder.c_str()), result(result) {
@@ -85,13 +87,27 @@ struct Stage {
     Require(dir.SetTo(&created) == B_OK && dir.GetNodeRef(&identity) == B_OK,
             "Cannot open archive staging folder; inspect " + path);
     path = PathOf(dir);
-    RegisterArchiveStage(path, identity.device, identity.node);
+    try {
+      struct stat identity;
+      Require(dir.GetStat(&identity) == B_OK && parent.Sync() == B_OK,
+              "Cannot flush the newly created archive staging directory.");
+      recovery.emplace("archive", path, identity);
+      RegisterArchiveStage(path, identity.st_dev, identity.st_ino);
+    } catch (...) {
+      node_ref named;
+      if (created.GetNodeRef(&named) == B_OK &&
+          named.device == identity.device && named.node == identity.node)
+        created.Remove(); // Empty; cannot contain packed or extracted files yet.
+      throw;
+    }
   }
   ~Stage() {
     try {
       ForgetArchiveStage(path);
-      if (published)
+      if (published) {
+        recovery->Retire();
         return;
+      }
       BEntry entry(&parent, leaf.c_str(), false);
       node_ref named;
       if (entry.GetNodeRef(&named) == B_OK &&
@@ -99,12 +115,18 @@ struct Stage {
           RemoveContents(dir, identity.device) &&
           entry.GetNodeRef(&named) == B_OK &&
           named.device == identity.device && named.node == identity.node &&
-          entry.Remove() == B_OK)
+          entry.Remove() == B_OK && parent.Sync() == B_OK) {
+        recovery->Retire();
         return;
+      }
       result.errors.push_back("Could not clean the archive staging folder; inspect " +
                               path + " (show hidden files).");
-    } catch (...) {
-      // Do not let diagnostic allocation failures mask the original error.
+    } catch (const std::exception &error) {
+      try {
+        result.errors.push_back(error.what());
+      } catch (...) {
+        // Do not let diagnostic allocation failures mask the original error.
+      }
     }
   }
 };
@@ -219,6 +241,7 @@ Result RunArchiveEdit(const Job &job, const Hooks &hooks,
         hooks.progress(job.destination, bytes);
     };
     Hooks internal = hooks;
+    internal.privateStaging = true;
     internal.fileDone = {};
     internal.fileFailed = {};
     internal.proceed = [&] {
@@ -491,6 +514,7 @@ Result RunArchiveLocalMove(const Job &job, const Hooks &hooks) {
     const auto source = ParseLocation(job.sources.front());
     const auto target = ParseLocation(job.destination);
     Hooks internal = hooks;
+    internal.privateStaging = true;
     internal.fileDone = {};
     internal.fileFailed = {};
     internal.proceed = [&] {
@@ -650,6 +674,7 @@ Result RunArchiveMove(const Job &job, const Hooks &hooks) {
     if (source.Local() || target.Local())
       return RunArchiveLocalMove(job, hooks);
     Hooks internal = hooks;
+    internal.privateStaging = true;
     internal.fileDone = {};
     internal.fileFailed = {};
     auto sourceGuard = PrepareArchiveEditJob(source.archive, {}, job.sources);
@@ -853,6 +878,7 @@ Result RunArchiveJob(const Job &job, const Hooks &hooks) {
       copy.sources = selected;
       copy.destination = PathOf(stage.dir);
       Hooks guarded = tracked;
+      guarded.privateStaging = true;
       // Defer all member completion notifications until atomic publication.
       // Otherwise the UI leaves successfully extracted members marked failed.
       guarded.fileDone = [&](const std::string &path, const std::string &) {

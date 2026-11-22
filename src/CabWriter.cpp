@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "CabWriter.h"
+#include "StagingSpace.h"
 #include "ArchivePasswords.h"
 #include "DynamicLibrary.h"
 #include <zlib.h>
@@ -64,7 +65,7 @@ void ReadAt(int fd, void *buffer, size_t length, off_t offset) {
 void Write(int fd, const void *buffer, size_t length) {
   const auto *bytes = static_cast<const unsigned char *>(buffer);
   while (length) {
-    auto wrote = write(fd, bytes, length);
+    auto wrote = WriteStaging(fd, bytes, length);
     if (wrote < 0 && errno == EINTR)
       continue;
     Require(wrote > 0, "Cannot write Cabinet data.");

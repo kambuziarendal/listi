@@ -149,6 +149,7 @@ void MainWindowMenu::AddListiMenu() {
   AddCommand(terminalMenu, "External terminal window", Listi::kTerminalWindow);
   view->AddItem(terminalMenu);
   AddCommand(view, "Operations", kShowJobs, 'O');
+  AddCommand(view, "Review interrupted operations…", kReviewRecovery);
   AddCommand(view, "Show Shelf", Listi::kShowShelf);
   view->AddSeparatorItem();
   AddCommand(view, "Settings…", kPreferences, ',');

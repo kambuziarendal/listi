@@ -8,6 +8,7 @@
 #include "JobSnapshot.h"
 #include "MoveVolume.h"
 #include "RemovableCopy.h"
+#include "StagingSpace.h"
 #include "Trash.h"
 #include "VirtualFile.h"
 #include <Directory.h>
@@ -646,7 +647,8 @@ struct Runner {
                                                      : guardedJob->destination)
                                   : endpoint.mount;
           WriteRemovableStagingFile(std::exchange(in.n, -1),
-                                    std::exchange(out.n, -1), st, checkpoint);
+                                    std::exchange(out.n, -1), st, checkpoint,
+                                    h.privateStaging);
           interruptedFolder.clear();
         } else {
           std::vector<char> buf(131072);
@@ -662,7 +664,9 @@ struct Runner {
             }
             ssize_t at = 0;
             while (at < n) {
-              ssize_t w = write(out.n, buf.data() + at, n - at);
+              const auto w = h.privateStaging
+                                 ? WriteStaging(out.n, buf.data() + at, n - at)
+                                 : write(out.n, buf.data() + at, n - at);
               if (w < 0 && errno == EINTR)
                 continue;
               if (w <= 0)

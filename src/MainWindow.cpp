@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 #include <stdexcept>
 #include "MainWindow.h"
+#include "RecoveryInventory.h"
+#include <Alert.h>
 #include "FlatView.h"
 #include "MainWindowMenu.h"
 #include "ApplicationServices.h"
@@ -559,6 +561,19 @@ public:
     case kShowJobs:
       queue.Toggle();
       break;
+    case kReviewRecovery: {
+      std::string text;
+      try {
+        text = queue.Busy() ? "Wait for the active operation before reviewing recovery records."
+                            : Listi::ReviewRecovery();
+      } catch (const std::exception &error) {
+        text = error.what();
+      }
+      auto *alert = new BAlert("Listi recovery review", text.c_str(), "Close",
+                               nullptr, nullptr, B_WIDTH_AS_USUAL, B_INFO_ALERT);
+      alert->Go(nullptr);
+      break;
+    }
     case kCompareFolders:
       OpenFolderCompare(pane.Path(), panes[1 - source]->Path());
       break;

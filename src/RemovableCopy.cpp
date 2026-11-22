@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "RemovableCopy.h"
+#include "StagingSpace.h"
 #include <array>
 #include <atomic>
 #include <cerrno>
@@ -49,7 +50,8 @@ struct Transfer {
   }
 };
 
-int Stream(const Descriptors &fd, const struct stat &before, Transfer &state) {
+int Stream(const Descriptors &fd, const struct stat &before, Transfer &state,
+           bool privateStaging) {
   auto &buffer = state.buffer;
   while (state.Next()) {
     ssize_t count;
@@ -80,7 +82,9 @@ int Stream(const Descriptors &fd, const struct stat &before, Transfer &state) {
     while (offset < count) {
       if (state.stop)
         return ECANCELED;
-      auto n = write(fd.staging, buffer.data() + offset, count - offset);
+      const auto n = privateStaging
+                         ? WriteStaging(fd.staging, buffer.data() + offset, count - offset)
+                         : write(fd.staging, buffer.data() + offset, count - offset);
       if (n < 0 && errno == EINTR)
         continue;
       if (n <= 0)
@@ -94,16 +98,17 @@ int Stream(const Descriptors &fd, const struct stat &before, Transfer &state) {
 } // namespace
 
 void WriteRemovableStagingFile(int source, int staging, const struct stat &before,
-                               const std::function<void(size_t)> &checkpoint) {
+                               const std::function<void(size_t)> &checkpoint,
+                               bool privateStaging) {
   // Allocate ownership before starting the thread. Even a spawn failure closes
   // both descriptors. A blocked close belongs to the I/O worker too.
   Descriptors owned{source, staging};
   auto state = std::make_shared<Transfer>();
-  std::thread io([source, staging, before, state] {
+  std::thread io([source, staging, before, state, privateStaging] {
     int error;
     {
       Descriptors fd{source, staging};
-      error = Stream(fd, before, *state);
+      error = Stream(fd, before, *state, privateStaging);
       if (close(fd.staging) && !error)
         error = errno;
       fd.staging = -1;

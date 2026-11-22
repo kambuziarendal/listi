@@ -6,6 +6,7 @@
 #include "ArchivePasswords.h"
 #include "ArchiveVolumes.h"
 #include "ArjWriter.h"
+#include "StagingSpace.h"
 #include "DynamicLibrary.h"
 #include "vendor/p7zip/CPP/7zip/Archive/IArchive.h"
 #include "vendor/p7zip/CPP/7zip/ICoder.h"
@@ -612,7 +613,7 @@ struct Output : ISequentialOutStream {
       size_t left = size;
       while (left) {
         s.Check();
-        auto n = write(fd, p, left);
+        auto n = WriteStaging(fd, p, left);
         if (n < 0 && errno == EINTR)
           continue;
         Require(n > 0,
@@ -901,6 +902,8 @@ struct WriteOutput : IOutStream {
       size_t left = size;
       while (left) {
         s.Check();
+        if (!StagingGrowthAvailable(fd, position + left))
+          throw std::runtime_error("Insufficient space for 7z staging output.");
         ssize_t n = pwrite(fd, p, left, position);
         if (n < 0 && errno == EINTR)
           continue;
@@ -928,7 +931,8 @@ struct WriteOutput : IOutStream {
   }
   HRESULT SetSize(UInt64 size) override {
     return s.Call([&] {
-      Require(size <= uint64_t(INT64_MAX) && !ftruncate(fd, size),
+      Require(size <= uint64_t(INT64_MAX) && StagingGrowthAvailable(fd, size) &&
+                  !ftruncate(fd, size),
               "Cannot resize encrypted archive output");
     });
   }

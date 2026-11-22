@@ -2,6 +2,7 @@
 #include "BulkRename.h"
 #include "JobSnapshot.h"
 #include "NamedEntry.h"
+#include "RecoveryInventory.h"
 #include "Sha256.h"
 #include <Directory.h>
 #include <Path.h>
@@ -346,6 +347,12 @@ public:
     Record(Format("intent", identity, from, to));
     Sync();
   }
+  struct stat Identity() const {
+    struct stat st;
+    if (fstat(file.fd, &st))
+      throw std::runtime_error("Cannot identify bulk rename recovery journal.");
+    return st;
+  }
   void Finish() const {
     struct stat opened, named;
     if (fstat(file.fd, &opened) || !Stat(parent, name, named) ||
@@ -560,6 +567,7 @@ Result RunBulkRename(const Job &job, const Hooks &hooks) {
   size_t entriesLeft = kUndoEntryLimit;
   uint64_t bytesLeft = kUndoByteLimit;
   std::optional<RenameJournal> journal;
+  std::optional<RecoveryRecord> recovery;
   auto move = [&](size_t i, const std::string &target) {
     Check(hooks);
     InspectFolder(job);
@@ -621,6 +629,8 @@ Result RunBulkRename(const Job &job, const Hooks &hooks) {
           confirmed.rows[i].before, confirmed.rows[i].after));
     }
     journal->Sync();
+    recovery.emplace("rename", Join(job.destinationFolder, journal->name),
+                     journal->Identity());
 
     // Rename chains from the free end. In a cycle, free one original by moving
     // it to a temporary leaf, then finish that row after its target is free.
@@ -730,6 +740,8 @@ Result RunBulkRename(const Job &job, const Hooks &hooks) {
           journal->Record("restored\n");
           journal->Sync();
           journal->Finish();
+          if (recovery)
+            recovery->Retire();
         }
       } catch (const std::runtime_error &error) {
         result.errors.push_back(error.what());
@@ -748,6 +760,7 @@ Result RunBulkRename(const Job &job, const Hooks &hooks) {
     journal->Record("committed\n");
     journal->Sync();
     journal->Finish();
+    recovery->Retire();
   } catch (const std::runtime_error &error) {
     result.bulkRenameRecoveryNeeded = true;
     result.errors.push_back(std::string("Names were changed. ") + error.what() +

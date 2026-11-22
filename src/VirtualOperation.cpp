@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "FileOperation.h"
+#include "StagingSpace.h"
 #include "Sha256.h"
 #include "VirtualFile.h"
 #include <atomic>
@@ -45,7 +46,7 @@ struct TempFile {
   }
   void Write(const char *p, size_t n) {
     while (n) {
-      auto r = write(fd, p, n);
+      auto r = WriteStaging(fd, p, n);
       if (r < 0 && errno == EINTR)
         continue;
       if (r <= 0)
@@ -271,6 +272,7 @@ struct Runner {
       local.fileDone = {};
       local.fileFailed = {};
       local.fileSize = {};
+      local.privateStaging = true;
       // Local Run has its own cancellation type. Let its proceed callback
       // drive cancellation and translate our conflict abort at the boundary.
       local.progress = [](const std::string &, uint64_t) {};

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "ArWriter.h"
+#include "StagingSpace.h"
 #include "ArchiveBackend.h"
 
 #include <algorithm>
@@ -59,7 +60,7 @@ void ReadExact(int fd, void *data, size_t length, off_t offset) {
 
 void Write(int fd, std::string_view bytes) {
   while (!bytes.empty()) {
-    const auto count = write(fd, bytes.data(), bytes.size());
+    const auto count = WriteStaging(fd, bytes.data(), bytes.size());
     if (count < 0 && errno == EINTR)
       continue;
     Require(count > 0, "Cannot write Unix ar data.");

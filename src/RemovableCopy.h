@@ -14,5 +14,6 @@ public:
 // Takes ownership of both descriptors. The I/O worker only sees an already
 // opened source and a private staging inode. Only the caller can publish it.
 void WriteRemovableStagingFile(int source, int staging, const struct stat &before,
-                               const std::function<void(size_t)> &checkpoint);
+                               const std::function<void(size_t)> &checkpoint,
+                               bool privateStaging = false);
 }

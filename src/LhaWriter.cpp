@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "LhaWriter.h"
+#include "StagingSpace.h"
 #include "ArchiveBackend.h"
 #include "ArchiveCompressor.h"
 #include "ArchiveTextLocale.h"
@@ -163,7 +164,7 @@ void CopyOutput(const std::string &path, int outputFd,
     if (!count)
       break;
     for (ssize_t offset = 0; offset < count;) {
-      auto amount = write(outputFd, bytes.data() + offset, count - offset);
+      auto amount = WriteStaging(outputFd, bytes.data() + offset, count - offset);
       if (amount < 0 && errno == EINTR)
         continue;
       Require(amount > 0, "Cannot write the verified LHA output.");

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "RarStore.h"
+#include "StagingSpace.h"
 #include "ArchiveBackend.h"
 #include "LocalMoveTree.h"
 
@@ -65,7 +66,7 @@ uint32_t Crc(uint32_t crc, const unsigned char *data, size_t size) {
 }
 void Write(int fd, const unsigned char *data, size_t size) {
   while (size) {
-    const auto count = write(fd, data, size);
+    const auto count = WriteStaging(fd, data, size);
     if (count < 0 && errno == EINTR)
       continue;
     Require(count > 0, "Cannot write RAR5 output.");

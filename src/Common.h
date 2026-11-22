@@ -104,6 +104,7 @@ enum : uint32 {
   kConflict = 'conf',
   kAnswer = 'answ',
   kShowJobs = 'jobs',
+  kReviewRecovery = 'rvrc',
   kNameAccepted = 'name',
   kOpenPaths = 'opth'
 };

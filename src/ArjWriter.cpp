@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "ArjWriter.h"
+#include "StagingSpace.h"
 #include "ArchiveBackend.h"
 #include "ArchiveCompressor.h"
 #include "LocalMoveTree.h"
@@ -66,7 +67,7 @@ uint32_t Crc(uint32_t crc, const unsigned char *bytes, size_t count) {
 
 void Write(int fd, const unsigned char *bytes, size_t count) {
   while (count) {
-    const auto wrote = write(fd, bytes, count);
+    const auto wrote = WriteStaging(fd, bytes, count);
     if (wrote < 0 && errno == EINTR)
       continue;
     Require(wrote > 0, "Cannot write ARJ output.");

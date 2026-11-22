@@ -83,6 +83,7 @@ struct Hooks {
   // Observed during the real operation. The UI must not probe a remote server
   // solely for a progress estimate.
   std::function<void(const std::string &, uint64_t)> fileSize;
+  bool privateStaging = false;
 };
 enum class Publication { NotAttempted, Unknown, Published };
 struct UploadVerification {
