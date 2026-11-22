@@ -5,6 +5,7 @@
 #include "ImagePreview.h"
 #include "MainWindowMenu.h"
 #include "Pane.h"
+#include "PaneSidebar.h"
 #include "FlatView.h"
 #include "VirtualFile.h"
 #include "ShelfWindow.h"
@@ -161,9 +162,6 @@ void WorkspaceSplit::SetSource(int pane) {
 }
 
 void WorkspaceSplit::FollowFocus(const BView *view) {
-  if (!prefs.IsSmidja() && Panel(0).Current() != PanelPage::Flat &&
-      Panel(1).Current() != PanelPage::Flat)
-    return;
   const int pane = PanelContaining(view);
   if (pane >= 0 && paneVisible[pane] && source != pane) {
     SetSource(pane);
@@ -424,6 +422,10 @@ bool WorkspaceSplit::HandlePanelCommand(BMessage *m) {
     break;
   case kFilter:
     FocusFilter();
+    break;
+  case kToggleTree:
+    if (Panel(source).Current() == PanelPage::Files)
+      Panel(source).Files().MessageReceived(m);
     break;
   case kGridMode:
     if (m->GetInt32("mode", -1) == FlatMode)

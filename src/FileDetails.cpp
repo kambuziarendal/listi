@@ -240,7 +240,7 @@ public:
   NameColumn *name;
   SizeColumn *size;
   DateColumn *date;
-  bool syncing = false;
+  bool syncing = false, showModified = true;
   RubberBand *band;
   DetailsList(Pane *p, PaneModel *state, const Preferences &prefs)
       : AdaptiveColumnList("files", B_WILL_DRAW | B_NAVIGABLE | B_DRAW_ON_CHILDREN,
@@ -301,6 +301,13 @@ public:
       }
     };
     ScrollView()->AddFilter(band);
+  }
+  void DoLayout() override {
+    const float room = Bounds().Width() - B_V_SCROLL_BAR_WIDTH - 12;
+    const float needed = name->Width() + date->Width() +
+                         (size->IsVisible() ? size->Width() : 0);
+    date->SetVisible(showModified && room >= needed);
+    AdaptiveColumnList::DoLayout();
   }
   void DrawAfterChildren(BRect) override {
     // One completion barrier for all row icons, before model-owned bitmaps can
@@ -463,8 +470,8 @@ public:
     list->size->font = p.font;
     list->date->font = p.font;
     list->SetFont(&p.font);
-    list->SetColumnVisible(1, p.size);
-    list->SetColumnVisible(2, p.date);
+    list->size->SetVisible(p.size);
+    list->showModified = p.date;
     list->SetColor(B_COLOR_BACKGROUND,
                    Listi::PanelBackground(B_PANEL_BACKGROUND_COLOR, active));
     list->SetColor(B_COLOR_TEXT, ui_color(B_PANEL_TEXT_COLOR));

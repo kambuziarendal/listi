@@ -3,6 +3,7 @@
 #include "Common.h"
 #include "FlatView.h"
 #include "MainWindow.h"
+#include "PaneSidebar.h"
 #include "ShelfWindow.h"
 #include "WorkspaceActions.h"
 #include "WorkspaceEditor.h"
@@ -101,7 +102,11 @@ void MainWindowMenu::AddViewMenu() {
   workspace->AddSeparatorItem();
   AddCommand(workspace, "Customize workspace…", kOpenWorkspaceEditor);
   viewMenu->AddItem(workspace);
-  fileView = new BMenu("File view");
+  previewMenu = AddCommand(viewMenu, "Inspector panel", kPreviewToggle, 'P');
+  quickViewMenu = AddCommand(viewMenu, "Quick view", kQuickView, 'P', B_SHIFT_KEY);
+  treeToggle = AddCommand(viewMenu, "Folder tree", kToggleTree);
+  viewMenu->AddSeparatorItem();
+  fileView = new BMenu("Active pane view");
   for (int32 i = 0; i < ViewModeCount; ++i) {
     auto choice = new BMessage(kGridMode);
     choice->AddInt32("mode", i);
@@ -124,8 +129,6 @@ void MainWindowMenu::AddListiMenu() {
   auto view = new BMenu("Listi");
   AddCommand(view, "Switch panel", kSwitch, 'S');
   AddCommand(view, "Same folder in other panel", kSame, 'S', B_SHIFT_KEY);
-  previewMenu = AddCommand(view, "Inspector panel", kPreviewToggle, 'P');
-  quickViewMenu = AddCommand(view, "Quick view", kQuickView, 'P', B_SHIFT_KEY);
   AddCommand(view, "Connect to server...", kNetwork, 'K');
   AddCommand(view, "Refresh", kRefresh, 'L');
   AddCommand(view, "Filter names", kFilter, 'F');
@@ -152,17 +155,19 @@ void MainWindowMenu::AddListiMenu() {
   AddItem(view);
 }
 
-void MainWindowMenu::SetTransferDirection(int source, bool available) {
+void MainWindowMenu::SetTransferDirection(const char *direction) {
   for (auto action : {kCopy, kMove}) {
     if (auto item = FindItem(action)) {
       BString label(action == kCopy ? "Copy" : "Move");
-      if (available)
-        label << (source == 0 ? " left → right" : " right → left");
+      if (direction)
+        label << ' ' << direction;
       else
         label << " to other panel";
       if (label != item->Label())
         item->SetLabel(label);
-      item->SetEnabled(available);
+      const bool available = direction != nullptr;
+      if (item->IsEnabled() != available)
+        item->SetEnabled(available);
     }
   }
 }
@@ -181,6 +186,11 @@ void MainWindowMenu::SetWorkspace(const WorkspaceLayout &layout, bool quickView)
   askrMenu->SetMarked(layout.workspace == Workspace::askr);
   tviskiptMenu->SetMarked(layout.workspace == Workspace::tviskipt);
   smidjaMenu->SetMarked(layout.IsSmidja());
+}
+
+void MainWindowMenu::SetFolderTree(bool available, bool visible) {
+  treeToggle->SetEnabled(available);
+  treeToggle->SetMarked(available && visible);
 }
 
 void MainWindowMenu::SetPreview(const WorkspaceLayout &layout, bool showingQuickView) {

@@ -23,6 +23,7 @@
 #include "InlineAction.h"
 #include "OperationQueue.h"
 #include "Pane.h"
+#include "PaneSidebar.h"
 #include "PanelTools.h"
 #include "TerminalDock.h"
 #include "VirtualFile.h"
@@ -347,18 +348,18 @@ public:
       split->FollowFocus(receiver);
     }
     const bool quitting = message->what == B_QUIT_REQUESTED;
-    if (quitting) {
-      BWindow::DispatchMessage(message, target);
-      return;
-    }
     BWindow::DispatchMessage(message, target);
-    UpdateTransferTarget();
+    if (!quitting)
+      UpdateTransferTarget();
   }
   void MenusBeginning() override {
     BWindow::MenusBeginning();
     const auto &pane = *panes[split->Source()];
     const char *path = pane.Path();
-    const bool flat = split->Panel(split->Source()).Current() == PanelPage::Flat;
+    const auto page = split->Panel(split->Source()).Current();
+    const bool flat = page == PanelPage::Flat;
+    menu->SetFolderTree(page == PanelPage::Files && pane.CanToggleTree(),
+                        SidebarHasTree(pane.Sidebar()));
     const bool canSaveClipboard =
         !actionArea->Pending() && Listi::CanSaveClipboardIn(path);
     const bool canUndoBulkRename =

@@ -152,7 +152,7 @@ Pane::Pane(int32 number, const Preferences &p,
                                new BMessage(kClearAttributeColumns)));
   modes->SetRadioMode(false);
   modes->SetLabelFromMarked(false);
-  display = new BMenuField("display mode", "", modes);
+  display = new BMenuField("display mode", "View:", modes);
   modes->AddSeparatorItem();
   sidebar = new PaneSidebar(*this, id, *menu, *modes, history,
                             std::move(sharedShelf));
@@ -359,6 +359,9 @@ void Pane::FocusList() {
     grid->MakeFocus(true);
 }
 void Pane::ToggleTreeFocus() { sidebar->ToggleFocus(); }
+bool Pane::CanToggleTree() const {
+  return !einn && (prefs.HasConfigurableSidebar() || mode != MillerMode);
+}
 void Pane::FocusFilter() {
   if (einn)
     return;
@@ -745,12 +748,27 @@ void Pane::MessageReceived(BMessage *m) {
     Reload();
     break;
   case kToggleTree: {
-    if (prefs.IsSmidja() || prefs.SinglePane() || mode == MillerMode)
+    if (!CanToggleTree())
       break;
     sidebar->ResetTree();
-    const auto choice = Sidebar() == SidebarMode::FolderTree
-                            ? SidebarMode::Hidden
-                            : SidebarMode::FolderTree;
+    auto choice = SidebarMode::FolderTree;
+    switch (Sidebar()) {
+    case SidebarMode::FolderTree:
+      choice = SidebarMode::Hidden;
+      break;
+    case SidebarMode::ShortcutsAndTree:
+      choice = SidebarMode::Favorites;
+      break;
+    case SidebarMode::Favorites:
+      choice = SidebarMode::ShortcutsAndTree;
+      break;
+    case SidebarMode::Hidden:
+      if (prefs.HasConfigurableSidebar() && SidebarHasTree(prefs.RestoreSidebar(id)))
+        choice = prefs.RestoreSidebar(id);
+      break;
+    default:
+      break;
+    }
     prefs.SetSidebar(id, choice);
     sidebar->UpdateMode(prefs);
     PublishDisplay();

@@ -44,10 +44,13 @@ WorkspaceToolbar::WorkspaceToolbar(BWindow &window, MainWindowMenu &menu,
 const char *WorkspaceToolbar::CommandText() const { return fCommand->Text(); }
 
 void WorkspaceToolbar::SetTransferTarget(int source, bool available, const char *destination) {
+  const char *direction =
+      fPrefs.panelsStacked ? (source == 0 ? "Top → Bottom" : "Bottom → Top")
+                           : (source == 0 ? "Left → Right" : "Right → Left");
   BString label;
   if (available) {
-    label << "Copy / Move: " << (source == 0 ? "Left → Right" : "Right → Left")
-          << "   " << (destination ? destination : "Open a destination folder");
+    label << "Copy / Move: " << direction << "   "
+          << (destination ? destination : "Open a destination folder");
   }
   if (label != fTransferTarget->Text()) {
     fTransferTarget->SetText(label);
@@ -55,7 +58,7 @@ void WorkspaceToolbar::SetTransferTarget(int source, bool available, const char 
   }
   SetViewVisible(fTransferTarget, available);
   SetBankVisible(!fBank->IsHidden(fBank));
-  fMenu.SetTransferDirection(source, available);
+  fMenu.SetTransferDirection(available ? direction : nullptr);
 }
 
 void WorkspaceToolbar::Arrange() {

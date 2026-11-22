@@ -83,6 +83,7 @@ public:
   int32 PaneOverride() const {
     return prefs.HasPaneMode(id) ? prefs.PaneMode(id) : -1;
   }
+  bool CanToggleTree() const;
   bool SidebarCanBeRestored() const;
   bool LocationValid() const { return locationValid; }
   void RefreshShelf();

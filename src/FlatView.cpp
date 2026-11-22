@@ -296,7 +296,7 @@ public:
       item->SetTarget(owner);
       item->SetMarked(i == FlatMode);
     }
-    auto *display = new BMenuField("flat display mode", "", modes);
+    auto *display = new BMenuField("flat display mode", "View:", modes);
     filter = new BTextControl("flat filter", "Filter:", "", nullptr);
     filter->SetToolTip("Filter by file name or relative folder");
     filter->SetModificationMessage(new BMessage(kFilterChanged));
