@@ -89,6 +89,7 @@ struct EntryOutcome {
 struct Result {
   int completed = 0, skipped = 0;
   bool cancelled = false;
+  int recoverableMoves = 0;
   std::vector<std::string> errors;
   std::vector<std::pair<std::string, std::string>> completedRoots;
   // A cancelled local move left a complete copy and removed no source entries.

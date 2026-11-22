@@ -3,9 +3,12 @@
 #include "ArchiveJobs.h"
 #include "FileClipboard.h"
 #include "TransferCommand.h"
+#include "Trash.h"
 #include "VirtualFile.h"
 #include <Application.h>
 #include <Clipboard.h>
+#include <Node.h>
+#include <String.h>
 #include <algorithm>
 #include <cerrno>
 #include <cstdlib>
@@ -88,11 +91,32 @@ int main() try {
     }
     return false;
   };
+  auto recover = [&](const Result &result, const fs::path &original,
+                     const std::string &contents) {
+    for (const auto &row : result.outcomes) {
+      const std::string prefix = "Original kept in Trash: ";
+      if (row.source != original.string() || row.detail.rfind(prefix, 0) != 0)
+        continue;
+      const auto trash = row.detail.substr(prefix.size());
+      struct stat trashed, parent;
+      const bool sameVolume = !stat(trash.c_str(), &trashed) &&
+                              !stat(original.parent_path().c_str(), &parent) &&
+                              trashed.st_dev == parent.st_dev;
+      return sameVolume && !fs::exists(original) &&
+             RestoreFromTrash(trash) == original.string() &&
+             Read(fs::is_directory(original) ? original / "child" : original) ==
+                 contents;
+    }
+    for (const auto &error : result.errors)
+      std::cerr << error << '\n';
+    return false;
+  };
   Job move{Action::Move, {item.string()}, dest.path.string()};
-  auto result = Run(move, {});
-  check(refuses(move) && !result.errors.empty() && !result.completed &&
-            fs::is_empty(dest.path) && Read(item) == "original",
-        "panel preparation and worker independently reject other-volume move");
+  auto result = Run(PrepareTransfer(move), {});
+  check(result.errors.empty() && result.completed == 1 &&
+            result.recoverableMoves == 1 && Read(destItem) == "original" &&
+            recover(result, item, "original"),
+        "panel transfer writes the destination and restores original from source Trash");
 
   Fixture localTarget("/tmp");
   const auto local = localTarget.path / "first";
@@ -100,18 +124,68 @@ int main() try {
   Write(local, "local");
   Write(remote, "other volume");
   Job mixed{Action::Move, {local.string(), remote.string()}, source.path.string()};
-  result = Run(mixed, {});
-  check(refuses(mixed) && !result.completed && !result.errors.empty() &&
-            !fs::exists(source.path / "first") && Read(local) == "local" &&
-            Read(remote) == "other volume",
-        "entire mixed selection is refused before moving the first entry");
+  result = Run(PrepareTransfer(mixed), {});
+  check(result.completed == 2 && result.errors.empty() &&
+            result.recoverableMoves == 1 &&
+            Read(source.path / "first") == "local" && !fs::exists(local) &&
+            Read(source.path / "second") == "other volume" &&
+            recover(result, remote, "other volume"),
+        "mixed move handles a native rename and USB source retirement independently");
 
   auto tree = source.path / "tree";
+  auto targetTree = dest.path / "tree";
   fs::create_directory(tree);
   Write(tree / "child", "child");
+  BString value("folder metadata"), copy;
+  const bool tagged = BNode(tree.c_str()).WriteAttrString("Listi:test", &value) == B_OK;
   result = Run({Action::Move, {tree.string()}, dest.path.string()}, {});
-  check(!result.completed && !result.errors.empty() && !fs::exists(dest.path / "tree") &&
-            Read(tree / "child") == "child", "other-volume directory move is refused");
+  check(tagged && result.completed == 1 && result.errors.empty() &&
+            Read(targetTree / "child") == "child" &&
+            BNode(targetTree.c_str()).ReadAttrString("Listi:test", &copy) == B_OK &&
+            copy == value && recover(result, tree, "child"),
+        "folder move preserves nested bytes and folder metadata and can be restored");
+
+  Hooks crossHooks;
+  crossHooks.conflict = [](const std::string &) { return Decision::Skip; };
+  Write(destItem, "previous target");
+  result = Run(move, crossHooks);
+  check(result.skipped == 1 && !result.completed && result.errors.empty() &&
+            Read(item) == "original" && Read(destItem) == "previous target",
+        "skipped cross-volume conflict retains both entries");
+  crossHooks.conflict = [](const std::string &) { return Decision::Replace; };
+  crossHooks.proceed = [&] { return Read(destItem) != "original"; };
+  result = Run(move, crossHooks);
+  check(result.cancelled && !result.completed && !result.recoverableMoves &&
+            Read(item) == "original" && Read(destItem) == "original",
+        "cancellation after publish preserves original at source");
+  fs::remove(destItem);
+
+  bool edited = false;
+  crossHooks.proceed = [&] {
+    if (!edited && fs::exists(destItem)) {
+      Write(item, "edited while completing the move");
+      edited = true;
+    }
+    return true;
+  };
+  result = Run(move, crossHooks);
+  check(edited && !result.completed && !result.recoverableMoves &&
+            !result.errors.empty() && Read(destItem) == "original" &&
+            Read(item) == "edited while completing the move",
+        "source modification after publication prevents source retirement");
+  Write(item, "original");
+  fs::remove(destItem);
+
+  // Verify a skipped child does not put a partially copied folder in Trash.
+  Write(tree / "new", "new");
+  crossHooks.proceed = {};
+  crossHooks.conflict = [](const std::string &) { return Decision::Skip; };
+  result = Run({Action::Move, {tree.string()}, dest.path.string()}, crossHooks);
+  check(!result.completed && !result.recoverableMoves && result.skipped == 1 &&
+            Read(tree / "child") == "child" && Read(tree / "new") == "new" &&
+            Read(targetTree / "new") == "new",
+        "a partial folder merge keeps the complete original in place");
+  fs::remove(tree / "new");
 
   auto archive = [&](const fs::path &directory) {
     auto j = PrepareArchiveJob(false, {item.string()});
@@ -141,17 +215,18 @@ int main() try {
 
   BClipboard clipboard("listi-volume-move-test", true);
   PutFileClipboard({item.string()}, true, &clipboard);
-  bool cutRefused = false;
-  try {
-    PrepareFilePaste(dest.path.string(), &clipboard);
-  } catch (const std::exception &error) {
-    cutRefused = std::string(error.what()).find("Move between volumes") != std::string::npos;
+  auto cut = PrepareFilePaste(dest.path.string(), &clipboard);
+  check(!cut.lease.empty() && cut.jobs.size() == 1 &&
+            cut.jobs.front().action == Action::Move,
+        "cross-volume Cut/Paste queues the same guarded Move");
+  if (cut.jobs.size() == 1) {
+    result = Run(cut.jobs.front(), {});
+    FinishFilePaste(cut, {item.string()}, &clipboard);
+    check(result.completed == 1 && result.errors.empty() &&
+              Read(destItem) == "original" && recover(result, item, "original"),
+          "cross-volume pasted cut is recoverable from source Trash");
+    fs::remove(destItem);
   }
-  auto retry = PrepareFilePaste(localTarget.path.string(), &clipboard);
-  check(cutRefused && !retry.lease.empty() && retry.jobs.size() == 1 &&
-            retry.jobs.front().action == Action::Move && !fs::exists(destItem),
-        "rejected cut/paste does not consume or reserve its clipboard entries");
-  FinishFilePaste(retry, {}, &clipboard);
 
   result = Run(PrepareTransfer({Action::Copy, {item.string()}, dest.path.string()}), {});
   check(result.completed == 1 && result.errors.empty() && Read(item) == Read(destItem),
@@ -161,6 +236,7 @@ int main() try {
             Read(localTarget.path / "item") == "original",
         "same-volume Move still transfers the original");
 
+  BNode(tree.c_str()).RemoveAttr("Listi:test");
   // Same-volume folder merges still copy and clean up. Cancellation must
   // distinguish two intact trees from a partially removed source.
   auto merged = localTarget.path / "tree";

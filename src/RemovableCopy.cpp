@@ -144,7 +144,7 @@ void WriteRemovableStagingFile(int source, int staging, const struct stat &befor
     if (!drained) {
       io.detach();
       throw RemovableCopyInterrupted(
-          "USB copy stopped; disk I/O is still pending. No final file was "
+          "Transfer stopped; disk I/O is still pending. No final file was "
           "published for this entry. Check the disk for a temporary copy "
           "after reconnecting.");
     }
@@ -153,7 +153,7 @@ void WriteRemovableStagingFile(int source, int staging, const struct stat &befor
   }
   io.join();
   if (state->error)
-    throw std::runtime_error(std::string("Copy to removable disk: ") +
+    throw std::runtime_error(std::string("Transfer involving removable disk: ") +
                              strerror(state->error));
 }
 } // namespace Listi

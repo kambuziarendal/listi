@@ -64,6 +64,12 @@ what the menu acts on. **This folder** is the current folder, not a child
 folder under the pointer. Dragging local files into a local panel prompts
 for Copy, Move or Cancel; archive and network drops are copy-only.
 
+When Move crosses local volumes, Listi copies the selection, then moves each
+completed original to Trash **on its source volume**. Restore it from Trash
+if needed; wait to empty Trash until you have checked the destination after
+remounting. A skipped conflict or failed copy does not remove the original.
+If the source has no supported writable Trash, use Copy instead.
+
 For a shorter file list, use **Listi > Filter names**. This is a literal
 name filter: hidden rows are deselected. For a wildcard selection, use
 **Select > By pattern…** and enter, for example, `*.png`. Review the match

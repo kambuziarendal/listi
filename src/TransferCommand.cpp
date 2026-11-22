@@ -2,7 +2,6 @@
 #include "TransferCommand.h"
 #include "ArchiveJobs.h"
 #include "JobSnapshot.h"
-#include "MoveVolume.h"
 #include "VirtualFile.h"
 #include <cstdlib>
 #include <limits.h>
@@ -51,8 +50,6 @@ Job PrepareTransfer(Job job, bool allowSameFolder) {
   if (target.Archive())
     return PrepareArchiveCopy(job);
 
-  if (job.action == Action::Move && target.Local())
-    CheckMoveVolumes(job);
   const std::string resolved =
       target.Local() ? ResolveFolder(job.destination) : "";
   std::set<std::string> outputNames;

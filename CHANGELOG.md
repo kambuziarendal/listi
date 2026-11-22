@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.38.0-5 alpha test candidate
+
+- Move between local volumes now keeps each completed original in its source
+  volume’s Trash, rather than trusting a cached write enough to delete it.
+  USB data streaming is supervised in both directions. Use Copy when the source
+  volume does not support recoverable Trash. Cross-volume archive moves still
+  require Copy.
+
 ## 0.38.0-4 alpha test candidate
 
 - A stalled USB data write or flush no longer has to finish before the copy queue can respond to cancellation or disappearance of the destination device. The outstanding request only owns a private staging file; it cannot publish the destination or remove the source. A temporary file can remain after removal. Cross-disk Move is still disabled. A panel reading the interrupted destination lets you navigate away without waiting for the old reader.

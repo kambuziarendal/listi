@@ -810,6 +810,8 @@ void OperationQueue::Loop() {
                                            : ". Cancelled; completed entries kept.");
     else if (renameBatch && result.completed && !undoAvailable)
       summary << ". Undo unavailable: contents could not be verified.";
+    if (result.recoverableMoves)
+      summary << ". Cross-volume originals kept in source Trash.";
     done.AddString("result", summary);
     if (!result.interruptedCopyFolder.empty())
       done.AddString("interruptedCopyFolder", result.interruptedCopyFolder.c_str());

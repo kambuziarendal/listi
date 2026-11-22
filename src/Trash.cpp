@@ -44,25 +44,56 @@ std::string TrashDirectory(const std::string &path, bool create) {
   Require(find_directory(B_TRASH_DIRECTORY, &trash, create, &volume), path);
   return trash.Path();
 }
-std::string MoveToTrash(const std::string &path) {
-  BEntry entry(path.c_str(), false);
-  Require(entry.InitCheck(), path);
-  std::string original = EntryPath(entry);
+namespace {
+std::string CheckedTrash(const std::string &original) {
   std::string trash = TrashDirectory(original, true);
   if (Within(original, trash) || Within(trash, original))
-    throw std::runtime_error(path + ": cannot trash the Trash folder, its "
-                                    "ancestors or an already trashed entry.");
+    throw std::runtime_error(original + ": cannot trash the Trash folder, its "
+                                        "ancestors or an already trashed entry.");
+  return trash;
+}
+void CheckIdentity(BEntry &entry, const NodeIdentity &expected) {
+  node_ref actual;
+  Require(entry.GetNodeRef(&actual), "Check source identity");
+  if (actual.device != expected.device || actual.node != expected.inode)
+    throw std::runtime_error("Selected source changed; not moved to Trash.");
+}
+}
+void CheckTrashSource(const std::string &path) {
+  BEntry entry(path.c_str(), false);
+  Require(entry.InitCheck(), path);
+  CheckedTrash(EntryPath(entry));
+}
+std::string MoveToTrash(const std::string &path, const NodeIdentity *expected) {
+  BEntry entry(path.c_str(), false);
+  Require(entry.InitCheck(), path);
+  if (expected)
+    CheckIdentity(entry, *expected);
+  const std::string original = EntryPath(entry);
+  const std::string trash = CheckedTrash(original);
   BDirectory directory(trash.c_str());
   Require(directory.InitCheck(), trash);
   BNode node(&entry);
   Require(node.InitCheck(), original);
+  node_ref identity, trashIdentity;
+  Require(node.GetNodeRef(&identity), original);
+  Require(directory.GetNodeRef(&trashIdentity), trash);
+  if (trashIdentity.device != identity.device)
+    throw std::runtime_error(original + ": Trash is not on the source volume.");
+  if (expected && (identity.device != expected->device ||
+                   identity.node != expected->inode))
+    throw std::runtime_error(original + ": source changed; not moved to Trash.");
   BString previous;
   bool hadPrevious = node.ReadAttrString(kOriginalPath, &previous) == B_OK;
   BString saved(original.c_str());
   Require(node.WriteAttrString(kOriginalPath, &saved), original);
   // MoveTo(false) never overwrites, including a name created after our check.
-  node_ref identity;
-  Require(node.GetNodeRef(&identity), original);
+  auto restoreMetadata = [&] {
+    if (hadPrevious)
+      node.WriteAttrString(kOriginalPath, &previous);
+    else
+      node.RemoveAttr(kOriginalPath);
+  };
   std::string name;
   status_t status = B_FILE_EXISTS;
   for (unsigned n = 0; n < 10000 && status == B_FILE_EXISTS; n++) {
@@ -71,15 +102,21 @@ std::string MoveToTrash(const std::string &path) {
     if (name.size() >= B_FILE_NAME_LENGTH)
       name =
           "trashed-" + std::to_string(identity.node) + "-" + std::to_string(n);
+    try {
+      if (expected)
+        CheckIdentity(entry, *expected);
+    } catch (...) {
+      restoreMetadata();
+      throw;
+    }
     status = entry.MoveTo(&directory, name.c_str(), false);
   }
   if (status != B_OK) {
-    if (hadPrevious)
-      node.WriteAttrString(kOriginalPath, &previous);
-    else
-      node.RemoveAttr(kOriginalPath);
+    restoreMetadata();
     Require(status, original);
   }
+  if (expected)
+    CheckIdentity(entry, *expected);
   return Join(trash, name);
 }
 std::string RestoreFromTrash(const std::string &path, std::string *warning) {

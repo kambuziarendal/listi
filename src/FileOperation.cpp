@@ -9,9 +9,12 @@
 #include "MoveVolume.h"
 #include "RemovableCopy.h"
 #include "Trash.h"
+#include "VirtualFile.h"
 #include <Directory.h>
 #include <Entry.h>
 #include <Node.h>
+#include <Path.h>
+#include <Volume.h>
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
@@ -29,7 +32,6 @@
 #include <unistd.h>
 
 namespace Listi {
-bool IsVirtual(const std::string &);
 Result RunVirtual(const Job &, const Hooks &);
 
 std::string Join(const std::string &a, const std::string &b) {
@@ -40,7 +42,6 @@ std::string Leaf(const std::string &p) {
   return n == std::string::npos ? p : p.substr(n + 1);
 }
 namespace {
-struct Cancelled {};
 struct FD {
   int n;
   explicit FD(int n) : n(n) {}
@@ -83,22 +84,32 @@ struct Runner {
   std::string guardedSource;
   std::map<std::string, size_t> outcomeIndex;
   struct BackingDevice {
-    std::string path;
+    std::string path, mount;
     NodeIdentity node;
     bool removable = false;
   };
   std::map<dev_t, BackingDevice> backingDevices;
-  void CheckDestinationDevice(dev_t volume) {
+  std::string interruptedFolder;
+  void CheckDevice(dev_t volume, const std::string &folder) {
     auto it = backingDevices.find(volume);
     if (it == backingDevices.end()) {
       fs_info info{};
       if (fs_stat_dev(volume, &info))
-        throw std::runtime_error("The destination volume is no longer available.");
+        throw std::runtime_error(folder + ": volume is no longer available.");
       BackingDevice backing;
       if (strncmp(info.device_name, "/dev/disk/", 10) == 0) {
         backing.path = info.device_name;
         backing.removable = (info.flags & B_FS_IS_REMOVABLE) ||
                             backing.path.rfind("/dev/disk/usb/", 0) == 0;
+      }
+      if (backing.removable) {
+        BVolume disk(volume);
+        BDirectory root;
+        BEntry entry;
+        BPath path;
+        if (disk.GetRootDirectory(&root) == B_OK &&
+            root.GetEntry(&entry) == B_OK && entry.GetPath(&path) == B_OK)
+          backing.mount = path.Path();
       }
       it = backingDevices.emplace(volume, std::move(backing)).first;
     }
@@ -111,14 +122,22 @@ struct Runner {
     if (stat(backing.path.c_str(), &st) ||
         (backing.node.device >= 0 &&
          (backing.node.device != st.st_dev || backing.node.inode != st.st_ino))) {
-      const char *message =
-          "Destination device disconnected or changed. Copy not confirmed; "
-          "check the destination after reconnecting.";
-      if (backing.removable)
+      const auto message = folder +
+          ": device disconnected or changed. Transfer not confirmed; "
+          "check both volumes after reconnecting.";
+      if (backing.removable) {
+        interruptedFolder = backing.mount.empty() ? folder : backing.mount;
         throw RemovableCopyInterrupted(message);
+      }
       throw std::runtime_error(message);
     }
     backing.node = {st.st_dev, st.st_ino};
+  }
+  void CheckDestinationDevice(dev_t volume) {
+    CheckDevice(volume, guardedJob->destination);
+  }
+  void CheckSourceDevice(dev_t volume) {
+    CheckDevice(volume, ParentLocation(guardedSource));
   }
   size_t mutations = 0;
   EntryOutcome &Outcome(const std::string &src, const std::string &dst = {}) {
@@ -184,7 +203,7 @@ struct Runner {
           "Selected destination changed; operation stopped.");
   }
 
-  bool deferCompletion = false;
+  bool deferCompletion = false, recoverableMove = false;
   struct CopiedEntry {
     std::string destination;
     struct stat committed;
@@ -319,6 +338,9 @@ struct Runner {
     if (st.st_dev != volume)
       throw std::runtime_error(path +
                                ": refusing to traverse another mounted volume");
+    if (recoverableMove && !S_ISDIR(st.st_mode) && st.st_nlink > 1)
+      throw std::runtime_error(path +
+                               ": use Copy for hard-linked entries; source retained");
     entries.emplace(path, st);
     if (!S_ISDIR(st.st_mode))
       return;
@@ -347,7 +369,8 @@ struct Runner {
       throw std::runtime_error(source + ": no committed copy; source retained");
     const auto &copy = recorded->second;
     CheckDestinationDevice(copy.committed.st_dev);
-    RequireSameMoveVolume(sourceVolume, copy.committed.st_dev);
+    if (!recoverableMove)
+      RequireSameMoveVolume(sourceVolume, copy.committed.st_dev);
     struct stat now;
     if (lstat(copy.destination.c_str(), &now) || !SameEntry(copy.committed, now)) {
       auto &row = Outcome(source);
@@ -358,8 +381,7 @@ struct Runner {
       throw std::runtime_error(row.detail);
     }
   }
-  void RemoveCopied(const std::string &root, const Snapshot &before,
-                    bool *removedAny = nullptr) {
+  void VerifyCopiedTree(const std::string &root, const Snapshot &before) {
     Snapshot after;
     SnapshotTree(root, after, before.at(root).st_dev);
     if (before.size() != after.size())
@@ -372,6 +394,28 @@ struct Runner {
         throw std::runtime_error(
             root + ": source changed; copied data kept and source retained");
     }
+  }
+  void RetainMovedSource(const std::string &source, const Snapshot &before) {
+    const auto volume = before.at(source).st_dev;
+    CheckSourceDevice(volume);
+    CheckDestinationDevice(guardedJob->expectedDestination.device);
+    Check();
+    VerifyCopiedTree(source, before);
+    Guard();
+    CheckSourceDevice(volume);
+    CheckDestinationDevice(guardedJob->expectedDestination.device);
+    // A cached read/flush is not proof of durable destination data. Only
+    // rename the intact original into its own volume's recoverable Trash.
+    const auto trash =
+        MoveToTrash(source, &guardedJob->expectedSources.at(source));
+    for (const auto &entry : copied)
+      Outcome(entry.first).status = "moved";
+    Outcome(source).detail = "Original kept in Trash: " + trash;
+    ++result.recoverableMoves;
+  }
+  void RemoveCopied(const std::string &root, const Snapshot &before,
+                    bool *removedAny = nullptr) {
+    VerifyCopiedTree(root, before);
     // Reverse path order visits children before parents. Never enumerate new
     // entries during deletion: rmdir fails safely if a new child appears after
     // the snapshot.
@@ -451,6 +495,8 @@ struct Runner {
       Fail(src);
     struct stat before {};
     bool existed = Exists(dst, &before);
+    if (recoverableMove)
+      CheckSourceDevice(st.st_dev);
     if (existed && (deferCompletion || guardedJob->copyForArchiveMove))
       RequireSameMoveVolume(guardedJob->expectedDestination.device, before.st_dev);
     if (existed && guardedJob && guardedJob->action == Action::Duplicate)
@@ -535,6 +581,9 @@ struct Runner {
       Fail(tmp);
     try {
       CheckDestinationDevice(stagingIdentity.st_dev);
+      if (deferCompletion || guardedJob->copyForArchiveMove)
+        RequireSameMoveVolume(guardedJob->expectedDestination.device,
+                              stagingIdentity.st_dev);
       if (S_ISLNK(st.st_mode)) {
         char link[PATH_MAX];
         ssize_t n = readlink(src.c_str(), link, sizeof(link) - 1);
@@ -557,12 +606,15 @@ struct Runner {
         if (fstat(in.n, &opened) || !S_ISREG(opened.st_mode) ||
             !SameEntry(opened, st))
           throw std::runtime_error(src + ": source changed before copying");
-        const auto &backing = backingDevices.at(stagingIdentity.st_dev);
-        if (backing.removable) {
+        const bool removableSource =
+            recoverableMove && backingDevices.at(st.st_dev).removable;
+        if (removableSource || backingDevices.at(stagingIdentity.st_dev).removable) {
           Attributes(src, tmp);
           // No filename is passed to the worker: only this queue thread can
           // replace the final target, after checking both identities again.
           const std::function<void(size_t)> checkpoint = [&](size_t bytes) {
+            if (removableSource)
+              CheckSourceDevice(st.st_dev);
             CheckDestinationDevice(stagingIdentity.st_dev);
             if (bytes)
               Tick(src, bytes);
@@ -574,7 +626,16 @@ struct Runner {
             Fail(src);
           const int stage = out.n;
           out.n = -1;
+          // If cancellation leaves a kernel call pending, suspend the
+          // removable endpoint even when devfs still shows it attached.
+          const auto &endpoint = backingDevices.at(
+              removableSource ? st.st_dev : stagingIdentity.st_dev);
+          interruptedFolder = endpoint.mount.empty()
+                                  ? (removableSource ? ParentLocation(guardedSource)
+                                                     : guardedJob->destination)
+                                  : endpoint.mount;
           WriteRemovableStagingFile(input, stage, st, checkpoint);
+          interruptedFolder.clear();
           struct stat after;
           if (fstat(in.n, &after) || !SameEntry(after, st))
             throw std::runtime_error(src + ": source changed while copying");
@@ -621,6 +682,8 @@ struct Runner {
       if (lstat(tmp.c_str(), &staged) || staged.st_dev != stagingIdentity.st_dev ||
           staged.st_ino != stagingIdentity.st_ino)
         throw std::runtime_error(tmp + ": staging file changed");
+      if (S_ISREG(st.st_mode) && staged.st_size != st.st_size)
+        throw std::runtime_error(src + ": copied size does not match the source");
       CheckDestinationDevice(stagingIdentity.st_dev);
       Commit(tmp, dst, existed, before);
       Done(src, dst, staged);
@@ -674,6 +737,8 @@ struct Runner {
     for (auto &source : job.sources) {
       Check();
       copied.clear();
+      recoverableMove = false;
+      interruptedFolder.clear();
       deferCompletion = job.action == Action::Move;
       try {
         guardedSource = source;
@@ -779,7 +844,15 @@ struct Runner {
           result.completed++;
           continue;
         }
-        if (job.action == Action::Move && !Exists(destination)) {
+        recoverableMove = job.action == Action::Move &&
+                          sourceStat.st_dev != job.expectedDestination.device;
+        if (recoverableMove) {
+          CheckSourceDevice(sourceStat.st_dev);
+          CheckDestinationDevice(job.expectedDestination.device);
+          CheckTrashSource(source);
+        }
+        if (job.action == Action::Move && !recoverableMove &&
+            !Exists(destination)) {
           Guard();
           BEntry e(source.c_str());
           BDirectory dir(job.destination.c_str());
@@ -808,7 +881,10 @@ struct Runner {
             Guard();
             bool removedAny = false;
             try {
-              RemoveCopied(source, beforeMove, &removedAny);
+              if (recoverableMove)
+                RetainMovedSource(source, beforeMove);
+              else
+                RemoveCopied(source, beforeMove, &removedAny);
             } catch (const Cancelled &) {
               if (!removedAny)
                 result.retainedMoveCopy.emplace(source, destination);
@@ -822,7 +898,7 @@ struct Runner {
               h.fileDone(entry.first, entry.second.destination);
         }
       } catch (const RemovableCopyInterrupted &e) {
-        result.interruptedCopyFolder = job.destination;
+        result.interruptedCopyFolder = interruptedFolder;
         Problem(source, e.what());
         if (h.fileFailed)
           h.fileFailed(source, e.what());
@@ -884,7 +960,6 @@ Result Run(const Job &j, const Hooks &h) {
                       [&](const std::string &path) { return move.expectedSources.count(path); });
       if (!frozen)
         FreezeLocalJob(move, move.destination);
-      CheckMoveVolumes(move);
       r.Execute(move);
     } else
       r.Execute(j);
