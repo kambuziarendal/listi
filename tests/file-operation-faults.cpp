@@ -21,7 +21,8 @@ namespace fs = std::filesystem;
 namespace {
 std::string deniedStage, watchedStage, deniedRemoval;
 int watchedFd = -1, writes = 0;
-bool failWrite = false, denyTrashCleanup = false;
+int writeFailure = 0;
+bool denyTrashCleanup = false;
 bool failStageClose = false, failDirectorySync = false;
 int stageForClose = -1;
 ino_t directoryForSync = -1;
@@ -79,8 +80,8 @@ extern "C" ssize_t __wrap_write(int fd, const void *data, size_t size) {
   if (writes == 2)
     return __real_write(fd, data, std::min<size_t>(size, 7));
   watchedFd = -1;
-  if (failWrite) {
-    errno = EIO;
+  if (writeFailure) {
+    errno = writeFailure;
     return -1;
   }
   return __real_write(fd, data, size);
@@ -155,15 +156,19 @@ int main() {
   deniedStage.clear();
 
   watchedStage = (out / ".listi-copy-XXXXXX").string();
-  failWrite = true;
-  result = Run(move, replace);
-  Check(writes == 3 && result.errors.size() == 1 &&
-            Has(result, source, target, "failed", strerror(EIO)) &&
-            Read(source) == payload && Read(target) == "original" &&
-            std::distance(fs::directory_iterator(out), fs::directory_iterator()) == 1,
-        "write failure after partial output discards staging, not the original");
+  for (const int error : {EIO, EDQUOT}) {
+    writes = 0;
+    writeFailure = error;
+    result = Run(move, replace);
+    Check(writes == 3 && !result.completed && result.errors.size() == 1 &&
+              Has(result, source, target, "failed", strerror(error)) &&
+              Read(source) == payload && Read(target) == "original" &&
+              std::distance(fs::directory_iterator(out), fs::directory_iterator()) == 1,
+          error == EDQUOT ? "quota error after partial write preserves both files and removes staging"
+                          : "write failure after partial output discards staging, not the original");
+  }
 
-  failWrite = false;
+  writeFailure = 0;
   writes = 0;
   deniedRemoval = source.string();
   result = Run(move, replace);
