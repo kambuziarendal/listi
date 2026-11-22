@@ -80,6 +80,9 @@ struct Hooks {
   std::function<Decision(const std::string &)> conflict;
   std::function<void(const std::string &, const std::string &)> fileDone;
   std::function<void(const std::string &, const std::string &)> fileFailed;
+  // Observed during the real operation. The UI must not probe a remote server
+  // solely for a progress estimate.
+  std::function<void(const std::string &, uint64_t)> fileSize;
 };
 enum class Publication { NotAttempted, Unknown, Published };
 struct UploadVerification {

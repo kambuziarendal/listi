@@ -503,6 +503,8 @@ struct Runner {
     struct stat st;
     if (lstat(src.c_str(), &st) != 0)
       Fail(src);
+    if (h.fileSize && S_ISREG(st.st_mode))
+      h.fileSize(src, st.st_size);
     struct stat before {};
     bool existed = Exists(dst, &before);
     CheckSourceDevice(st.st_dev);

@@ -26,23 +26,6 @@ uint64_t Size(const std::string &p, const std::function<bool()> &proceed,
               unsigned depth = 0) {
   if (depth > 64 || !proceed())
     return 0;
-  if (Listi::IsVirtual(p)) {
-    try {
-      Listi::TransferControl control;
-      control.proceed = proceed;
-      Listi::FileEntry e;
-      if (!Listi::StatFile(p, e, control) || e.link)
-        return 0;
-      if (!e.directory)
-        return std::max<int64_t>(0, e.size);
-      uint64_t total = 0;
-      for (auto &child : Listi::ListFiles(p, control))
-        total += Size(child.path, proceed, depth + 1);
-      return total;
-    } catch (...) {
-      return 0;
-    }
-  }
   struct stat st;
   if (lstat(p.c_str(), &st))
     return 0;
@@ -136,6 +119,7 @@ class ProgressView : public BView {
   bool choicesVisible = false;
   bool cancelling = false;
   int64 conflictRequest = 0, activeOperation = 0, lastStarted = 0;
+  bool hasByteEstimate = false;
   void ShowChoices(bool show) {
     if (show == choicesVisible)
       return;
@@ -358,7 +342,8 @@ public:
         Listi::SetViewVisible(pause, true);
         Listi::SetViewVisible(cancelButton, true);
         Listi::SetViewVisible(file, true);
-        Listi::SetViewVisible(bar, true);
+        Listi::SetViewVisible(bar, false);
+        hasByteEstimate = false;
         bar->Reset();
         bar->SetMaxValue(1);
         pause->SetLabel("Pause");
@@ -372,15 +357,22 @@ public:
         file->SetToolTip(path);
       }
       int64 total, bytes;
-      if (m->FindInt64("total", &total) == B_OK)
+      if (m->FindInt64("total", &total) == B_OK) {
+        hasByteEstimate = total > 0;
+        Listi::SetViewVisible(bar, hasByteEstimate);
         bar->SetMaxValue(float(std::max<int64>(1, total)));
+      }
       if (m->FindInt64("bytes", &bytes) == B_OK) {
         // Bytes can reach the estimate before publication or source cleanup.
         const float progress = std::min(float(bytes), 0.99f * bar->MaxValue());
-        bar->Update(progress - bar->CurrentValue());
+        if (hasByteEstimate)
+          bar->Update(progress - bar->CurrentValue());
         BString s;
         s << bytes << " bytes processed";
-        bar->SetToolTip(s);
+        if (hasByteEstimate)
+          bar->SetToolTip(s);
+        else
+          file->SetToolTip(s);
       }
       break;
     }
@@ -697,17 +689,19 @@ void OperationQueue::Loop() {
     start.AddBool("start", true);
     Publish(start);
     uint64_t total = 0;
-    if (job.action == Listi::Action::Copy ||
+    const bool localSources = std::none_of(job.sources.begin(), job.sources.end(),
+        [](const auto &source) { return Listi::IsVirtual(source); });
+    if (localSources && (job.action == Listi::Action::Copy ||
         job.action == Listi::Action::Move ||
         job.action == Listi::Action::Duplicate ||
         job.action == Listi::Action::CreateArchive ||
         job.action == Listi::Action::EditArchive ||
-        job.action == Listi::Action::MoveArchive)
+        job.action == Listi::Action::MoveArchive))
       for (auto &s : job.sources)
         total += Size(s, [this] { return Proceed(); });
     BMessage size(kJobUpdate);
     size.AddInt64("operation", operation);
-    size.AddInt64("total", std::max<uint64_t>(1, total));
+    size.AddInt64("total", total);
     Publish(size);
     std::map<std::string, uint64_t> fileBytes, fileSizes;
     uint64_t bytes = 0;
@@ -715,20 +709,12 @@ void OperationQueue::Loop() {
     Listi::Hooks hooks;
     hooks.proceed = [this] { return Proceed(); };
     hooks.conflict = [this](auto &p) { return Ask(p); };
+    hooks.fileSize = [&](const std::string &path, uint64_t size) {
+      fileSizes[path] = size;
+    };
     hooks.progress = [&](auto &p, uint64_t n) {
       bytes += n;
       fileBytes[p] += n;
-      if (!fileSizes.count(p)) {
-        try {
-          Listi::FileEntry entry;
-          Listi::TransferControl control;
-          control.proceed = hooks.proceed;
-          if (Listi::StatFile(p, entry, control))
-            fileSizes[p] = std::max<int64_t>(0, entry.size);
-        } catch (...) {
-          fileSizes[p] = 0;
-        }
-      }
       if (system_time() - last < 80000)
         return;
       last = system_time();

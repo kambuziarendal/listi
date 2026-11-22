@@ -211,12 +211,15 @@ struct Runner {
             directories.count(dst) != 0};
     auto control = Control(src);
     control.Check();
-    if (hooks.progress)
-      hooks.progress(src, 0);
     RememberDirectory(ParentLocation(dst));
     FileEntry source, target;
     if (!StatFile(src, source, control))
       throw std::runtime_error("Source no longer exists");
+    if (hooks.fileSize && !source.directory && !source.link &&
+        source.sizeKnown && source.size >= 0)
+      hooks.fileSize(src, source.size);
+    if (hooks.progress)
+      hooks.progress(src, 0);
     if (source.link)
       throw std::runtime_error(
           "Links are not followed during archive/network transfers");
@@ -267,6 +270,7 @@ struct Runner {
       local.proceed = control.proceed;
       local.fileDone = {};
       local.fileFailed = {};
+      local.fileSize = {};
       // Local Run has its own cancellation type. Let its proceed callback
       // drive cancellation and translate our conflict abort at the boundary.
       local.progress = [](const std::string &, uint64_t) {};
