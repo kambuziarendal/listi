@@ -149,6 +149,9 @@ private:
   std::unique_ptr<BMessageRunner> progressTimer;
   std::map<std::string, Transfer> transfers;
   BLooper *scanner = nullptr;
+  void StartDirectoryReader();
+  void AfterInterruptedCopy(const char *folder);
+  bool mediaReadSuspended = false;
   std::shared_ptr<struct DirectoryScanDelivery> scanDelivery;
   std::unique_ptr<BMessageRunner> scanTimer;
   std::shared_ptr<std::atomic<int64>> generation;

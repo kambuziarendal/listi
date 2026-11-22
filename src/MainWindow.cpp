@@ -408,6 +408,17 @@ public:
       queue.ErrorInfo("Switch to Files in the affected panel before using this command.");
       return;
     }
+    // The last completed scan can explicitly invalidate the location, e.g.
+    // after USB removal. Do not synchronously probe that stale mount on retry.
+    const bool panelTransfer = m->what == kCopy || m->what == kMove;
+    const bool writesHere = m->what == kClipboardPaste || m->what == kClipboardSaveText ||
+                           m->what == kClipboardSaveImage || m->what == kMkdir;
+    const Pane &destination = *panes[panelTransfer ? 1 - source : source];
+    if ((panelTransfer || writesHere) && !destination.LocationValid() &&
+        !destination.IsScanning()) {
+      queue.ErrorInfo("Choose an available destination folder, or reconnect the disk and reload.");
+      return;
+    }
     auto &panel = split->Panel(source);
     if (panel.Current() == PanelPage::Flat) {
       auto *flat = panel.Page(PanelPage::Flat);

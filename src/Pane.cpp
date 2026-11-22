@@ -214,11 +214,42 @@ void Pane::AttachedToWindow() {
   edit->TextView()->AddFilter(new PaneInput(this, edit));
   auto field = dynamic_cast<BMenuField *>(FindView("go"));
   field->Menu()->SetTargetForItems(this);
+  StartDirectoryReader();
+  Apply(prefs);
+  Navigate(path);
+}
+void Pane::StartDirectoryReader() {
   scanDelivery = std::make_shared<DirectoryScanDelivery>();
   scanner = CreateDirectoryScanner(BMessenger(this), generation, scanDelivery);
   scanner->Run();
-  Apply(prefs);
-  Navigate(path);
+}
+void Pane::AfterInterruptedCopy(const char *folder) {
+  const std::string lost(folder);
+  const bool affected = path == folder || path.StartsWith((lost + "/").c_str());
+  if (scanning) {
+    // A reader in the old volume's opendir or icon lookup may never return.
+    // Don't join it or enqueue the new location behind it. The serial also
+    // rejects batches that were already in the window's port.
+    history.Complete(serial, path.String(), false);
+    generation->store(++serial);
+    scanDelivery->retired.store(true);
+    BMessage quit(B_QUIT_REQUESTED);
+    BMessenger(scanner).SendMessage(&quit, (BHandler *)nullptr, 0);
+    StartDirectoryReader();
+    scanning = refreshPending = false;
+    scanTimer.reset();
+  }
+  if (!affected) {
+    if (!mediaReadSuspended)
+      Reload();
+    return;
+  }
+  stop_watching(this);
+  mediaReadSuspended = true;
+  locationValid = false;
+  ClearRows();
+  UpdateNavigation();
+  SetNavigationError("Copy stopped on this disk. Choose another folder, or reconnect and reload.");
 }
 void Pane::Activate() {
   if (Window()) {
@@ -506,6 +537,7 @@ void Pane::UpdateNavigation() {
 }
 void Pane::StartNavigation(const std::string &request, int target, bool trash) {
   stop_watching(this);
+  mediaReadSuspended = false;
   reveal = {};
   columnAction.MakeEmpty();
   savedSelection.clear();
@@ -745,7 +777,10 @@ void Pane::MessageReceived(BMessage *m) {
         transfer.second.error =
             "Transfer did not complete. See Operations for details.";
       }
-    Reload();
+    if (const char *folder = m->GetString("interruptedCopyFolder", nullptr))
+      AfterInterruptedCopy(folder);
+    else if (!mediaReadSuspended)
+      Reload();
     break;
   case kToggleTree: {
     if (!CanToggleTree())
@@ -1133,7 +1168,8 @@ void Pane::MessageReceived(BMessage *m) {
     break;
   }
   case B_NODE_MONITOR:
-    Reload();
+    if (!mediaReadSuspended)
+      Reload();
     break;
   case B_COLORS_UPDATED:
     Apply(prefs);

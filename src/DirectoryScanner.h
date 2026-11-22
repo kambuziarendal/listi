@@ -8,6 +8,7 @@
 // the pane from its reading state. The owning pane polls this while scanning.
 struct DirectoryScanDelivery {
   std::atomic<int64> failedSerial{0};
+  std::atomic<bool> retired{false};
 };
 BLooper *
 CreateDirectoryScanner(BMessenger target,

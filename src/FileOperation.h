@@ -97,6 +97,8 @@ struct Result {
   std::vector<EntryOutcome> outcomes;
   std::optional<Job> bulkRenameUndo;
   bool bulkRenameRecoveryNeeded = false;
+  // Do not reread this folder automatically after a removable transfer lost it.
+  std::string interruptedCopyFolder;
 };
 Result Run(const Job &, const Hooks &);
 std::string Join(const std::string &, const std::string &);

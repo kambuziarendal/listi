@@ -24,9 +24,16 @@ std::atomic<int> rowAttempts{0}, doneAttempts{0};
 std::atomic<int64> lastDoneSerial{-1};
 std::shared_ptr<std::atomic<int64>> generation;
 bool cancelOnFailure=false;
+std::atomic<bool> holdNextRows{false};
+sem_id held, resume, released;
 }
 extern "C" status_t __real__ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl(const BMessenger*,BMessage*,BHandler*,bigtime_t);
 extern "C" status_t __wrap__ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl(const BMessenger* self,BMessage* message,BHandler* reply,bigtime_t timeout) {
+  if (message->what == kRows && holdNextRows.exchange(false)) {
+    release_sem(held);
+    acquire_sem(resume);
+    release_sem(released);
+  }
   auto fail=[&](std::atomic<int>& n) { int old=n.load(); if(old>0) {n.fetch_sub(1);return true;} return false; };
   if(message->what==kRows) { ++rowAttempts; if(fail(rowFailures)) {if(cancelOnFailure)generation->fetch_add(1);return B_TIMED_OUT;} }
   if (message->what == kScanDone) {
@@ -174,6 +181,37 @@ int main() {
  } else {
    check(false, "native pane has controls for the navigation retry test");
  }
+ // Park a native reader with its own looper locked. Navigating to an
+ // independent location must complete before the obsolete reader returns.
+ held = create_sem(0, "held directory reader");
+ resume = create_sem(0, "resume directory reader");
+ released = create_sem(0, "released directory reader");
+ holdNextRows = true;
+ pane->Navigate(folder.c_str());
+ window->Unlock();
+ check(acquire_sem_etc(held, 1, B_RELATIVE_TIMEOUT, 5000000) == B_OK,
+       "old reader is blocked before media loss");
+ window->Lock();
+ BMessage interrupted(kJobDone);
+ interrupted.AddString("interruptedCopyFolder", pane->Path());
+ pane->MessageReceived(&interrupted);
+ BMessage unrelated(kJobDone);
+ pane->MessageReceived(&unrelated);
+ check(!pane->LocationValid() && !pane->IsScanning(),
+       "interrupted panel disables file actions and does not automatically reread the disk");
+ pane->Navigate(root.c_str());
+ window->Unlock();
+ check(ready(), "new directory settles before the retired reader returns");
+ release_sem(resume);
+ check(acquire_sem_etc(released, 1, B_RELATIVE_TIMEOUT, 5000000) == B_OK,
+       "old reader can unwind");
+ window->Lock();
+ pane->Select(1);
+ check(pane->LocationValid() && !pane->Selected().empty() && pane->Selected().size() < 160,
+       "late old rows do not replace the new directory");
  window->Quit();
+ delete_sem(held);
+ delete_sem(resume);
+ delete_sem(released);
  clean(root);std::cout<<checks<<" checks, "<<failures<<" failures"<<std::endl;return failures?1:0;
 }

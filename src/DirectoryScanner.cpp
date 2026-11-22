@@ -45,6 +45,10 @@ public:
           std::shared_ptr<DirectoryScanDelivery> d)
       : BLooper("directory reader"), target(t), generation(g), delivery(d) {}
   void MessageReceived(BMessage *m) override {
+    if (delivery && delivery->retired.load()) {
+      Quit();
+      return;
+    }
     if (m->what != kScan) {
       BLooper::MessageReceived(m);
       return;

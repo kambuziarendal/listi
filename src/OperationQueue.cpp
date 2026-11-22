@@ -811,6 +811,8 @@ void OperationQueue::Loop() {
     else if (renameBatch && result.completed && !undoAvailable)
       summary << ". Undo unavailable: contents could not be verified.";
     done.AddString("result", summary);
+    if (!result.interruptedCopyFolder.empty())
+      done.AddString("interruptedCopyFolder", result.interruptedCopyFolder.c_str());
     if (transfer) {
       const auto &entry = result.completedRoots.empty()
                               ? firstTransfer : result.completedRoots.front();

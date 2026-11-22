@@ -822,6 +822,7 @@ struct Runner {
               h.fileDone(entry.first, entry.second.destination);
         }
       } catch (const RemovableCopyInterrupted &e) {
+        result.interruptedCopyFolder = job.destination;
         Problem(source, e.what());
         if (h.fileFailed)
           h.fileFailed(source, e.what());

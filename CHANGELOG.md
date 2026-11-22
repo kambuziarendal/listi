@@ -1,8 +1,8 @@
 # Changelog
 
-## 0.38.0-2 alpha test candidate
+## 0.38.0-4 alpha test candidate
 
-- A stalled USB data write or flush no longer has to finish before the copy queue can respond to cancellation or disappearance of the destination device. The outstanding request only owns a private staging file; it cannot publish the destination or remove the source. A temporary file can remain after removal. Cross-disk Move is still disabled.
+- A stalled USB data write or flush no longer has to finish before the copy queue can respond to cancellation or disappearance of the destination device. The outstanding request only owns a private staging file; it cannot publish the destination or remove the source. A temporary file can remain after removal. Cross-disk Move is still disabled. A panel reading the interrupted destination lets you navigate away without waiting for the old reader.
 
 ## 0.38.0-1 alpha test candidate
 
