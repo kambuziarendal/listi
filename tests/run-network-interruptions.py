@@ -2,6 +2,11 @@
 # Report directory contains ssh wrapper and network/share from the owned fixture.
 from pathlib import Path
 import os,shlex,subprocess,urllib.request,json,hashlib,sys,time
+modes = ['none', 'corrupt-stage', 'download', 'upload', 'publish-before',
+         'backup-reply', 'publish-reply', 'cleanup', 'cancel-download']
+if sys.argv[1:] == ['--list']:
+ print('\n'.join(protocol + ':' + mode for protocol in ('smb', 'ftp', 'sftp') for mode in modes))
+ sys.exit(0)
 if len(sys.argv)<2:raise SystemExit('Usage: run-network-interruptions.py REPORT [smb ftp sftp]')
 r=Path(sys.argv[1]).resolve();share=r/'network/share'
 protocols=sys.argv[2:] or ['smb','ftp','sftp']
@@ -9,8 +14,6 @@ if any(protocol not in ('smb','ftp','sftp') for protocol in protocols):
  raise SystemExit('Unknown network protocol')
 guest_binary=os.environ.get('LISTI_NETWORK_TEST_BINARY','/boot/home/listi-024-final/build/native-audit-tests/network-interruptions')
 guest_known_hosts=os.environ.get('LISTI_NETWORK_KNOWN_HOSTS','/boot/home/listi-network-known-hosts')
-modes = ['none', 'corrupt-stage', 'download', 'upload', 'publish-before',
-         'backup-reply', 'publish-reply', 'cleanup', 'cancel-download']
 requested = os.environ.get('NET_CASES', '').split()
 available = {protocol + ':' + mode for protocol in protocols for mode in modes}
 if len(set(protocols)) != len(protocols) or len(set(requested)) != len(requested):

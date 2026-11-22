@@ -44,9 +44,9 @@ def wait_listening(port, process):
 
 
 def extended(config, output, ssh, scratch):
-    def guest(command, log, connection=ssh, **kwargs):
+    def guest(command, log, **kwargs):
         with (output / log).open("wb") as stream:
-            subprocess.run([*connection, command], stdout=stream, stderr=subprocess.STDOUT,
+            subprocess.run([*ssh, command], stdout=stream, stderr=subprocess.STDOUT,
                            timeout=600, check=True, **kwargs)
 
     cert, key = config / "ftps.pem", config / "ftps.key"
@@ -79,30 +79,55 @@ def extended(config, output, ssh, scratch):
         forwards = []
         for port in (1445, 2121, 2222, 2143, *range(31000, 31020), *range(31300, 31310)):
             forwards.extend(["-R", f"127.0.0.1:{port}:127.0.0.1:{port}"])
-        # The test command and its forwards share one SSH connection. Each
-        # invocation waits for its own forwarding requests during SSH startup
-        # and closes all channels on exit, including after a client timeout.
-        forwarded_ssh = [*ssh[:-1], "-o", "ExitOnForwardFailure=yes", *forwards, ssh[-1]]
-        guest("set -e; cd ~/listi-ephemeral; "
-              'LISTI_TEST_NETWORK_HOST=127.0.0.1 LISTI_TEST_FTPS=1 /boot/system/apps/Listi '
-              '--virtual-test "$PWD/build/virtual" "$PWD/build/known-hosts"',
-              "installed-protocols.log", connection=forwarded_ssh)
+        # Keep command completion independent of sockets left open by a test.
+        # -f returns only after ssh confirms all remote forward requests.
+        control = str(scratch / "forward.sock")
+        master = [*ssh[:-1], "-S", control]
+        @contextlib.contextmanager
+        def forwarding(log):
+            with (output / log).open("ab") as stream:
+                subprocess.run([*master, "-M", "-fN", "-o", "ExitOnForwardFailure=yes",
+                                *forwards, ssh[-1]], check=True, timeout=20,
+                               stdout=stream, stderr=subprocess.STDOUT)
+                try:
+                    yield
+                finally:
+                    subprocess.run([*master, "-O", "exit", ssh[-1]], check=True, timeout=10,
+                                   stdout=stream, stderr=subprocess.STDOUT)
+
+        with forwarding("forwarding.log"):
+            guest("set -e; cd ~/listi-ephemeral; "
+                  'LISTI_TEST_NETWORK_HOST=127.0.0.1 LISTI_TEST_FTPS=1 /boot/system/apps/Listi '
+                  '--virtual-test "$PWD/build/virtual" "$PWD/build/known-hosts"',
+                  "installed-protocols.log")
         guest_root = subprocess.check_output([*ssh, "cd ~/listi-ephemeral && pwd"],
                                              text=True, timeout=20).strip()
-        (scratch / "ssh").write_text("#!/bin/sh\nexec " + shlex.join(forwarded_ssh) + ' "$@"\n')
+        (scratch / "ssh").write_text("#!/bin/sh\nexec " + shlex.join(ssh) + ' "$@"\n')
         (scratch / "ssh").chmod(0o700)
         env = os.environ.copy()
         env.pop("NET_CASES", None)
         env.pop("NET_RUN", None)
         env.update(LISTI_NETWORK_TEST_BINARY=guest_root + "/build/network-interruptions",
                    LISTI_NETWORK_KNOWN_HOSTS=guest_root + "/build/known-hosts")
+        matrix = [sys.executable, ROOT / "tests/run-network-interruptions.py"]
+        cases = subprocess.check_output([*matrix, "--list"], text=True).splitlines()
+        if len(cases) != 27 or len(set(cases)) != 27:
+            raise RuntimeError("Invalid interruption case manifest")
+        results = []
         try:
             with (output / "interruptions.log").open("wb") as stream:
-                subprocess.run([sys.executable, ROOT / "tests/run-network-interruptions.py", scratch],
-                               env=env, stdout=stream, stderr=subprocess.STDOUT,
-                               timeout=2400, check=True)
+                for case in cases:
+                    suffix = "-" + case.replace(":", "-")
+                    with forwarding("forwarding.log"):
+                        subprocess.run([*matrix, scratch], env=dict(env, NET_CASES=case, NET_RUN=suffix),
+                                       stdout=stream, stderr=subprocess.STDOUT, timeout=100, check=True)
+                    row, = json.loads((scratch / ("network-results" + suffix + ".json")).read_text())
+                    if not row["ok"] or row["protocol"] + ":" + row["mode"] != case:
+                        raise RuntimeError(f"Missing passing interruption receipt for {case}")
+                    results.append(row)
+                    (output / "network-results.json").write_text(json.dumps(results, indent=2))
         finally:
-            for entry in (*scratch.glob("*.log"), *scratch.glob("network-results.json")):
+            for entry in (*scratch.glob("*.log"), *scratch.glob("network-results-*.json")):
                 shutil.copyfile(entry, output / entry.name)
         results = json.loads((output / "network-results.json").read_text())
         if len(results) != 27 or len({(r["protocol"], r["mode"]) for r in results}) != 27:
