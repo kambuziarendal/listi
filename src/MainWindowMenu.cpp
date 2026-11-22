@@ -151,10 +151,24 @@ void MainWindowMenu::AddListiMenu() {
   AddItem(view);
 }
 
+void MainWindowMenu::SetTransferDirection(int source, bool available) {
+  for (auto action : {kCopy, kMove}) {
+    if (auto item = FindItem(action)) {
+      BString label(action == kCopy ? "Copy" : "Move");
+      if (available)
+        label << (source == 0 ? " left → right" : " right → left");
+      else
+        label << " to other panel";
+      if (label != item->Label())
+        item->SetLabel(label);
+      item->SetEnabled(available);
+    }
+  }
+}
+
 void MainWindowMenu::SetWorkspace(const WorkspaceLayout &layout, bool quickView) {
-  for (auto action : {kCopy, kMove, kSame})
-    if (auto item = FindItem(action))
-      item->SetEnabled(!layout.SinglePane());
+  if (auto item = FindItem(kSame))
+    item->SetEnabled(!layout.SinglePane());
   if (auto item = FindItem(kSwitch)) {
     const bool treeFocus = layout.workspace == Workspace::askr;
     item->SetLabel(treeFocus ? "Switch tree/list focus" : "Switch panel");

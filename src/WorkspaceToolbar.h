@@ -2,6 +2,7 @@
 #pragma once
 
 class BGroupView;
+class BStringView;
 class BTextControl;
 class BWindow;
 class MainWindowMenu;
@@ -20,6 +21,7 @@ public:
   BGroupView *Bottom() const { return fBottom; }
   const char *CommandText() const;
 
+  void SetTransferTarget(int source, bool available, const char *destination);
   void Arrange();
   void ApplyVisibility(bool promptPending);
   void Resize(float width, bool promptPending);
@@ -36,6 +38,7 @@ private:
   BGroupView *fTop, *fBottom;
   FunctionButtonBank *fBank;
   BTextControl *fCommand;
+  BStringView *fTransferTarget;
 };
 
 } // namespace Listi

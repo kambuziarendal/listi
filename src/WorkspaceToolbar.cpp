@@ -8,6 +8,7 @@
 #include "ViewVisibility.h"
 #include <GroupLayout.h>
 #include <GroupView.h>
+#include <StringView.h>
 #include <TextControl.h>
 #include <TextView.h>
 #include <Window.h>
@@ -20,7 +21,8 @@ WorkspaceToolbar::WorkspaceToolbar(BWindow &window, MainWindowMenu &menu,
       fTop(new BGroupView(B_VERTICAL, 5)),
       fBottom(new BGroupView(B_VERTICAL, 5)),
       fBank(new FunctionButtonBank(menu)),
-      fCommand(new BTextControl("Command:", "", nullptr)) {
+      fCommand(new BTextControl("Command:", "", nullptr)),
+      fTransferTarget(new BStringView("panel transfer target", "")) {
   fTop->SetName("top workspace tools");
   fTop->GroupLayout()->SetInsets(8, 4, 8, 4);
   fBottom->SetName("bottom workspace tools");
@@ -29,11 +31,31 @@ WorkspaceToolbar::WorkspaceToolbar(BWindow &window, MainWindowMenu &menu,
       new ExplicitSubmit(BMessenger(&window), BMessage(kCommand)));
   fCommand->SetToolTip(
       "Runs a shell command in the active directory using Terminal.");
+  fTransferTarget->SetTruncation(B_TRUNCATE_MIDDLE);
+  fTransferTarget->SetExplicitMinSize(BSize(0, B_SIZE_UNSET));
+  fTransferTarget->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
+  fTransferTarget->Hide();
+  fTop->AddChild(fTransferTarget);
   fBottom->AddChild(fBank);
   fBottom->AddChild(fCommand);
 }
 
 const char *WorkspaceToolbar::CommandText() const { return fCommand->Text(); }
+
+void WorkspaceToolbar::SetTransferTarget(int source, bool available, const char *destination) {
+  BString label;
+  if (available) {
+    label << "Copy / Move: " << (source == 0 ? "Left → Right" : "Right → Left")
+          << "   " << (destination ? destination : "Open a destination folder");
+  }
+  if (label != fTransferTarget->Text()) {
+    fTransferTarget->SetText(label);
+    fTransferTarget->SetToolTip(label.IsEmpty() ? nullptr : label.String());
+  }
+  SetViewVisible(fTransferTarget, available);
+  SetBankVisible(!fBank->IsHidden(fBank));
+  fMenu.SetTransferDirection(source, available);
+}
 
 void WorkspaceToolbar::Arrange() {
   auto *bankZone = fPrefs.bankTop ? fTop : fBottom;
@@ -69,7 +91,9 @@ void WorkspaceToolbar::SetBankVisible(bool visible) {
     const bool hasBank = fBank->Parent() == zone && !fBank->IsHidden(fBank);
     const bool hasCommand =
         fCommand->Parent() == zone && !fCommand->IsHidden(fCommand);
-    SetViewVisible(zone, hasBank || hasCommand);
+    const bool hasTransfer =
+        fTransferTarget->Parent() == zone && !fTransferTarget->IsHidden(fTransferTarget);
+    SetViewVisible(zone, hasBank || hasCommand || hasTransfer);
   }
 }
 

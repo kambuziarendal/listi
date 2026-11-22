@@ -101,10 +101,18 @@ class MainWindow : public BWindow {
     }
     split->Focus();
   }
+  void UpdateTransferTarget() {
+    const int source = split->Source();
+    const auto &target = *panes[1 - source];
+    const bool available = !prefs.SinglePane() && split->AllowsCommand(kCopy);
+    const bool folder = target.LocationValid() && strcmp(target.Path(), "@disks") != 0;
+    toolbar.SetTransferTarget(source, available, folder ? target.Path() : nullptr);
+  }
   void ApplyWorkspace() {
     toolbar.Arrange();
     split->ApplyWorkspace();
     queue.SetCompact(prefs.SinglePane());
+    UpdateTransferTarget();
     // Fit the buttons after the rest of the workspace has its final geometry.
     toolbar.ApplyVisibility(actionArea->Pending());
   }
@@ -331,7 +339,13 @@ public:
                            ? dynamic_cast<BView *>(target) : CurrentFocus();
       split->FollowFocus(receiver);
     }
+    const bool quitting = message->what == B_QUIT_REQUESTED;
+    if (quitting) {
+      BWindow::DispatchMessage(message, target);
+      return;
+    }
     BWindow::DispatchMessage(message, target);
+    UpdateTransferTarget();
   }
   void MenusBeginning() override {
     BWindow::MenusBeginning();

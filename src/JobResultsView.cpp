@@ -119,6 +119,8 @@ void JobResultsView::Finished(const BMessage &event) {
            false);
   std::string log = id ? "#" + std::to_string(id) + " " : "";
   log += event.GetString("result", "");
+  if (const char *transfer = event.GetString("transferResult", nullptr))
+    log += std::string("\n") + transfer;
   const char *source, *destination;
   if (event.FindString("retainedSource", &source) == B_OK &&
       event.FindString("retainedDestination", &destination) == B_OK)

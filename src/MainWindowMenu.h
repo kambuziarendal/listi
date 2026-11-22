@@ -13,6 +13,7 @@ class MainWindowMenu : public BMenuBar {
 public:
   MainWindowMenu();
 
+  void SetTransferDirection(int source, bool available);
   void SetWorkspace(const WorkspaceLayout &layout, bool quickView);
   void SetPreview(const WorkspaceLayout &layout, bool showingQuickView);
   void SetFileActions(int32 viewMode, bool flat, bool canOpenFlatView,

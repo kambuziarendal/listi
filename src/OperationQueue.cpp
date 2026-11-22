@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstring>
 #include <dirent.h>
+#include <set>
 #include <sys/stat.h>
 namespace {
 constexpr uint32 kCancelAll = 'jcab', kJobAccepted = 'jacp';
@@ -130,7 +131,7 @@ public:
     title->SetFont(be_bold_font);
     file = new BStringView("current-file", "");
     file->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
-    file->SetExplicitMinSize(BSize(200, B_SIZE_UNSET));
+    file->SetExplicitMinSize(BSize(0, B_SIZE_UNSET));
     file->SetTruncation(B_TRUNCATE_MIDDLE);
     summary = new BStringView("summary", "Ready");
     summary->SetExplicitMinSize(BSize(180, B_SIZE_UNSET));
@@ -322,7 +323,10 @@ public:
       if (!activeOperation || operation != activeOperation)
         break;
       title->SetText(m->GetString("title", title->Text()));
-      file->SetText(m->GetString("path", file->Text()));
+      if (const char *path = m->GetString("path", nullptr)) {
+        file->SetText(path);
+        file->SetToolTip(path);
+      }
       int64 total, bytes;
       if (m->FindInt64("total", &total) == B_OK)
         bar->SetMaxValue(float(std::max<int64>(1, total)));
@@ -352,8 +356,13 @@ public:
         pause->SetEnabled(false);
         cancelButton->SetEnabled(false);
         cancelAllButton->SetEnabled(false);
-        if (!file->IsHidden())
+        const char *transfer = m->GetString("transferResult", "");
+        if (*transfer) {
+          file->SetText(transfer);
+          file->SetToolTip(transfer);
+        } else if (!file->IsHidden()) {
           file->Hide();
+        }
         if (!bar->IsHidden())
           bar->Hide();
       }
@@ -686,8 +695,19 @@ void OperationQueue::Loop() {
                         : 0.f);
       main.SendMessage(&file, (BHandler *)nullptr, 500000);
     };
+    const bool transfer = job.action == Listi::Action::Copy ||
+                          job.action == Listi::Action::Move ||
+                          job.action == Listi::Action::MoveArchive ||
+                          job.action == Listi::Action::EditArchive;
+    std::set<std::string> transferSources;
+    if (transfer)
+      transferSources.insert(job.sources.begin(), job.sources.end());
+    std::pair<std::string, std::string> firstTransfer;
     hooks.fileDone = [&](const std::string &path,
                          const std::string &destination) {
+      if (transfer && firstTransfer.first.empty() &&
+          transferSources.count(path))
+        firstTransfer = {path, destination};
       BMessage file(kFileProgress);
       file.AddString("path", path.c_str());
       file.AddString("destination", destination.c_str());
@@ -740,6 +760,18 @@ void OperationQueue::Loop() {
     else if (renameBatch && result.completed && !undoAvailable)
       summary << ". Undo unavailable: contents could not be verified.";
     done.AddString("result", summary);
+    if (transfer) {
+      const auto &entry = result.completedRoots.empty()
+                              ? firstTransfer : result.completedRoots.front();
+      if (!entry.first.empty() && !entry.second.empty()) {
+        BString transferResult;
+        transferResult << Listi::LocationLeaf(entry.first).c_str();
+        if (result.completed > 1)
+          transferResult << " (+" << result.completed - 1 << ")";
+        transferResult << " → " << entry.second.c_str();
+        done.AddString("transferResult", transferResult);
+      }
+    }
     done.AddBool("complete", !result.cancelled && result.errors.empty() &&
                                  result.skipped == 0);
     done.AddBool("cancelled", result.cancelled);
