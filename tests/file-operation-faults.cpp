@@ -166,7 +166,6 @@ int main() {
   watchedStage.clear();
 
   std::ofstream(target) << "original";
-  std::ofstream(target) << "original";
   watchedStage = (out / ".listi-copy-XXXXXX").string();
   failStageClose = true;
   result = Run(move, replace);
@@ -189,6 +188,7 @@ int main() {
             Read(source) == payload && Read(target) == payload,
         "directory flush failure accurately reports a changed target and retained source");
 
+  std::ofstream(target) << "original";
   Hooks disconnect = replace;
   disconnect.progress = [](const std::string &, uint64_t bytes) {
     if (bytes)

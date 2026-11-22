@@ -21,6 +21,8 @@ constexpr size_t kActivityBytes = 65536;
 std::string Label(const std::string &status) {
   if (status == "source-retained")
     return "Copied; source retained";
+  if (status == "published-flush-failed")
+    return "Published; directory flush failed";
   if (status == "partial")
     return "Partially completed";
   if (status == "unprocessed")

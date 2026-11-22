@@ -246,6 +246,17 @@ LISTI_TEST_VOLUME=/path/to/test-volume python3 tests/run-native-audit.py cross-v
 Use a dedicated disposable volume for disk-full checks. Never fill an
 ordinary working volume to exercise a failure path.
 
+### Recovering a staging directory
+
+A failed archive operation reports if Listi cannot remove its staging folder.
+After a process crash, look for hidden `.Listi-archive-stage-*` directories
+in the affected destination. The name alone does not establish ownership.
+Inspect the contents and compare them with the source and destination before
+removing anything. Listi does not delete staging-looking names on restart.
+Only identities belonging to live operations are excluded from listings and
+search. Regular-file staging can leave `.listi-copy-*` files when driver I/O
+remains pending after cancellation; check them after reconnecting.
+
 ## Native release evidence
 
 Run `make audit` on Haiku in a clean checkout. Save its complete output and

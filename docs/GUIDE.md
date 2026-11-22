@@ -225,21 +225,18 @@ activity** is the combined log; a specific job shows its source and destination
 paths where available. Large reports have multiple pages. Job results are for
 this session, not saved to disk. **Clear finished** frees completed reports without cancelling any jobs.
 
-**Moving between local volumes:** Listi refuses a Move when the local source
-and destination are on different filesystem devices. This applies to two
-mounted volumes even on the same physical disk. For an archive member, it
-is the volume holding the archive file that counts.
-
-Use **Copy** and keep the source until you have verified the destination.
-For a removable destination, remount it before verifying the copy.
-For folders, **Compare folders** in SHA-256 mode checks file contents, not
-permissions or BFS attributes; check any metadata you need separately.
-Remove originals as a separate action only after verification. Ordinary
-moves within one local volume remain available.
+**Moving between local volumes:** Listi copies and checks each root before
+moving its intact original into the source volume's Trash. If the source
+volume has no supported Trash, use **Copy** instead. On removable media,
+remount the destination before verifying important copies. **Compare folders**
+in SHA-256 mode checks file contents, not permissions or BFS attributes.
+Move within one volume keeps its usual behavior.
 
 For a local move, **Moved** means Listi committed the move. **Copied; source
 retained** means the destination copy was made but Listi did not remove that
-source entry. **Partially completed** means some changes were made inside the
+source entry. **Published; directory flush failed** means the target was
+changed, but its persistence after restart is unknown. Compare the target with
+the retained source before retrying. **Partially completed** means some changes were made inside the
 folder: check its individual entries. **Skipped** identifies an entry passed
 over, **Failed** includes the problem, and **Not processed** is not a success.
 Other providers can give a job-level error or a recovery path rather than
@@ -493,6 +490,12 @@ SMB, SFTP, FTP and FTPS use the panel and job interface. Capabilities and recove
 behaviour vary by protocol and server. Comparison or previews can cause network
 reads, including downloading complete files. Keep credentials out of shared URLs,
 screenshots and bug reports.
+
+A network copy transfers file contents, not Haiku BFS attributes. Downloads
+apply available portable permissions and modification time. Uploads verify the
+staged file contents before publication; an upload is not a promise to retain
+source permissions, timestamps or other metadata on the server. Remote
+progress can show the current file and bytes without a total.
 
 For SFTP, open **Connect** and enter the address and username. Under **Advanced**,
 **SSH private key** defaults to the first readable `id_ed25519`, `id_ecdsa` or

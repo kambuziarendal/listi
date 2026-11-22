@@ -425,7 +425,7 @@ struct Runner {
       Guard();
       const auto parentPath = ParentLocation(it->first);
       const auto leaf = Leaf(it->first);
-      FD parent(open(parentPath.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW));
+      FD parent(open(parentPath.c_str(), O_RDONLY | O_DIRECTORY));
       struct stat now, parentNode;
       if (parent.n < 0 || fstat(parent.n, &parentNode) ||
           fstatat(parent.n, leaf.c_str(), &now, AT_SYMLINK_NOFOLLOW))
