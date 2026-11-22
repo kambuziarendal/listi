@@ -189,3 +189,50 @@ The initial pinned binary SHA-256 was
 `58866d4847bd016ea89df3a6401aa78bd7bd4fbb8eb682eb4dd70a3003d62024`
 (identical to the measured binary); its private HPKG was
 `fa03488fe9b18f683dced23f821010eb04468019d076c7c879caef4e50d9c257`.
+
+## Final pinned result
+
+Clean native source **e17d847cf85c53a4728e729846bdf3296d364c96**, 464/464
+manifest entries matched, source tar SHA-256
+`8b64b999b7275fe625d2d709424e3788bbc0e7609e6ce7f9e689de85bd72f526`.
+On Haiku hrev59866+79 with GCC 13.3 the installed executable matched the
+benchmark executable byte-for-byte. Installed executable SHA-256:
+`58866d4847bd016ea89df3a6401aa78bd7bd4fbb8eb682eb4dd70a3003d62024`.
+Final private 0.38.0-11 HPKG SHA-256:
+`8310b3d4f7c31f8764c0a56920fe9b7d147624a3a25bdef7806efb4d15716f7b`.
+
+Default native programs 80/80, installed self-test 58/58, installed protocols
+110/110, SMB/FTP/SFTP interruptions 27/27. No required case skipped on the
+successful run. FTPS is included in the 110, not the 27. The corrected storage
+fixture passed on fresh and seeded BFS. Full-disk and competing-job cases passed.
+Installed GUI passed all four workspaces, ordinary and clipboard copy, conflict
+Abort/Replace, recovery review, and in-flight cancellation followed by a
+byte-exact 36 MiB retry. The final GUI did not require a retry of its driver.
+
+The final extended driver required three attempts: the first stalled at SMB
+startup after 54 checks and independent guest SSH timed out. The disposable
+VM was rebooted, trust restored and installed hashes rechecked. The second
+refused to overwrite a surviving fixture directory. Its contents were retained
+under a different name. The third run exited zero. These are not three green
+runs; the first stall is not root-caused. Trust restoration and shutdown
+were verified. Raw evidence and screenshots: private operations tree
+`reports/listi-27947/native-final/`, specifically verified-final.json,
+run-status.log, extended-verified/, recovery.png, gui-Replace.png and inflight.png.
+The same report root holds perf/*.jsonl and ci/exact-{gcc,clang,lint}.log.
+
+Linux GCC and Clang each passed the portable checks on the pinned source,
+including compiler/assertion/missing-case negative controls, 24 transfer fault
+checks under ASan/UBSan and 25,000 deterministic inputs. The first local Clang
+attempt lacked clang++; the successful local run used extracted Debian Clang
+19.1.7 and its sanitizer runtime. Actionlint passed. None is a hosted run.
+No release, push, branch-policy change or production deployment.
+
+| Area | Classification | Evidence and boundary |
+|---|---|---|
+| Performance | improved with limits | 550 observations; fresh 32-file median 506.46 to 351.46 ms; target missed. |
+| Hosted CI | implemented but not activated | Workflow lint and local gate passed. No GitHub run. |
+| Native CI | implemented but not activated | Trusted local qualification verified; no hosted native check. |
+| Branch protection | not done | API confirmed unprotected; no ruleset or enforcement test. |
+| Crash recovery | improved with limits | Process-death and error boundaries passed; old journals stay read-only; no power-loss qualification. |
+| Storage safety | improved with limits | Two BFS topologies, ENOSPC, injected quota rejection and competing jobs; no guaranteed post-flush reserve or external codec cap. |
+| Atomicity | improved with limits | Pinned-parent and stale/substituted identity checks retained; no identity-conditional leaf rename/unlink or atomic in-place editor save. |
