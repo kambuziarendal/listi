@@ -24,8 +24,8 @@ struct Metric {
 };
 static Metric journalFile, directory, dataFile, renameCalls;
 static long long journalBytes = 0;
-static int journalFd = -1;
-static bool measure = false;
+static thread_local int journalFd = -1;
+static thread_local bool measure = false;
 
 extern "C" int __real_mkstemp(char *);
 extern "C" int __wrap_mkstemp(char *name) {
