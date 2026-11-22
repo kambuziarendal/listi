@@ -149,3 +149,17 @@ PASS restart boundary publish-full
 | CI and required gates | Improved with documented limitations | Clean portable and native results; negative controls failed as required. Hosted execution and mandatory branch protection are not established. CI.md lists the remaining owner setup. |
 | Storage safety | Improved with documented limitations | Real BFS exhaustion, competing copies and external-child pressure preserved sentinels. External processes cannot be hard-capped, and free space is not a reservation. |
 | Atomicity | Improved with documented limitations | Verified archive/copy replacements, substitution and post-publication sync fault tests. Parent descriptors do not make rename/unlink conditional on the leaf inode. Multi-file moves and in-place editor saves remain non-atomic. |
+
+### Extended driver follow-up
+
+Harness-only commit 2def86485af0d13265e39a7ade2a8f3a1147d602 passed an
+end-to-end local run of ci/run-extended.py against the unchanged, installed
+64e26b3 application above. An intermediate implementation (3d3d4b5) reached
+110/110 but its SSH process hung; that run failed. The final driver closes a
+separate forwarding master after each guest test. It exited zero with both
+storage programs, 58/58 self-tests, 110/110 installed protocol checks and
+all 27 distinct interruption checks passing without relaxing assertions.
+Receipts: extended-verified/{extended-storage.log,installed-protocols.log,
+network-results.json,trust-restore.log,stop.log}. The guest trust bundle was
+restored byte-for-byte and the test VM stopped. This qualifies the local
+extended driver, not the hosted workflow or a branch rule.
