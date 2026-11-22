@@ -17,7 +17,7 @@
 #include <unistd.h>
 using namespace Listi;
 namespace {
-enum Fault { None, Publication, Journal, Baseline, DirectorySync } fault = None;
+enum Fault { None, ArchiveRename, Journal, Baseline, DirectorySync } fault = None;
 std::string archivePath, journalPath, baselinePath;
 bool injected = false, published = false;
 std::string bytes(const std::string &p) {
@@ -70,7 +70,7 @@ bool corrupt(const std::string &root) {
 } // namespace
 extern "C" int __real_rename(const char *, const char *);
 extern "C" int __wrap_rename(const char *from, const char *to) {
-  if (!injected && ((fault == Publication && to == archivePath) ||
+  if (!injected && ((fault == ArchiveRename && to == archivePath) ||
                     (fault == Journal && published && to == journalPath) ||
                     (fault == Baseline && published && to == baselinePath))) {
     injected = true;
@@ -150,7 +150,7 @@ int main() {
         return true;
       };
     else
-      fault = scenario == 1 ? Publication : scenario == 2 ? Journal : Baseline;
+      fault = scenario == 1 ? ArchiveRename : scenario == 2 ? Journal : Baseline;
     std::string error;
     try {
       session->Save(hooks);

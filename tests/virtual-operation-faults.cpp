@@ -11,7 +11,7 @@
 namespace {
 struct Remote { std::string data; int64_t modified = 1; };
 std::map<std::string, Remote> files;
-bool corruptUpload = false, denyReadback = false;
+bool corruptUpload = false, denyReadback = false, cancelReadback = false;
 bool truncateUpload = false, omitStageSize = false;
 bool failCommit = false, failRollback = false, failPartCleanup = false,
      failBackupCleanup = false, cancelAfterBackup = false, cancelled = false,
@@ -53,6 +53,10 @@ std::vector<FileEntry> ListNetwork(const Location &l, const TransferControl &c) 
 }
 void ReadNetwork(const Location &l, const DataSink &sink, const TransferControl &c) {
   c.Check();
+  if (cancelReadback && suffix(l.URL(), ".part")) {
+    cancelled = true;
+    c.Check();
+  }
   if (denyReadback && suffix(l.URL(), ".part")) throw std::runtime_error("readback denied");
   auto &data = files.at(l.URL()).data;
   sink(data.data(), data.size()); c.Tick(data.size());
@@ -103,7 +107,7 @@ int main() {
     std::cout << (ok ? "PASS " : "FAIL ") << label << '\n';
   };
   auto reset = [&] {
-    corruptUpload = denyReadback = truncateUpload = omitStageSize = false;
+    cancelReadback = corruptUpload = denyReadback = truncateUpload = omitStageSize = false;
     files = {{destination, {"old contents", 1}}}; done = 0;
     failCommit = failRollback = failPartCleanup = failBackupCleanup = false;
     cancelAfterBackup = cancelled = mutateDestination = loseBackupReply = loseCommitReply = false;
@@ -153,6 +157,12 @@ int main() {
   denyReadback = false; r = RunVirtual(job, hooks);
   check(r.completed == 1 && done == 1 && files.at(destination).data == "new contents",
         "retry after failed verification succeeds");
+  reset(); cancelReadback = true; r = RunVirtual(job, hooks);
+  check(r.cancelled && !r.completed && !done && files.size() == 1 &&
+        files.at(destination).data == "old contents" && r.outcomes.front().upload &&
+        !r.outcomes.front().upload->contentVerified &&
+        r.outcomes.front().upload->publication == Publication::NotAttempted,
+        "cancelled readback never touches the original target");
   reset(); loseBackupReply = true; r = RunVirtual(job, hooks);
   check(!r.completed && !done && !r.errors.empty() && files.size()==1 &&
         files.at(destination).data=="old contents",
