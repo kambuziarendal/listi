@@ -20,15 +20,18 @@ const std::string payload="Listi move fault payload";
 std::string readBytes(const std::string &path){std::ifstream in(path,std::ios::binary);return {std::istreambuf_iterator<char>(in),std::istreambuf_iterator<char>()};}
 void clean(const std::string &p){BDirectory d(p.c_str());BEntry e;while(d.GetNextEntry(&e,false)==B_OK){struct stat s;e.GetStat(&s);if(S_ISDIR(s.st_mode)){BPath path;e.GetPath(&path);clean(path.Path());}e.Remove();}rmdir(p.c_str());}
 }
-extern "C" int __real_rename(const char *,const char *);
-extern "C" int __wrap_rename(const char *from,const char *to){
- if (!injected && ((fault==DestinationRename&&to==destinationArchive)||(fault==SourceRename&&to==sourceArchive))) {
+extern "C" int __real_renameat(int,const char *,int,const char *);
+extern "C" int __wrap_renameat(int from,const char *oldLeaf,int target,const char *newLeaf){
+ const bool replacement=std::string(oldLeaf)=="updated";
+ const std::string to=replacement && Leaf(destinationArchive)==newLeaf?destinationArchive:
+     replacement && Leaf(sourceArchive)==newLeaf?sourceArchive:"";
+ if (replacement && !injected && ((fault==DestinationRename&&to==destinationArchive)||(fault==SourceRename&&to==sourceArchive))) {
   injected=true;errno=fault==DestinationRename?ENOSPC:EIO;return -1;
  }
- int status=__real_rename(from,to);
- if(!status&&!injected&&fault==CorruptDestination&&to==destinationArchive){
+ int status=__real_renameat(from,oldLeaf,target,newLeaf);
+ if(replacement&&!status&&!injected&&fault==CorruptDestination&&to==destinationArchive){
   auto bytes=readBytes(to);auto at=bytes.find(payload);
-  if(at!=std::string::npos){int fd=open(to,O_WRONLY);if(fd>=0){injected=pwrite(fd,"X",1,at)==1;fsync(fd);close(fd);}}
+  if(at!=std::string::npos){int fd=open(to.c_str(),O_WRONLY);if(fd>=0){injected=pwrite(fd,"X",1,at)==1;fsync(fd);close(fd);}}
  }
  return status;
 }

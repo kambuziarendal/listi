@@ -46,10 +46,12 @@ struct Stage {
   Result &result;
   std::optional<RecoveryRecord> recovery;
   bool published = false;
-  Stage(const std::string &folder, Result &result)
-      : parent(folder.c_str()), result(result) {
+  bool retainRecovery = false;
+  Stage(const Job &job, Result &result)
+      : parent(job.destinationFolder.c_str()), result(result) {
     Require(parent.InitCheck() == B_OK, "Cannot open destination folder.");
-    recovery.emplace("archive", PathOf(parent), ".Listi-archive-stage-", "", folder);
+    recovery.emplace("archive", PathOf(parent), ".Listi-archive-stage-",
+                     job.sources.empty() ? job.destination : job.sources.front(), job.destination);
     path = recovery->Stage();
     Require(mkdir(path.c_str(), 0700) == 0, "Cannot create archive staging folder.");
     leaf = Leaf(path);
@@ -74,6 +76,7 @@ struct Stage {
   ~Stage() {
     try {
       ForgetArchiveStage(path);
+      if (retainRecovery) return;
       if (published) {
         recovery->Retire();
         return;
@@ -190,7 +193,7 @@ Result RunArchiveEdit(const Job &job, const Hooks &hooks,
     const auto originalSet = FindArchiveVolumes(job.destination);
     ArchiveEditProtection protection(originalSet.files.front().identity,
                                      originalSet.Fingerprint());
-    Stage stage(job.destinationFolder, result);
+    Stage stage(job, result);
     const auto work = Join(PathOf(stage.dir), "contents");
     Require(!mkdir(work.c_str(), 0700),
             "Cannot create archive edit staging folder.");
@@ -375,6 +378,8 @@ Result RunArchiveEdit(const Job &job, const Hooks &hooks,
     // Full external tree guards belong at the destructive publication boundary,
     // not in every decoder progress callback. No callback or I/O that changes
     // the destination is allowed between this guard and the archive rename.
+    stage.recovery->Advance(RecoveryPhase::Ready);
+    stage.recovery->Advance(RecoveryPhase::Publishing);
     if (beforePublish)
       beforePublish();
     struct stat original, named;
@@ -389,14 +394,22 @@ Result RunArchiveEdit(const Job &job, const Hooks &hooks,
     Require(!lstat(outputPath.c_str(), &namedOutput) &&
                 Unchanged(verifiedOutput, namedOutput),
             "The verified output changed. Original archive was retained.");
-    FD parent(open(job.destinationFolder.c_str(), O_RDONLY | O_DIRECTORY));
-    Require(parent.n >= 0,
+    FD parent(stage.parent.Dup()), stageDir(stage.dir.Dup());
+    const auto targetLeaf = Leaf(job.destination);
+    Require(parent.n >= 0 && stageDir.n >= 0 &&
+            !fstatat(parent.n, targetLeaf.c_str(), &named, AT_SYMLINK_NOFOLLOW) &&
+            Unchanged(original, named) &&
+            !fstatat(stageDir.n, "updated", &named, AT_SYMLINK_NOFOLLOW) &&
+            Unchanged(verifiedOutput, named),
             "Cannot open the archive directory before publishing. Original archive was retained.");
     Require(
-        !rename(outputPath.c_str(), job.destination.c_str()),
+        !renameat(stageDir.n, "updated", parent.n, targetLeaf.c_str()),
         "Could not publish the updated archive. The original was left in place.");
+    stage.retainRecovery = true;
     Require(!fsync(parent.n),
             "Updated archive was published, but its directory could not be flushed. Durability after restart is unknown.");
+    stage.recovery->Advance(RecoveryPhase::Published);
+    stage.retainRecovery = false;
     if (secret)
       try {
         struct stat published;
@@ -498,7 +511,7 @@ Result RunArchiveLocalMove(const Job &job, const Hooks &hooks) {
     if (source.Local())
       localSource = std::make_unique<LocalMoveTree>(
           job.sources, internal, true, job.expectedDestination.device);
-    Stage stage(job.destinationFolder, result);
+    Stage stage(job, result);
     const auto snapshot = PathOf(stage.dir);
     Job extract{Action::Copy, job.sources, snapshot};
     FreezeLocalJob(extract, snapshot);
@@ -665,7 +678,7 @@ Result RunArchiveMove(const Job &job, const Hooks &hooks) {
           Job{Action::Move, job.sources, job.destination});
       result = RunArchiveEdit(rename, internal);
     } else {
-      Stage stage(job.destinationFolder, result);
+      Stage stage(job, result);
       const auto snapshot = PathOf(stage.dir);
       Job extract{Action::Copy, job.sources, snapshot};
       FreezeLocalJob(extract, snapshot);
@@ -796,7 +809,7 @@ Result RunArchiveJob(const Job &job, const Hooks &hooks) {
         Require(b != a && b.compare(0, a.size() + 1, a + "/") != 0,
                 "Choose a destination outside the selected folder.");
       }
-    Stage stage(job.destinationFolder, result);
+    Stage stage(job, result);
     Guards(job);
     auto check = [&] {
       if (hooks.proceed && !hooks.proceed())
@@ -876,6 +889,9 @@ Result RunArchiveJob(const Job &job, const Hooks &hooks) {
               "Extraction staging folder disappeared.");
     }
     check();
+    stage.recovery->Advance(RecoveryPhase::Ready);
+    stage.recovery->Advance(RecoveryPhase::Publishing);
+    Guards(job);
     VerifyArchiveSets(job);
     // Native no-clobber publication. A new target appearing while the job runs
     // must never be overwritten, including an empty directory or a symlink.
@@ -884,6 +900,10 @@ Result RunArchiveJob(const Job &job, const Hooks &hooks) {
         "Could not publish the result. The destination may already exist; it was not replaced.");
     if (job.action == Action::ExtractArchive)
       stage.published = true;
+    stage.retainRecovery = true;
+    Require(stage.parent.Sync() == B_OK, "Result published, but its directory flush failed.");
+    stage.recovery->Advance(RecoveryPhase::Published);
+    stage.retainRecovery = false;
     result.completed = 1;
     completedPaths.insert(job.sources.begin(), job.sources.end());
     for (const auto &source : completedPaths)

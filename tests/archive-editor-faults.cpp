@@ -90,7 +90,15 @@ extern "C" int __wrap_renameat(int from, const char *oldPath, int to,
     errno = EIO;
     return -1;
   }
-  return __real_renameat(from, oldPath, to, newPath);
+  const bool archive = std::string(oldPath) == "updated" && Leaf(archivePath) == newPath;
+  if (archive && !injected && fault == ArchiveRename) {
+    injected = true;
+    errno = EIO;
+    return -1;
+  }
+  const auto status = __real_renameat(from, oldPath, to, newPath);
+  if (archive && !status) published = true;
+  return status;
 }
 extern "C" int __real_fsync(int);
 extern "C" int __wrap_fsync(int fd) {
