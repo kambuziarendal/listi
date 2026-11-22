@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Exercise the real runner's exit contract with a tiny POSIX-only build tree."""
+import os
 import shutil
 import subprocess
 import sys
@@ -43,6 +44,15 @@ def main():
             if (result.returncode == 0) != success or final != success or evidence not in result.stdout:
                 raise RuntimeError(f"{name}: unexpected exit or log:\n{result.stdout}")
             print(f"PASS gate/{name}: runner exit {result.returncode}", flush=True)
+
+        network = subprocess.run(
+            [sys.executable, ROOT / "tests/run-network-interruptions.py", directory],
+            env={**os.environ, "NET_CASES": "ftp:missing"}, capture_output=True,
+            text=True, timeout=5
+        )
+        if not network.returncode or "Unknown interruption cases: ftp:missing" not in network.stderr:
+            raise RuntimeError("Unknown interruption selector did not fail preflight")
+        print("PASS gate/missing-interruption: no empty matrix can qualify")
 
 
 if __name__ == "__main__":

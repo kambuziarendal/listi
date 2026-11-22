@@ -9,10 +9,19 @@ if any(protocol not in ('smb','ftp','sftp') for protocol in protocols):
  raise SystemExit('Unknown network protocol')
 guest_binary=os.environ.get('LISTI_NETWORK_TEST_BINARY','/boot/home/listi-024-final/build/native-audit-tests/network-interruptions')
 guest_known_hosts=os.environ.get('LISTI_NETWORK_KNOWN_HOSTS','/boot/home/listi-network-known-hosts')
+modes = ['none', 'corrupt-stage', 'download', 'upload', 'publish-before',
+         'backup-reply', 'publish-reply', 'cleanup', 'cancel-download']
+requested = os.environ.get('NET_CASES', '').split()
+available = {protocol + ':' + mode for protocol in protocols for mode in modes}
+if len(set(protocols)) != len(protocols) or len(set(requested)) != len(requested):
+ raise SystemExit('Duplicate protocol or interruption case')
+if set(requested) - available:
+ raise SystemExit('Unknown interruption cases: ' + ' '.join(sorted(set(requested) - available)))
+selected = set(requested) or available
 results=[]
 for protocol in protocols:
- for mode in ['none','corrupt-stage','download','upload','publish-before','backup-reply','publish-reply','cleanup','cancel-download']:
-  if os.getenv('NET_CASES') and protocol+':'+mode not in os.environ['NET_CASES'].split():continue
+ for mode in modes:
+  if protocol + ':' + mode not in selected:continue
   urllib.request.urlopen('http://127.0.0.1:23990/reset/'+('none' if mode=='cancel-download' else mode)).read()
   cmd=shlex.join([guest_binary,protocol,mode,guest_known_hosts])
   start=time.monotonic()
@@ -33,4 +42,4 @@ for protocol in protocols:
   print(('PASS ' if ok else 'FAIL ')+protocol+' '+mode+' '+str(result['seconds'])+'s',flush=True)
   if not ok:print(p.stdout+p.stderr,flush=True)
 print(sum(x['ok'] for x in results),'/',len(results),'real protocol cases passed',flush=True)
-sys.exit(0 if all(x['ok'] for x in results) else 1)
+sys.exit(0 if len(results) == len(selected) and all(x['ok'] for x in results) else 1)
