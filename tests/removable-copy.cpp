@@ -22,6 +22,7 @@ std::condition_variable changed;
 bool entered = false, release = false, returned = false;
 std::atomic<int> park{-1}, failRead{-1};
 bool stallWrite = false;
+std::atomic<int> stallRead{-1};
 std::atomic<int> writeCalls{0};
 void Hold() {
   std::unique_lock<std::mutex> lock(mutex);
@@ -41,7 +42,7 @@ void Require(bool condition, const char *message) {
 
 extern "C" int __real_fsync(int);
 extern "C" int __wrap_fsync(int fd) {
-  if (fd == park.load() && !stallWrite)
+  if (fd == park.load() && !stallWrite && stallRead < 0)
     Hold();
   return __real_fsync(fd);
 }
@@ -58,6 +59,8 @@ extern "C" ssize_t __wrap_write(int fd, const void *bytes, size_t count) {
 
 extern "C" ssize_t __real_read(int, void *, size_t);
 extern "C" ssize_t __wrap_read(int fd, void *bytes, size_t count) {
+  if (fd == stallRead.load())
+    Hold();
   if (fd == failRead.load()) {
     errno = EIO;
     return -1;
@@ -74,14 +77,17 @@ int main() {
   const auto staging = root / "stage";
   std::string payload(350000, 'A');
   std::ofstream(source, std::ios::binary) << payload;
-  auto copy = [&](const std::filesystem::path &path, bool stall) {
+  auto copy = [&](const std::filesystem::path &path, bool stall, bool reading = false) {
     struct stat before;
     int in = open(source.c_str(), O_RDONLY);
     int out = open(path.c_str(), O_CREAT | O_EXCL | O_WRONLY, 0600);
     if (in < 0 || out < 0 || fstat(in, &before))
       throw std::runtime_error("could not prepare descriptors");
-    if (stall)
+    if (stall) {
       park = out;
+      if (reading)
+        stallRead = in;
+    }
     size_t bytes = 0;
     Listi::WriteRemovableStagingFile(in, out, before, [&](size_t count) {
       bytes += count;
@@ -91,12 +97,13 @@ int main() {
     });
     return bytes;
   };
-  for (bool blockWrite : {false, true}) {
+  for (int fault : {0, 1, 2}) {
+    const bool blockWrite = fault == 1, blockRead = fault == 2;
     stallWrite = blockWrite;
     entered = release = returned = false;
     bool stopped = false;
     try {
-      copy(staging, true);
+      copy(staging, true, blockRead);
     } catch (const Listi::RemovableCopyInterrupted &) {
       stopped = true;
     }
@@ -130,6 +137,7 @@ int main() {
     std::filesystem::remove(root / "other");
     std::filesystem::remove(root / "old-inode");
     park = -1;
+    stallRead = -1;
   }
   int in = open(source.c_str(), O_RDONLY);
   int out = open((root / "cancel").c_str(), O_CREAT | O_EXCL | O_WRONLY, 0600);

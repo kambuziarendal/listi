@@ -20,6 +20,9 @@ namespace {
 std::string deniedStage, watchedStage, deniedRemoval;
 int watchedFd = -1, writes = 0;
 bool failWrite = false, denyTrashCleanup = false;
+bool failStageClose = false, failDirectorySync = false;
+int stageForClose = -1;
+ino_t directoryForSync = -1;
 bool deviceGone = false;
 int failures = 0;
 
@@ -49,8 +52,10 @@ extern "C" int __wrap_mkstemp(char *path) {
   }
   const bool watch = watchedStage == path;
   const int fd = __real_mkstemp(path);
-  if (watch)
+  if (watch) {
     watchedFd = fd;
+    stageForClose = fd;
+  }
   return fd;
 }
 extern "C" ssize_t __real_write(int, const void *, size_t);
@@ -70,6 +75,28 @@ extern "C" ssize_t __wrap_write(int fd, const void *data, size_t size) {
     return -1;
   }
   return __real_write(fd, data, size);
+}
+extern "C" int __real_close(int);
+extern "C" int __wrap_close(int fd) {
+  const auto status = __real_close(fd);
+  if (fd == stageForClose) {
+    stageForClose = -1;
+    if (failStageClose) {
+      errno = EIO;
+      return -1;
+    }
+  }
+  return status;
+}
+extern "C" int __real_fsync(int);
+extern "C" int __wrap_fsync(int fd) {
+  struct stat st;
+  if (failDirectorySync && fstat(fd, &st) == 0 && S_ISDIR(st.st_mode) &&
+      st.st_ino == directoryForSync) {
+    errno = EIO;
+    return -1;
+  }
+  return __real_fsync(fd);
 }
 extern "C" int __real_stat(const char *, struct stat *);
 extern "C" int __wrap_stat(const char *path, struct stat *st) {
@@ -139,6 +166,29 @@ int main() {
   watchedStage.clear();
 
   std::ofstream(target) << "original";
+  std::ofstream(target) << "original";
+  watchedStage = (out / ".listi-copy-XXXXXX").string();
+  failStageClose = true;
+  result = Run(move, replace);
+  failStageClose = false;
+  watchedStage.clear();
+  Check(!result.completed && !result.errors.empty() &&
+            Has(result, source, target, "failed", strerror(EIO)) &&
+            Read(source) == payload && Read(target) == "original",
+        "staging close failure retains the previously published file and source");
+
+  struct stat folderStat;
+  if (stat(out.c_str(), &folderStat))
+    return 2;
+  directoryForSync = folderStat.st_ino;
+  failDirectorySync = true;
+  result = Run(move, replace);
+  failDirectorySync = false;
+  Check(!result.completed && !result.errors.empty() &&
+            Has(result, source, target, "published-flush-failed", "published") &&
+            Read(source) == payload && Read(target) == payload,
+        "directory flush failure accurately reports a changed target and retained source");
+
   Hooks disconnect = replace;
   disconnect.progress = [](const std::string &, uint64_t bytes) {
     if (bytes)
