@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: MIT
 #include "Pane.h"
 #include <Application.h>
+#include <Button.h>
 #include <LayoutBuilder.h>
 #include <Messenger.h>
 #include <OutlineListView.h>
 #include <ScrollBar.h>
 #include <TextControl.h>
+#include <TextView.h>
 #include <Window.h>
 #include <cstdlib>
 #include <fstream>
@@ -54,10 +56,17 @@ int main() {
     filter->SetText("no matches");
     pane->MessageReceived(&changed);
     bar->GetRange(&low, &filtered);
-    filter->SetText("");
-    pane->MessageReceived(&changed);
+    const auto *status = dynamic_cast<BTextView *>(pane->FindView("status"));
+    const auto *clear = dynamic_cast<BButton *>(pane->FindView("clear unmatched filter"));
+    const bool noMatches = status && clear && !clear->IsHidden(clear) &&
+                          std::string(status->Text()) == "No names match the filter";
+    if (clear) {
+      BMessage reset(*clear->Message());
+      pane->MessageReceived(&reset);
+    }
     bar->GetRange(&low, &restored);
-    passed = initial > 0 && filtered == 0 && restored == initial;
+    passed = noMatches && clear->IsHidden(clear) && !filter->Text()[0] &&
+             initial > 0 && filtered == 0 && restored == initial;
     // Shift may already be released when the looper processes the arrow.
     grid->MakeFocus();
     const bool anchored = pane->MatchPattern("70", true) == 1;

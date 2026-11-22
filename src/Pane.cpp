@@ -14,6 +14,7 @@
 #include "NameFilter.h"
 #include "Trash.h"
 #include "VirtualFile.h"
+#include "ViewVisibility.h"
 #include "WrappedLabel.h"
 #include <Bitmap.h>
 #include <CardLayout.h>
@@ -167,6 +168,9 @@ Pane::Pane(int32 number, const Preferences &p,
   content->SetCollapsible(0, false);
   content->SetCollapsible(1, false);
   status = new WrappedLabel("status", "Ready");
+  clearEmptyFilter = new BButton("clear unmatched filter", "Clear filter",
+                                 new BMessage(kClearFilter));
+  clearEmptyFilter->Hide();
   header = new BGroupView(B_HORIZONTAL, 5);
   header->SetName("panel toolbar");
   header->AddChild(field);
@@ -185,7 +189,10 @@ Pane::Pane(int32 number, const Preferences &p,
       .End()
       .Add(filterRow, 0)
       .Add(content)
-      .Add(status, 0);
+      .AddGroup(B_HORIZONTAL, 5, 0)
+      .Add(status)
+      .Add(clearEmptyFilter)
+      .End();
   SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
 }
 Pane::~Pane() {
@@ -202,6 +209,7 @@ void Pane::AttachedToWindow() {
   forward->SetTarget(this);
   filter->SetTarget(this);
   clearFilter->SetTarget(this);
+  clearEmptyFilter->SetTarget(this);
   filter->TextView()->AddFilter(new PaneInput(this));
   edit->TextView()->AddFilter(new PaneInput(this, edit));
   auto field = dynamic_cast<BMenuField *>(FindView("go"));
@@ -359,6 +367,7 @@ void Pane::FocusFilter() {
   filter->TextView()->SelectAll();
 }
 void Pane::ClearRows() {
+  SetFilterEmptyState(false);
   ++selectionRevision;
   entries.Clear();
   icons.Clear();
@@ -472,6 +481,10 @@ void Pane::NavigateFromColumn(const std::string &folder,
   message.AddPoint("screen", at);
   message.AddInt64("serial", serial);
   Window()->PostMessage(&message, this);
+}
+void Pane::SetFilterEmptyState(bool noMatches) {
+  Listi::SetViewVisible(clearEmptyFilter, noMatches);
+  Listi::SetViewVisible(clearFilter, !noMatches);
 }
 void Pane::SetStatus(const char *text) {
   if (!navigationFailed)
@@ -618,6 +631,15 @@ void Pane::SendSelection(bool gesture) {
       << " entries (filtered)";
   else
     s << " entries";
+  if (!scanning && locationValid) {
+    const bool noMatches = !summary.visible && !einn && filter->Text()[0] &&
+                           entries.HiddenCount() != 0;
+    SetFilterEmptyState(noMatches);
+    if (noMatches)
+      s = "No names match the filter";
+    else if (!summary.visible)
+      s = "This folder is empty";
+  }
   SetStatus(s);
   if (!navigationFailed && summary.selected) {
     BString tip(s);

@@ -125,9 +125,10 @@ private:
                        bool trash = false);
   void UpdateNavigation();
   BTextControl *filter;
-  BButton *clearFilter;
+  BButton *clearFilter, *clearEmptyFilter;
   WrappedLabel *status;
   bool navigationFailed = false;
+  void SetFilterEmptyState(bool noMatches);
   void SetStatus(const char *);
   void SetNavigationError(const char *);
   void UpdateActivityAppearance();
