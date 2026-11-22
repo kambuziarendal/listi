@@ -67,6 +67,10 @@ int main() {
   std::string stage = root + "/.Listi-archive-stage-search-test";
   mkdir(stage.c_str(), 0700);
   file(stage + "/same.txt");
+  struct stat stageIdentity;
+  if (lstat(stage.c_str(), &stageIdentity))
+    return 2;
+  RegisterArchiveStage(stage, stageIdentity.st_dev, stageIdentity.st_ino);
   check(run().matched == 2, "name search excludes archive staging contents");
   request.predicate = true; request.expression = "name==\"same.txt\"";
   result = run(); check(result.error.empty() && result.matched == 2, "native BFS name predicate restricted to selected folder");
@@ -79,6 +83,8 @@ int main() {
   result = run();
   check(result.error.empty() && !result.matched,
         "BFS results exclude the staging directory itself");
+  ForgetArchiveStage(stage);
+  check(run().matched == 1, "unregistered staging directory is visible again");
   unlink((stage + "/same.txt").c_str());
   rmdir(stage.c_str());
   request.expression = "(name==\"same.txt\")&&(size>0)";

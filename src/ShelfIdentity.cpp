@@ -70,14 +70,7 @@ bool SafeCandidate(const std::string &path, const std::string &trash) {
       (!trash.empty() &&
        (path == trash || path.rfind(trash + "/", 0) == 0)))
     return false;
-  for (size_t start = 1, end; start < path.size(); start = end + 1) {
-    end = path.find('/', start);
-    if (IsListiPrivateEntry(path.substr(start, end - start).c_str()))
-      return false;
-    if (end == std::string::npos)
-      break;
-  }
-  return true;
+  return !IsListiPrivateEntry(path);
 }
 
 // Follow the known parent directory, not a filesystem-wide scan. The shared

@@ -37,35 +37,72 @@ std::string PathOf(BDirectory &dir) {
           "The working folder disappeared.");
   return p.Path();
 }
-void RemoveContents(BDirectory &dir) {
-  // Extracted directory modes may be read-only. This is our private staging tree.
-  dir.SetPermissions(0700);
+bool RemoveContents(BDirectory &dir, dev_t device, unsigned depth = 0) {
+  if (depth > 64 || dir.SetPermissions(0700) != B_OK)
+    return false;
+  bool clean = true;
   BEntry entry;
-  while (dir.GetNextEntry(&entry, false) == B_OK) {
-    struct stat s;
-    if (entry.GetStat(&s) == B_OK && S_ISDIR(s.st_mode)) {
-      BDirectory child(&entry);
-      RemoveContents(child);
+  status_t next;
+  while ((next = dir.GetNextEntry(&entry, false)) == B_OK) {
+    struct stat st;
+    if (entry.GetStat(&st) != B_OK || st.st_dev != device) {
+      clean = false;
+      continue;
     }
-    entry.Remove();
+    if (S_ISDIR(st.st_mode)) {
+      BDirectory child(&entry);
+      node_ref opened;
+      if (child.GetNodeRef(&opened) != B_OK || opened.device != st.st_dev ||
+          opened.node != st.st_ino || !RemoveContents(child, device, depth + 1)) {
+        clean = false;
+        continue;
+      }
+    }
+    struct stat current;
+    if (entry.GetStat(&current) != B_OK || current.st_dev != st.st_dev ||
+        current.st_ino != st.st_ino || entry.Remove() != B_OK)
+      clean = false;
   }
+  return clean && next == B_ENTRY_NOT_FOUND;
 }
 struct Stage {
   BDirectory parent, dir;
-  Stage(const std::string &folder) : parent(folder.c_str()) {
+  std::string path, leaf;
+  node_ref identity;
+  Result &result;
+  Stage(const std::string &folder, Result &result)
+      : parent(folder.c_str()), result(result) {
     Require(parent.InitCheck() == B_OK, "Cannot open destination folder.");
     std::string pattern = Join(folder, ".Listi-archive-stage-XXXXXX");
     std::vector<char> bytes(pattern.begin(), pattern.end());
     bytes.push_back(0);
     char *made = mkdtemp(bytes.data());
     Require(made, "Cannot create archive staging folder.");
-    Require(dir.SetTo(made) == B_OK, "Cannot open archive staging folder.");
+    path = made;
+    leaf = Leaf(path);
+    BEntry created(&parent, leaf.c_str(), false);
+    Require(dir.SetTo(&created) == B_OK && dir.GetNodeRef(&identity) == B_OK,
+            "Cannot open archive staging folder; inspect " + path);
+    path = PathOf(dir);
+    RegisterArchiveStage(path, identity.device, identity.node);
   }
   ~Stage() {
-    RemoveContents(dir);
-    BEntry e;
-    if (dir.GetEntry(&e) == B_OK)
-      e.Remove();
+    try {
+      ForgetArchiveStage(path);
+      BEntry entry(&parent, leaf.c_str(), false);
+      node_ref named;
+      if (entry.GetNodeRef(&named) == B_OK &&
+          named.device == identity.device && named.node == identity.node &&
+          RemoveContents(dir, identity.device) &&
+          entry.GetNodeRef(&named) == B_OK &&
+          named.device == identity.device && named.node == identity.node &&
+          entry.Remove() == B_OK)
+        return;
+      result.errors.push_back("Could not clean the archive staging folder; inspect " +
+                              path + " (show hidden files).");
+    } catch (...) {
+      // Do not let diagnostic allocation failures mask the original error.
+    }
   }
 };
 std::vector<std::string> Children(const std::string &folder) {
@@ -158,7 +195,7 @@ Result RunArchiveEdit(const Job &job, const Hooks &hooks,
     const auto originalSet = FindArchiveVolumes(job.destination);
     ArchiveEditProtection protection(originalSet.files.front().identity,
                                      originalSet.Fingerprint());
-    Stage stage(job.destinationFolder);
+    Stage stage(job.destinationFolder, result);
     const auto work = Join(PathOf(stage.dir), "contents");
     Require(!mkdir(work.c_str(), 0700),
             "Cannot create archive edit staging folder.");
@@ -464,7 +501,7 @@ Result RunArchiveLocalMove(const Job &job, const Hooks &hooks) {
     if (source.Local())
       localSource = std::make_unique<LocalMoveTree>(
           job.sources, internal, true, job.expectedDestination.device);
-    Stage stage(job.destinationFolder);
+    Stage stage(job.destinationFolder, result);
     const auto snapshot = PathOf(stage.dir);
     Job extract{Action::Copy, job.sources, snapshot};
     FreezeLocalJob(extract, snapshot);
@@ -630,7 +667,7 @@ Result RunArchiveMove(const Job &job, const Hooks &hooks) {
           Job{Action::Move, job.sources, job.destination});
       result = RunArchiveEdit(rename, internal);
     } else {
-      Stage stage(job.destinationFolder);
+      Stage stage(job.destinationFolder, result);
       const auto snapshot = PathOf(stage.dir);
       Job extract{Action::Copy, job.sources, snapshot};
       FreezeLocalJob(extract, snapshot);
@@ -761,7 +798,7 @@ Result RunArchiveJob(const Job &job, const Hooks &hooks) {
         Require(b != a && b.compare(0, a.size() + 1, a + "/") != 0,
                 "Choose a destination outside the selected folder.");
       }
-    Stage stage(job.destinationFolder);
+    Stage stage(job.destinationFolder, result);
     Guards(job);
     auto check = [&] {
       if (hooks.proceed && !hooks.proceed())

@@ -127,9 +127,9 @@ void *run(void *) {
   check(invalid && read(root+"/bad-settings")=="broken","corrupt settings report an error without overwriting the file");
   mkdir((root+"/in").c_str(),0700);mkdir((root+"/out").c_str(),0700);
   mkdir((root+"/.Listi-archive-stage-visible").c_str(),0700);
-  auto visible=ListFiles(root);check(std::none_of(visible.begin(),visible.end(),
+  auto visible=ListFiles(root);check(std::any_of(visible.begin(),visible.end(),
     [](const auto &entry){return entry.name==".Listi-archive-stage-visible";}),
-    "private archive staging is not exposed as a file entry");
+    "unregistered archive staging names remain visible");
   std::string input=root+"/in",out=root+"/out";
   mkdir((input+"/folder").c_str(),0700);mkdir((input+"/folder/empty").c_str(),0700);
   write(input+"/folder/æ name ; $(no).txt","payload\n");write(input+"/empty","");

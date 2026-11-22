@@ -12,8 +12,31 @@
 #include <unistd.h>
 
 namespace Listi {
-bool IsListiPrivateEntry(const char *name) {
-  return name && !strncmp(name, ".Listi-archive-stage-", 21);
+namespace {
+std::mutex stagesMutex;
+std::map<std::string, std::pair<dev_t, ino_t>> activeStages;
+}
+void RegisterArchiveStage(const std::string &path, dev_t device, ino_t inode) {
+  std::lock_guard<std::mutex> guard(stagesMutex);
+  activeStages.emplace(path, std::make_pair(device, inode));
+}
+void ForgetArchiveStage(const std::string &path) {
+  std::lock_guard<std::mutex> guard(stagesMutex);
+  activeStages.erase(path);
+}
+bool IsListiPrivateEntry(const std::string &path) {
+  if (path.find("/.Listi-archive-stage-") == std::string::npos)
+    return false;
+  std::lock_guard<std::mutex> guard(stagesMutex);
+  for (const auto &[name, identity] : activeStages) {
+    if (path != name && path.compare(0, name.size() + 1, name + "/") != 0)
+      continue;
+    struct stat st;
+    if (!lstat(name.c_str(), &st) && st.st_dev == identity.first &&
+        st.st_ino == identity.second)
+      return true;
+  }
+  return false;
 }
 namespace {
 std::mutex connectionsMutex;
@@ -214,10 +237,11 @@ std::vector<FileEntry> ListFiles(const std::string &p,
         break;
       }
       c.Check();
-      if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..") ||
-          IsListiPrivateEntry(e->d_name))
+      if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
         continue;
       auto path = ChildLocation(p, e->d_name);
+      if (IsListiPrivateEntry(path))
+        continue;
       struct stat st;
       if (lstat(path.c_str(), &st))
         Fail(path);

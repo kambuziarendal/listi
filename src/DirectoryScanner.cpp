@@ -251,7 +251,7 @@ public:
               break;
             }
             if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..") ||
-                Listi::IsListiPrivateEntry(e->d_name))
+                Listi::IsListiPrivateEntry(Listi::Join(path.String(), e->d_name)))
               continue;
             row(Listi::Join(path.String(), e->d_name).c_str(), e->d_name);
           }

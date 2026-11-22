@@ -4,6 +4,7 @@
 #include <functional>
 #include <stdexcept>
 #include <string>
+#include <sys/types.h>
 #include <vector>
 
 namespace Listi {
@@ -42,7 +43,9 @@ struct Connection {
 };
 Location ParseLocation(const std::string &);
 bool IsVirtual(const std::string &);
-bool IsListiPrivateEntry(const char *name);
+void RegisterArchiveStage(const std::string &path, dev_t device, ino_t inode);
+void ForgetArchiveStage(const std::string &path);
+bool IsListiPrivateEntry(const std::string &path);
 std::string EncodePath(const std::string &);
 std::string DecodePath(const std::string &);
 std::string ChildLocation(const std::string &, const std::string &);
