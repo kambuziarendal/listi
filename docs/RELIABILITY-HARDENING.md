@@ -114,3 +114,38 @@ final-audit.log, final-source.sha256, final-package.log, final-gui-verified.log,
 installed-recovery.png, scoped/matrix.json, death-*.log, real-full-run.log,
 two-jobs.log, target3.log and timing.log. No physical USB, power-cut or
 real NAS testing. No production, hosted workflow or branch-rule change.
+
+## Portable gate and native fault receipts
+
+The clean detached application commit above passed ci/portable.sh against
+734fa69. The inventory found 80 required tests and 15 explicitly non-default
+programs. The positive runner control returned zero; deliberate compiler error,
+failed assertion and missing-case controls each returned one. The empty
+interruption-matrix control was rejected. The 24 portable transfer checks ran
+both normally and under ASan/UBSan; 25,000 seeded parser inputs passed.
+Full output: final-portable.log.
+
+Excerpt from final-audit.log, produced by the forked native regression:
+
+```text
+PASS restart boundary intent
+PASS restart boundary created
+PASS restart boundary writing
+PASS restart boundary data
+PASS restart boundary ready
+PASS restart boundary publishing
+PASS restart boundary renamed
+PASS restart boundary published
+PASS restart boundary retired
+PASS restart boundary journal-full
+PASS restart boundary publish-full
+```
+
+## Status by work area
+
+| Work area | Classification | Evidence and remaining limit |
+| --- | --- | --- |
+| Crash recovery | Improved with documented limitations | Eleven copy boundaries and four FTP process deaths; repeated review preserved data. Not all operations share one journal. Editor snapshots and legacy rename journals are separate. Remote identity remains advisory. |
+| CI and required gates | Improved with documented limitations | Clean portable and native results; negative controls failed as required. Hosted execution and mandatory branch protection are not established. CI.md lists the remaining owner setup. |
+| Storage safety | Improved with documented limitations | Real BFS exhaustion, competing copies and external-child pressure preserved sentinels. External processes cannot be hard-capped, and free space is not a reservation. |
+| Atomicity | Improved with documented limitations | Verified archive/copy replacements, substitution and post-publication sync fault tests. Parent descriptors do not make rename/unlink conditional on the leaf inode. Multi-file moves and in-place editor saves remain non-atomic. |
