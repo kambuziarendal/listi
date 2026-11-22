@@ -20,7 +20,7 @@ archive-local-move-faults archive-local-move same-file-type folder-compare
 archive-editor-faults archive-editor archive-move-faults archive-move
 archive-folder-operations transfer-races archive-ambiguity archive-volumes
 sevenzip-backend archive-passwords archive-jobs ar-writer arj-writer rar-store
-cab-writer lha-writer preferences-state message-store-faults main-window-routing application-services settings-window
+cab-writer lha-writer preferences-state message-store-faults recovery-inventory main-window-routing application-services settings-window
 workspace-layout workspace-editor miller-columns navigation-history selection-model type-to-select
 pane-filter selection-summary selection-sort saved-places saved-searches saved-navigation-controller file-search
 live-search search-results-view flat-view file-clipboard clipboard-text-file file-drop image-convert
@@ -113,7 +113,8 @@ def run():
         print("TEST", name, flush=True)
         inputs = objects
         if name == "virtual-operation-faults":
-            inputs = [SRC / "VirtualOperation.cpp", SRC / "VirtualFile.cpp", SRC / "Sha256.cpp"]
+            inputs = [SRC / "VirtualOperation.cpp", SRC / "VirtualFile.cpp",
+                      SRC / "VirtualLocation.cpp", SRC / "Sha256.cpp"]
         binary = OUTPUT / name
         subprocess.run([
             *compiler, *shlex.split(config["flags"]), ROOT / "tests" / f"{name}.cpp",
