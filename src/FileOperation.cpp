@@ -423,16 +423,25 @@ struct Runner {
     for (auto it = before.rbegin(); it != before.rend(); ++it) {
       Check();
       Guard();
-      struct stat now;
-      if (lstat(it->first.c_str(), &now))
+      const auto parentPath = ParentLocation(it->first);
+      const auto leaf = Leaf(it->first);
+      FD parent(open(parentPath.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW));
+      struct stat now, parentNode;
+      if (parent.n < 0 || fstat(parent.n, &parentNode) ||
+          fstatat(parent.n, leaf.c_str(), &now, AT_SYMLINK_NOFOLLOW))
         Fail(it->first);
+      const auto expectedParent = before.find(parentPath);
+      if (expectedParent != before.end() &&
+          (parentNode.st_dev != expectedParent->second.st_dev ||
+           parentNode.st_ino != expectedParent->second.st_ino))
+        throw std::runtime_error(parentPath + ": source folder changed during cleanup");
       VerifyCopy(it->first, it->second.st_dev);
       bool directory = S_ISDIR(it->second.st_mode);
       if (now.st_ino != it->second.st_ino || now.st_dev != it->second.st_dev ||
           (!directory && !SameEntry(it->second, now)))
         throw std::runtime_error(
             it->first + ": source changed during cleanup; left untouched");
-      if (directory ? rmdir(it->first.c_str()) : unlink(it->first.c_str())) {
+      if (unlinkat(parent.n, leaf.c_str(), directory ? AT_REMOVEDIR : 0)) {
         const std::string error = it->first + ": " + strerror(errno);
         Problem(it->first, error);
         throw std::runtime_error(error);
@@ -810,9 +819,14 @@ struct Runner {
         }
         if (job.action == Action::Trash || job.action == Action::Restore) {
           std::string warning;
-          const std::string destination = job.action == Action::Trash
-                                              ? MoveToTrash(source)
-                                              : RestoreFromTrash(source, &warning);
+          const auto frozen = job.expectedSources.find(source);
+          const NodeIdentity observed{sourceStat.st_dev, sourceStat.st_ino};
+          const NodeIdentity &expected =
+              frozen == job.expectedSources.end() ? observed : frozen->second;
+          const std::string destination =
+              job.action == Action::Trash
+                  ? MoveToTrash(source, &expected)
+                  : RestoreFromTrash(source, &warning, &expected);
           auto &row = Outcome(source, destination);
           row.status = "moved";
           if (!warning.empty()) {

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "FileSearch.h"
+#include "VirtualFile.h"
 #include <Application.h>
 #include <FindDirectory.h>
 #include <fs_index.h>

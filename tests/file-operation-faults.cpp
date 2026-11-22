@@ -80,13 +80,13 @@ extern "C" int __wrap_stat(const char *path, struct stat *st) {
   return __real_stat(path, st);
 }
 
-extern "C" int __real_unlink(const char *);
-extern "C" int __wrap_unlink(const char *path) {
-  if (deniedRemoval == path) {
+extern "C" int __real_unlinkat(int, const char *, int);
+extern "C" int __wrap_unlinkat(int fd, const char *path, int flags) {
+  if (!deniedRemoval.empty() && Leaf(deniedRemoval) == path) {
     errno = EACCES;
     return -1;
   }
-  return __real_unlink(path);
+  return __real_unlinkat(fd, path, flags);
 }
 
 extern "C" status_t __real__ZN5BNode10RemoveAttrEPKc(BNode *, const char *);

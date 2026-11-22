@@ -35,7 +35,7 @@ WRAPS = {
     "archive-move-faults": ['rename'],
     "archive-editor-faults": ['rename', 'fsync'],
     "archive-local-move-faults": ['rename', 'unlink'],
-    "file-operation-faults": ['mkstemp', 'write', 'unlink', 'stat', '_ZN5BNode10RemoveAttrEPKc'],
+    "file-operation-faults": ['mkstemp', 'write', 'unlinkat', 'stat', '_ZN5BNode10RemoveAttrEPKc'],
     "message-store-faults": ["mkstemp", "write", "close", "fsync", "rename"],
     "inspector-document": ['fsync'],
     "bulk-rename": ['renameat', 'fstatat'],

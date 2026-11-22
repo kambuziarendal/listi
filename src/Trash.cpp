@@ -56,7 +56,7 @@ void CheckIdentity(BEntry &entry, const NodeIdentity &expected) {
   node_ref actual;
   Require(entry.GetNodeRef(&actual), "Check source identity");
   if (actual.device != expected.device || actual.node != expected.inode)
-    throw std::runtime_error("Selected source changed; not moved to Trash.");
+    throw std::runtime_error("Selected entry changed; operation stopped.");
 }
 }
 void CheckTrashSource(const std::string &path) {
@@ -87,7 +87,8 @@ std::string MoveToTrash(const std::string &path, const NodeIdentity *expected) {
   bool hadPrevious = node.ReadAttrString(kOriginalPath, &previous) == B_OK;
   BString saved(original.c_str());
   Require(node.WriteAttrString(kOriginalPath, &saved), original);
-  // MoveTo(false) never overwrites, including a name created after our check.
+  // MoveTo(false) checks for a conflict before renaming. Haiku does not
+  // provide an atomic no-replace or identity-conditional rename.
   auto restoreMetadata = [&] {
     if (hadPrevious)
       node.WriteAttrString(kOriginalPath, &previous);
@@ -119,8 +120,11 @@ std::string MoveToTrash(const std::string &path, const NodeIdentity *expected) {
     CheckIdentity(entry, *expected);
   return Join(trash, name);
 }
-std::string RestoreFromTrash(const std::string &path, std::string *warning) {
+std::string RestoreFromTrash(const std::string &path, std::string *warning,
+                             const NodeIdentity *expected) {
   BEntry entry(path.c_str(), false);
+  if (expected)
+    CheckIdentity(entry, *expected);
   std::string current = EntryPath(entry);
   std::string trash = TrashDirectory(current, false);
   BEntry parent;
@@ -129,6 +133,12 @@ std::string RestoreFromTrash(const std::string &path, std::string *warning) {
     throw std::runtime_error(path +
                              ": select a top-level entry in Trash to restore.");
   BNode node(&entry);
+  node_ref identity;
+  Require(node.GetNodeRef(&identity), current);
+  const NodeIdentity opened{identity.device, identity.node};
+  if (expected && (opened.device != expected->device ||
+                   opened.inode != expected->inode))
+    throw std::runtime_error(current + ": selected entry changed; not restored.");
   BString original;
   Require(node.ReadAttrString(kOriginalPath, &original), current);
   std::string target = original.String();
@@ -149,8 +159,13 @@ std::string RestoreFromTrash(const std::string &path, std::string *warning) {
   if (Within(EntryPath(resolvedParent), trash))
     throw std::runtime_error(
         path + ": original folder now points into Trash; entry retained.");
-  // No replacement or recursive merge during restore. A conflicting file is
-  // safe.
+  node_ref destinationIdentity;
+  Require(destination.GetNodeRef(&destinationIdentity), parentPath);
+  if (destinationIdentity.device != identity.device)
+    throw std::runtime_error(path + ": original folder is now on another volume.");
+  // No intentional replacement or recursive merge. The same check/rename
+  // race described for Trash still applies.
+  CheckIdentity(entry, opened);
   Require(entry.MoveTo(&destination, Leaf(target).c_str(), false), target);
   const auto status = node.RemoveAttr(kOriginalPath);
   if (status != B_OK) {

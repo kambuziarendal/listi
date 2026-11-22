@@ -8,5 +8,6 @@ std::string TrashDirectory(const std::string &path, bool create);
 void CheckTrashSource(const std::string &path);
 std::string MoveToTrash(const std::string &path,
                         const NodeIdentity *expected = nullptr);
-std::string RestoreFromTrash(const std::string &path, std::string *warning = nullptr);
+std::string RestoreFromTrash(const std::string &path, std::string *warning = nullptr,
+                             const NodeIdentity *expected = nullptr);
 } // namespace Listi
