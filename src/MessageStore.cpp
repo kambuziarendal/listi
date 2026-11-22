@@ -14,6 +14,15 @@ namespace Listi {
 namespace {
 constexpr size_t MaxFile = 1024 * 1024;
 void Fail() { throw std::runtime_error(strerror(errno)); }
+struct DirectoryFd {
+  explicit DirectoryFd(const std::string &path)
+      : fd(open(path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC)) {
+    if (fd < 0)
+      Fail();
+  }
+  ~DirectoryFd() { close(fd); }
+  const int fd;
+};
 }
 BMessage LoadMessageStore(const std::string &file) {
   int fd = open(file.c_str(), O_RDONLY | O_NONBLOCK);
@@ -59,13 +68,28 @@ void SaveMessageStore(const std::string &file, const BMessage &message) {
   std::vector<char> bytes(size);
   if (message.Flatten(bytes.data(), size) != B_OK)
     throw std::runtime_error("Could not encode settings.");
+  const auto slash = file.rfind('/');
+  const std::string folder = slash == std::string::npos ? "." :
+      slash == 0 ? "/" : file.substr(0, slash);
+  const std::string target = file.substr(slash + 1);
+  DirectoryFd parent(folder);
   std::string pattern = file + ".tmp.XXXXXX";
   std::vector<char> temp(pattern.begin(), pattern.end());
   temp.push_back(0);
   int fd = mkstemp(temp.data());
   if (fd < 0)
     Fail();
+  const std::string leaf = std::string(temp.data()).substr(slash + 1);
+  struct stat opened, named;
+  const bool identified = fstat(fd, &opened) == 0;
+  auto sameStage = [&] {
+    return identified &&
+           !fstatat(parent.fd, leaf.c_str(), &named, AT_SYMLINK_NOFOLLOW) &&
+           opened.st_dev == named.st_dev && opened.st_ino == named.st_ino;
+  };
   try {
+    if (!sameStage())
+      throw std::runtime_error("Settings staging directory changed.");
     size_t at = 0;
     while (at < bytes.size()) {
       ssize_t n = write(fd, bytes.data() + at, bytes.size() - at);
@@ -84,13 +108,23 @@ void SaveMessageStore(const std::string &file, const BMessage &message) {
       Fail();
     }
     fd = -1;
-    if (rename(temp.data(), file.c_str()))
+    struct stat savedParent, namedParent;
+    if (!sameStage() || fstat(parent.fd, &savedParent) ||
+        stat(folder.c_str(), &namedParent) || savedParent.st_dev != namedParent.st_dev ||
+        savedParent.st_ino != namedParent.st_ino)
+      throw std::runtime_error("Settings directory or temporary file changed.");
+    if (renameat(parent.fd, leaf.c_str(), parent.fd, target.c_str()))
       Fail();
   } catch (...) {
     if (fd >= 0)
       close(fd);
-    unlink(temp.data());
+    if (sameStage())
+      unlinkat(parent.fd, leaf.c_str(), 0);
     throw;
   }
+  if (fsync(parent.fd))
+    throw std::runtime_error(
+        std::string("Settings were replaced, but their directory could not be flushed: ") +
+        strerror(errno));
 }
 } // namespace Listi

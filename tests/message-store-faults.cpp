@@ -8,7 +8,7 @@
 #include <unistd.h>
 
 namespace {
-enum class Fault { None, Write, Sync, Close, Rename };
+enum class Fault { None, Write, Sync, Close, Rename, DirectorySync };
 Fault fault = Fault::None;
 int stagedFd = -1;
 std::string destination;
@@ -23,7 +23,7 @@ extern "C" int __real_mkstemp(char *);
 extern "C" ssize_t __real_write(int, const void *, size_t);
 extern "C" int __real_fsync(int);
 extern "C" int __real_close(int);
-extern "C" int __real_rename(const char *, const char *);
+extern "C" int __real_renameat(int, const char *, int, const char *);
 
 extern "C" int __wrap_mkstemp(char *path) {
   int fd = __real_mkstemp(path);
@@ -36,7 +36,9 @@ extern "C" ssize_t __wrap_write(int fd, const void *data, size_t size) {
                                                  : __real_write(fd, data, size);
 }
 extern "C" int __wrap_fsync(int fd) {
-  return fd == stagedFd && fault == Fault::Sync ? Fail() : __real_fsync(fd);
+  return (fd == stagedFd ? fault == Fault::Sync : fault == Fault::DirectorySync)
+             ? Fail()
+             : __real_fsync(fd);
 }
 extern "C" int __wrap_close(int fd) {
   int status = __real_close(fd);
@@ -47,10 +49,11 @@ extern "C" int __wrap_close(int fd) {
   }
   return status;
 }
-extern "C" int __wrap_rename(const char *oldPath, const char *newPath) {
-  return fault == Fault::Rename && destination == newPath
+extern "C" int __wrap_renameat(int from, const char *oldPath, int to,
+                                const char *newPath) {
+  return fault == Fault::Rename && std::string(newPath) == "settings"
              ? Fail()
-             : __real_rename(oldPath, newPath);
+             : __real_renameat(from, oldPath, to, newPath);
 }
 
 int main() {
@@ -73,11 +76,21 @@ int main() {
     if (Listi::LoadMessageStore(destination).what != original.what)
       return 1;
   }
+  fault = Fault::DirectorySync;
+  try {
+    Listi::SaveMessageStore(destination, update);
+    return 1;
+  } catch (const std::runtime_error &error) {
+    if (std::string(error.what()).find("were replaced") == std::string::npos ||
+        Listi::LoadMessageStore(destination).what != update.what)
+      return 1;
+  }
+  fault = Fault::None;
   Listi::SaveMessageStore(destination, update);
   if (Listi::LoadMessageStore(destination).what != update.what ||
       unlink(destination.c_str()) != 0 || rmdir(root) != 0)
     return 1; // Also rejects leftover temporary files.
   std::cout
-      << "PASS settings survive write, fsync, close and rename failure; retry succeeds\n";
+      << "PASS settings preserve old bytes before rename, report post-rename flush failure, and retry\n";
   return 0;
 }

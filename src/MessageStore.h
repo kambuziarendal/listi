@@ -5,6 +5,7 @@
 namespace Listi {
 // Bounded regular-file read. Missing file returns an empty message.
 BMessage LoadMessageStore(const std::string &file);
-// Atomic replacement: failed writes leave the previous file untouched.
+// Failures before rename leave the previous file untouched. A later directory
+// flush error explicitly reports that replacement occurred.
 void SaveMessageStore(const std::string &file, const BMessage &message);
 }
