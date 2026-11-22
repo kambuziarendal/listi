@@ -132,7 +132,7 @@ int main() try {
       fs::remove(entry.path());
     }
     Require(found == (boundary < Retired ? 1u : 0u), "Wrong number of outstanding records");
-    std::cout << "PASS restart boundary " << names[boundary] << '\n';
+    std::cout << "PASS restart boundary " << names[boundary] << std::endl;
   }
   fs::remove_all(root);
   return 0;

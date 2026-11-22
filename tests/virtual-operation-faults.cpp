@@ -29,6 +29,7 @@ void RecoveryRecord::Advance(RecoveryPhase next, const struct stat *) {
   phase = next;
 }
 void RecoveryRecord::Retire() {}
+void RecoveryRecord::NoteFailure(bool) noexcept {}
 }
 #endif
 namespace {

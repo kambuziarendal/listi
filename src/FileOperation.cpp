@@ -587,6 +587,8 @@ struct Runner {
       Fail(parentPath);
     // Keep staging on the target volume without extending a possibly
     // maximum-length destination leaf.
+    if (!StagingSpaceAvailable(parent.n, 0))
+      Fail(parentPath);
     RecoveryRecord recovery("copy", parentPath, ".listi-copy-", src, dst);
     const auto &tmp = recovery.Stage();
     const auto leaf = Leaf(tmp);
@@ -747,10 +749,14 @@ struct Runner {
       }
       Done(src, dst, staged);
     } catch (const RemovableCopyInterrupted &) {
+      recovery.NoteFailure(false);
       // The mount may still answer cached lookups or hang on cleanup. Never
       // remove a similarly named stage by path on a reconnected disk.
       throw;
     } catch (...) {
+      bool cancelled = false;
+      try { throw; } catch (const Cancelled &) { cancelled = true; } catch (...) {}
+      recovery.NoteFailure(cancelled);
       const auto device = backingDevices.find(stagingIdentity.st_dev);
       if (device != backingDevices.end() && device->second.removable)
         CheckDestinationDevice(stagingIdentity.st_dev);

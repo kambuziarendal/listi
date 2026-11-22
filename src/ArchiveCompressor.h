@@ -82,9 +82,9 @@ inline void RunArchiveCompressor(const char *name, const std::string &working,
     }
     throw;
   }
+  checkSpace();
   require(WIFEXITED(status) && WEXITSTATUS(status) == 0,
           "The " + tool + " writer could not create the archive.");
-  checkSpace();
   control.Check();
 }
 } // namespace Listi

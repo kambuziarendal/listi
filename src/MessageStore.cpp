@@ -25,8 +25,8 @@ struct DirectoryFd {
   const int fd;
 };
 }
-BMessage LoadMessageStore(const std::string &file) {
-  int fd = open(file.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+BMessage LoadMessageStore(const std::string &file, bool noFollow) {
+  int fd = open(file.c_str(), O_RDONLY | (noFollow ? O_NOFOLLOW : 0) | O_NONBLOCK);
   if (fd < 0) {
     if (errno == ENOENT) {
       BMessage absent;
@@ -82,6 +82,10 @@ void SaveMessageStore(const std::string &file, const BMessage &message,
         st.st_ino != inventory->st_ino)
       throw std::runtime_error("Recovery inventory directory changed.");
   }
+  struct stat original;
+  const bool existed = !fstatat(parent.fd, target.c_str(), &original, AT_SYMLINK_NOFOLLOW);
+  if (!existed && errno != ENOENT)
+    Fail();
   std::string pattern = file + ".tmp.XXXXXX";
   std::vector<char> temp(pattern.begin(), pattern.end());
   temp.push_back(0);
@@ -122,10 +126,14 @@ void SaveMessageStore(const std::string &file, const BMessage &message,
         stat(folder.c_str(), &namedParent) || savedParent.st_dev != namedParent.st_dev ||
         savedParent.st_ino != namedParent.st_ino)
       throw std::runtime_error("Settings directory or temporary file changed.");
-    if (expected &&
-        (fstatat(parent.fd, target.c_str(), &named, AT_SYMLINK_NOFOLLOW) ||
-         !S_ISREG(named.st_mode) || expected->st_dev != named.st_dev ||
-         expected->st_ino != named.st_ino || expected->st_crtime != named.st_crtime))
+    const bool exists = !fstatat(parent.fd, target.c_str(), &named, AT_SYMLINK_NOFOLLOW);
+    if ((!exists && errno != ENOENT) || existed != exists ||
+        (existed && (original.st_dev != named.st_dev || original.st_ino != named.st_ino ||
+                     original.st_ctim.tv_sec != named.st_ctim.tv_sec ||
+                     original.st_ctim.tv_nsec != named.st_ctim.tv_nsec)))
+      throw std::runtime_error("Settings file changed; replacement refused.");
+    if (expected && (!exists || !S_ISREG(named.st_mode) || expected->st_dev != named.st_dev ||
+                     expected->st_ino != named.st_ino || expected->st_crtime != named.st_crtime))
       throw std::runtime_error("Recovery record changed; replacement refused.");
     if (renameat(parent.fd, leaf.c_str(), parent.fd, target.c_str()))
       Fail();

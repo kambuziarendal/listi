@@ -21,6 +21,7 @@ public:
   const std::string &Stage() const { return stage; }
   const std::string &Backup() const { return backup; }
   void Advance(RecoveryPhase next, const struct stat *bound = nullptr);
+  void NoteFailure(bool cancelled) noexcept;
   void Retire();
 private:
   void Reserve(const std::string &directory);

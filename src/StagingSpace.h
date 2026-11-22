@@ -4,6 +4,7 @@
 #include <cerrno>
 #include <cstdint>
 #include <limits>
+#include <mutex>
 #include <sys/stat.h>
 #include <unistd.h>
 #ifdef __HAIKU__
@@ -55,8 +56,50 @@ inline bool StagingSpaceAvailable(int fd, uint64_t growth) {
   return true;
 }
 
+// Include writes already admitted by this process but not yet visible in the
+// filesystem free-block counter. No lock is held across filesystem calls: an
+// unplugged disk must not stall an unrelated volume.
+class PendingStagingWrite {
+public:
+  PendingStagingWrite(dev_t volume, size_t bytes) : volume(volume), bytes(bytes) {
+    std::lock_guard<std::mutex> lock(mutex);
+    for (auto *item = head; item; item = item->next) {
+      if (item->volume != volume) continue;
+      Add(item->bytes);
+#ifdef __HAIKU__
+      Add(256 * 1024); // Additional concurrent BFS allocation allowance.
+#endif
+    }
+    Add(bytes);
+    next = head;
+    head = this;
+  }
+  ~PendingStagingWrite() {
+    std::lock_guard<std::mutex> lock(mutex);
+    auto **link = &head;
+    while (*link != this)
+      link = &(*link)->next;
+    *link = next;
+  }
+  PendingStagingWrite(const PendingStagingWrite &) = delete;
+  uint64_t total = 0;
+private:
+  void Add(uint64_t value) {
+    total += std::min(value, std::numeric_limits<uint64_t>::max() - total);
+  }
+  dev_t volume;
+  uint64_t bytes;
+  PendingStagingWrite *next;
+  static inline std::mutex mutex;
+  static inline PendingStagingWrite *head = nullptr;
+};
+
 inline ssize_t WriteStaging(int fd, const void *data, size_t size) {
-  if (!StagingSpaceAvailable(fd, size))
+  struct stat st;
+  if (fstat(fd, &st))
+    return -1;
+  PendingStagingWrite pending(st.st_dev, size);
+  if (!StagingSpaceAvailable(fd, pending.total))
     return -1;
   return write(fd, data, size);
 }

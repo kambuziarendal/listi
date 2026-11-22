@@ -363,7 +363,8 @@ struct Runner {
       receipt.contentVerified = true;
       recovery.Advance(RecoveryPhase::Ready);
       bool now = StatFile(dst, check, control);
-      if (now != exists || (now && !Same(target, check)))
+      if (now != exists || (now && (!Same(target, check) ||
+                                    RemoteDigest(dst, control) != originalDigest)))
         throw std::runtime_error(
             "Destination changed during transfer; it was left untouched");
       recovery.Advance(RecoveryPhase::Publishing);
@@ -441,6 +442,7 @@ struct Runner {
         } catch (const std::exception &e) {
           message += e.what();
         }
+        recovery.NoteFailure(result.cancelled);
         throw std::runtime_error(message);
       }
       recovery.Retire();

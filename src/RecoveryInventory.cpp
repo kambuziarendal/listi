@@ -157,6 +157,15 @@ void RecoveryRecord::Advance(RecoveryPhase next, const struct stat *bound) {
   phase = next;
 }
 
+void RecoveryRecord::NoteFailure(bool cancelled) noexcept {
+  try {
+    Field(message->SetString("outcome", cancelled ? "Cancelled" : "Failed or interrupted"));
+    Save();
+  } catch (...) {
+    // The last synced phase is still sufficient for conservative review.
+  }
+}
+
 void RecoveryRecord::Retire() {
   const auto record = fs::path(path);
   const int parent = open(record.parent_path().c_str(),
@@ -193,7 +202,7 @@ std::string ReviewRecovery(const std::string &inventory) {
   for (size_t i = 0; i < std::min(kReviewLimit, records.size()); ++i) {
     const auto &record = records[i].second;
     try {
-      const auto message = LoadMessageStore(record);
+      const auto message = LoadMessageStore(record, true);
       const std::string kind = message.GetString("kind", "");
       const std::string path = message.GetString("path", "");
       const bool remote = kind == "upload";
@@ -215,6 +224,8 @@ std::string ReviewRecovery(const std::string &inventory) {
           kind == "codec" ? "Codec scratch: " : kind == "scratch" ? "Local transfer staging: " : "File copy: ";
       review += Printable(path);
       if (phase >= 0) {
+        review += "\nOperation: " + Printable(record.filename()) +
+                  " (" + Printable(message.GetString("outcome", "interrupted or active")) + ")";
         review += "\nSource: " + Printable(message.GetString("source", "")) +
                   "\nDestination: " + Printable(message.GetString("destination", ""));
         if (remote)
