@@ -155,3 +155,37 @@ No privileged self-hosted PR runner. Local actionlint 1.7.7 passed. The
 the first green Portable and Haiku native runs, disposable public fixture
 requirements, manual native verification and an actual refused merge. Do not
 make a missing or skipped check mandatory.
+
+## Qualification history and negative evidence
+
+The first complete application qualification used bdce5f3. All 464 archived
+files verified in the guest, 80/80 native programs, 58/58 installed self-tests,
+110/110 installed protocol checks (including certificate-verified FTPS), and
+27/27 SMB/FTP/SFTP interruption cases passed on the seeded fixture. GUI checks
+included all four workspaces, a read-only recovery window, conflict abort and
+replace, cancellation during transfer and a byte-exact 36 MiB retry. The first
+conflict OCR attempt stopped before clicking because the mouse pointer obscured
+the label; the retry verified the label and file contents. The first VM
+preflight stopped before build because the scratch disk was not mounted; the
+operator preserved the seeded disk and mounted a new disposable BFS volume.
+All original receipts, including failed attempts, are under
+`reports/listi-27947/native/` in the private operations evidence tree.
+
+**Storage negative control:** the unchanged extended test failed on the fresh
+96 MiB BFS even though it passed on the original seeded fixture. Closing two
+file descriptors released preallocated extents: 237 free blocks became 2,572,
+and the writer completed with 523 still free (target 122). That was a bad
+test premise, not an undetected exhaustion. Commit e17d847 keeps the
+descriptors open through that probe without changing an assertion or product
+code. The diagnostic codec could consume the remaining free blocks before
+sampling caught it. On a separately prefilled disk the controlled writer
+stopped but only 117 blocks were available after fsync against the nominal
+122. This negative result remains: we do not guarantee a hard post-flush
+reserve. Two competing 12 MiB replacements on a 16 MiB BFS preserved both
+originals and sources, and left no stages. Quota coverage is injected EDQUOT,
+not a real quota mount.
+
+The initial pinned binary SHA-256 was
+`58866d4847bd016ea89df3a6401aa78bd7bd4fbb8eb682eb4dd70a3003d62024`
+(identical to the measured binary); its private HPKG was
+`fa03488fe9b18f683dced23f821010eb04468019d076c7c879caef4e50d9c257`.
