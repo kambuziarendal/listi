@@ -282,7 +282,22 @@ int main(){
  check(wait([&] { return reportText().find("Copy:") != std::string::npos; }),
        "recent activity can be reopened");
  window->Lock();
+ auto *notice = dynamic_cast<BStringView *>(window->FindView("operation error"));
+ auto *dismiss = notice ? dynamic_cast<BButton *>(notice->NextSibling()) : nullptr;
+ BMessage error(kFileErrorSelected);
+ error.AddString("error", "Unread transfer error");
+ window->queue->View()->MessageReceived(&error);
  window->queue->PresentEvent(retained);
+ check(notice && !notice->Parent()->IsHidden() &&
+           std::string(notice->Text()) == "Error: Unread transfer error (+1)" && dismiss,
+       "later completion keeps unread transfer error visible");
+ if (dismiss) {
+   window->queue->View()->MessageReceived(dismiss->Message());
+   check(std::string(notice->Text()).find(destination) != std::string::npos,
+         "next unread notice identifies the retained copy");
+   window->queue->View()->MessageReceived(dismiss->Message());
+   check(notice && notice->Parent()->IsHidden(), "acknowledgment hides read error");
+ }
  const std::string history = historyView ? historyView->Text() : "";
  check(history.find("0 errors. Cancelled") != std::string::npos &&
            history.find("Complete copy kept at: " + destination) !=

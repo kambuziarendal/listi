@@ -20,6 +20,8 @@
 #include <Button.h>
 #include <ColumnListView.h>
 #include <GridView.h>
+#include <Layout.h>
+#include <LayoutItem.h>
 #include <MenuBar.h>
 #include <MenuField.h>
 #include <MenuItem.h>
@@ -102,7 +104,7 @@ static void CheckToolPlacement(BWindow *window) {
     auto *empty = above ? bottom : top;
     assert(target->CountChildren() == (above ? 3 : 2) &&
            empty->CountChildren() == (above ? 0 : 1));
-    assert(target->ChildAt(0) == bank && bank->Parent() == target &&
+    assert(target->GetLayout()->ItemAt(0)->View() == bank && bank->Parent() == target &&
            command->Parent() == target);
     assert(std::string(command->Text()) == "echo retained draft");
     assert(!command->IsHidden(target) && !target->IsHidden(target));
