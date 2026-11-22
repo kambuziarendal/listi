@@ -42,6 +42,8 @@
 
 static void CheckFunctionButtons() {
   MainWindowMenu menu;
+  auto *recovery = menu.FindItem(kReviewRecovery);
+  assert(recovery && std::string(recovery->Label()) == "Review interrupted operations…");
   Listi::FunctionButtonBank bank(menu);
   auto *fallbackItem = menu.FindItem("Function actions");
   assert(fallbackItem && fallbackItem->Submenu());

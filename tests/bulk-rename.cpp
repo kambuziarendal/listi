@@ -27,6 +27,10 @@ bool simulateLarge = false;
 extern "C" int __real_renameat(int, const char *, int, const char *);
 extern "C" int __wrap_renameat(int from, const char *before, int to,
                                 const char *after) {
+  // The recovery inventory has its own durable settings publication.
+  // This fixture counts mutations of the selected names only.
+  if (std::string(after).rfind("record-", 0) == 0)
+    return __real_renameat(from, before, to, after);
   if (++renameCalls == failRename) {
     if (!blockRestore.empty()) {
       int fd = openat(to, blockRestore.c_str(), O_WRONLY | O_CREAT | O_EXCL,
