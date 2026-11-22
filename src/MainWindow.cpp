@@ -2,6 +2,8 @@
 #include <stdexcept>
 #include "MainWindow.h"
 #include "RecoveryInventory.h"
+#include <TextView.h>
+#include <ScrollView.h>
 #include <Alert.h>
 #include "FlatView.h"
 #include "MainWindowMenu.h"
@@ -569,9 +571,18 @@ public:
       } catch (const std::exception &error) {
         text = error.what();
       }
-      auto *alert = new BAlert("Listi recovery review", text.c_str(), "Close",
-                               nullptr, nullptr, B_WIDTH_AS_USUAL, B_INFO_ALERT);
-      alert->Go(nullptr);
+      auto *review = new BWindow(BRect(0, 0, 610, 365),
+                                 "Listi recovery review", B_TITLED_WINDOW,
+                                 B_CLOSE_ON_ESCAPE | B_AUTO_UPDATE_SIZE_LIMITS);
+      auto *report = new BTextView("recovery records");
+      report->MakeEditable(false);
+      report->SetText(text.c_str());
+      auto *scroll = new BScrollView("recovery scroll", report, 0, false, true);
+      BLayoutBuilder::Group<>(review, B_VERTICAL)
+          .SetInsets(8)
+          .Add(scroll);
+      review->CenterIn(Frame());
+      review->Show();
       break;
     }
     case kCompareFolders:

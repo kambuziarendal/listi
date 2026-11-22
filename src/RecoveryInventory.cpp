@@ -114,19 +114,22 @@ std::string ReviewRecovery(const std::string &inventory) {
   const auto directory = Directory(inventory, false);
   if (directory.empty())
     return "No pending recovery records.";
-  std::string review;
-  size_t count = 0;
+  std::vector<std::pair<fs::file_time_type, fs::path>> records;
   for (const auto &record : fs::directory_iterator(directory)) {
     const auto name = record.path().filename().string();
     if (name.size() != 13 || name.rfind("record-", 0) != 0 ||
         !fs::is_regular_file(record.symlink_status()))
       continue;
-    if (++count > kReviewLimit) {
-      review += "\nMore records are available in " + Printable(directory) + ".";
-      break;
-    }
+    std::error_code error;
+    const auto stamp = record.last_write_time(error);
+    records.emplace_back(error ? fs::file_time_type::min() : stamp, record.path());
+  }
+  std::sort(records.rbegin(), records.rend());
+  std::string review;
+  for (size_t i = 0; i < std::min(kReviewLimit, records.size()); ++i) {
+    const auto &record = records[i].second;
     try {
-      const auto message = LoadMessageStore(record.path());
+      const auto message = LoadMessageStore(record);
       const std::string kind = message.GetString("kind", "");
       const std::string path = message.GetString("path", "");
       if (message.what != kRecovery || (kind != "archive" && kind != "rename") ||
@@ -145,9 +148,11 @@ std::string ReviewRecovery(const std::string &inventory) {
       review += matched ? "\nRecorded identity matches. Review only.\n"
                         : "\nMissing or identity changed. Do not reuse this path.\n";
     } catch (const std::exception &) {
-      review += "Unreadable recovery record: " + Printable(record.path()) + "\n";
+      review += "Unreadable recovery record: " + Printable(record) + "\n";
     }
   }
-  return count ? review : "No pending recovery records.";
+  if (records.size() > kReviewLimit)
+    review += "\nMore records are available in " + Printable(directory) + ".";
+  return records.empty() ? "No pending recovery records." : review;
 }
 } // namespace Listi
