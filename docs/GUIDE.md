@@ -224,7 +224,7 @@ number to review its result, even after another job has started. **Recent
 activity** is the combined log; a specific job shows its source and destination
 paths where available. Large reports have multiple pages. Job results are for
 this session, not saved to disk. **Clear finished** frees completed reports without cancelling any jobs.
-**View → Review interrupted operations…** checks the separate archive staging
+**Listi → Review interrupted operations…** checks the separate archive staging
 and bulk rename recovery records left after an interruption. It never resumes
 the job or deletes a file.
 

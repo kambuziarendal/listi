@@ -211,7 +211,7 @@ that an entry blocking recovery is retained. If rollback cannot finish, the
 operation report lists verified locations (including hidden
 `.listi-rename-*` names) or says when an entry could not be located. Inspect
 these paths before retrying. An interrupted process may leave a hidden
-`.listi-recovery-rename-*` review record in the affected folder. Open **View → Review interrupted
+`.listi-recovery-rename-*` review record in the affected folder. Open **Listi → Review interrupted
 operations…** to see the journal path and check its identity before reading
 it. It records
 the frozen folder, planned names, entry identities and each flushed rename
@@ -251,7 +251,7 @@ ordinary working volume to exercise a failure path.
 ### Recovering a staging directory
 
 A failed archive operation reports if Listi cannot remove its staging folder.
-On restart, **View → Review interrupted operations…** reads Listi's
+On restart, **Listi → Review interrupted operations…** reads Listi's
 private stage and bulk rename inventory. It shows the recorded path and
 whether its entry and parent still match. It never resumes, relocates or
 deletes an entry. A missing or substituted name is not safe to reuse.
