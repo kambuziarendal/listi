@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise the real runner's exit contract with a tiny POSIX-only build tree."""
 import os
+import runpy
 import shutil
 import subprocess
 import sys
@@ -10,7 +11,33 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def check_receipt_contract():
+    validate = runpy.run_path(str(ROOT / "ci/qualification_receipts.py"))["validate_full_audit"]
+    valid = ["TEST demo", "PASS demo", "TEST Listi --self-test",
+             *(f"PASS check{i}" for i in range(58)), "58 checks, 0 failures",
+             "PASS Listi --self-test; 1 selected native cases exited successfully"]
+    validate(valid, ["demo"])
+    broken = {
+        "missing-test": valid[2:],
+        "missing-completion": valid[:1] + valid[2:],
+        "skipped": ["  SKIP unavailable", *valid],
+        "failed": ["FAIL assertion", *valid],
+        "empty-self-test": valid[:3] + ["0 checks, 0 failures", valid[-1]],
+        "missing-self-check": valid[:3] + valid[4:],
+        "repeated-case": valid[:2] + valid,
+        "truncated": valid[:-1],
+    }
+    for reason, lines in broken.items():
+        try:
+            validate(lines, ["demo"])
+        except RuntimeError:
+            print(f"PASS invalid-log/{reason}: rejected")
+        else:
+            raise RuntimeError(f"Invalid native receipts accepted: {reason}")
+
+
 def main():
+    check_receipt_contract()
     with tempfile.TemporaryDirectory(prefix="listi-gate-") as directory:
         root = Path(directory)
         src = root / "src"

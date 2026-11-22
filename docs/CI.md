@@ -49,8 +49,12 @@ This exports committed source, compares the source-file SHA-256 manifest in
 the guest, builds and runs the full native audit with its built-in self-test,
 rejects explicit skipped cases, builds a new HPKG, installs it *in the overlay*,
 compares both installed package and executable byte-for-byte with the build,
-and reruns the installed self-test. See source.txt, verify.log, audit.log and
-installed.log. A timed-out GitHub job is not green. For local automation wrap
+and reruns the installed self-test. Keep source.txt (host, QEMU, commit and source archive digest), source.sha256,
+verify.log, audit.log, installed.log and result.txt. The wrapper requires one
+completion per selected program, rejects failed/skipped receipts and checks the
+built and installed self-test counts against the PASS lines (at least 58 each).
+A missing, incomplete, failed, focused or preflight result is not an installed
+package pass. Preserve the process exit status as well as those logs. A timed-out GitHub job is not green. For local automation wrap
 the command in an appropriate process-group timeout (e.g. GNU timeout 150m).
 Focused or preflight-only runs are not accepted for package qualification.
 No release assets are uploaded by the workflow; only short-lived logs are
@@ -108,9 +112,15 @@ is **not** a required hosted check and its absence does not qualify it.
    Enable Actions and read-only token access. Run a manual dispatch and
    a test PR; check the exact commit, artifact logs and stable names
    **Portable** and **Haiku native**. Both checks must actually complete.
-4. Settings → Rules → Rulesets: create an active branch ruleset targeting
+4. If native fixtures are unavailable, qualify **Portable** alone after its
+   own first green PR check; run the native command above on the *reviewed PR
+   merge SHA* on a trusted disposable host before approving. Record the commit,
+   evidence path and command exit in the review. This is manual review evidence,
+   **not** a GitHub status; do not require **Haiku native** until the fixtures and
+   a real green native check exist. Use no self-hosted runner for untrusted code.
+5. Settings → Rules → Rulesets: create an active branch ruleset targeting
    the default branch. Require PRs and status checks before merge, select
-   both check names from *GitHub Actions*, require current branches (or test
+   the verified check name(s) from *GitHub Actions*, require current branches (or test
    the merge queue before enabling one), and limit bypasses. Require review
    for workflow, qualification script and required-test list changes. Verify
    an intentionally failing throwaway PR cannot merge, without merging it.

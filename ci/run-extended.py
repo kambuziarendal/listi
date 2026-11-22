@@ -5,6 +5,7 @@ Use an isolated host with the loopback fixture ports exclusively available.
 import contextlib
 import json
 import os
+import runpy
 import shlex
 import shutil
 import socket
@@ -57,6 +58,9 @@ def extended(config, output, ssh, scratch):
           "python3 ci/link-network-case.py; python3 ci/virtual-fixtures.py build/virtual",
           "extended-storage.log")
 
+    receipts = runpy.run_path(str(ROOT / "ci/qualification_receipts.py"))
+    receipts["validate_full_audit"]((output / "extended-storage.log").read_text().splitlines(),
+                                    ["staging-budget", "cross-volume-move"])
     network = scratch / "network"
     tls = scratch / "tls-share"
     tls.mkdir()
@@ -100,6 +104,8 @@ def extended(config, output, ssh, scratch):
                   'LISTI_TEST_NETWORK_HOST=127.0.0.1 LISTI_TEST_FTPS=1 /boot/system/apps/Listi '
                   '--virtual-test "$PWD/build/virtual" "$PWD/build/known-hosts"',
                   "installed-protocols.log")
+        receipts["validate_checks"]((output / "installed-protocols.log").read_text().splitlines(),
+                                    110, "virtual checks")
         guest_root = subprocess.check_output([*ssh, "cd ~/listi-ephemeral && pwd"],
                                              text=True, timeout=20).strip()
         (scratch / "ssh").write_text("#!/bin/sh\nexec " + shlex.join(ssh) + ' "$@"\n')

@@ -3,7 +3,9 @@
 """Run Listi's Haiku audit in a local throwaway overlay; never modify the base."""
 import argparse
 import hashlib
+import platform
 import re
+import runpy
 from pathlib import Path
 import shlex
 import socket
@@ -49,8 +51,16 @@ def main():
     key = args.key.resolve(strict=True)
     output = args.output.resolve()
     output.mkdir()
+    (output / "result.txt").write_text("incomplete\n")
     with tempfile.TemporaryDirectory(prefix="listi-native-") as temp:
-        run(args, base, key, output, Path(temp))
+        try:
+            run(args, base, key, output, Path(temp))
+        except Exception:
+            (output / "result.txt").write_text("failed\n")
+            raise
+        mode = ("extended" if args.extended_fixture else "installed package" if args.qualify_package
+                else "preflight" if args.preflight else "source audit")
+        (output / "result.txt").write_text(f"passed: {mode} (exit 0)\n")
 
 
 def run(args, base, key, output, scratch):
@@ -58,7 +68,16 @@ def run(args, base, key, output, scratch):
     archive = scratch / "source.tar"
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     subprocess.run(["git", "archive", "--output", archive, revision], check=True)
-    (output / "source.txt").write_text(f"Exported commit: {revision}\n")
+    with archive.open("rb") as source:
+        digest = hashlib.sha256()
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    qemu_version = subprocess.check_output([args.qemu, "--version"], text=True).splitlines()[0]
+    (output / "source.txt").write_text(
+        f"Exported commit: {revision}\nArchive SHA-256: {digest.hexdigest()}\n"
+        f"Host: {platform.platform()}\nQEMU: {qemu_version}\n"
+        f"Machine: pc; accel={args.accel}; RAM=2048 MiB; vCPUs={args.jobs}\n"
+    )
     subprocess.run([args.qemu_img, "create", "-f", "qcow2", "-F", args.base_format,
                     "-b", base, overlay], check=True)
     with socket.socket() as listener:
@@ -138,15 +157,10 @@ def audit(args, output, ssh, archive):
 
 
     if args.qualify_package:
-        lines = (output / "audit.log").read_text(errors="replace").splitlines()
-        skips = [line for line in lines if line.startswith("SKIP ")]
-        if skips:
-            raise RuntimeError("Incomplete native qualification: " + "; ".join(skips))
-        if not lines or not re.fullmatch(
-            r"PASS Listi --self-test; [1-9][0-9]* selected native cases exited successfully",
-            lines[-1]
-        ):
-            raise RuntimeError("Missing final native suite result")
+        lines = (output / "audit.log").read_text().splitlines()
+        required = runpy.run_path(str(Path(__file__).with_name("run-native-audit.py")))["REQUIRED"]
+        receipts = runpy.run_path(str(Path(__file__).resolve().parents[1] / "ci/qualification_receipts.py"))
+        receipts["validate_full_audit"](lines, required)
         package = """set -eu
 cd ~/listi-ephemeral
 make package
@@ -158,10 +172,16 @@ active=/boot/system/packages/listi-${metadata}-x86_64.hpkg
 cmp "$1" "$active"
 cmp src/objects.*-release/Listi /boot/system/apps/Listi
 sha256sum "$1" "$active" /boot/system/apps/Listi
+echo "TEST installed Listi --self-test"
 /boot/system/apps/Listi --self-test
 """
         with (output / "installed.log").open("wb") as log:
             subprocess.run([*ssh, package], stdout=log, stderr=subprocess.STDOUT, check=True)
+        installed = (output / "installed.log").read_text().splitlines()
+        marker = "TEST installed Listi --self-test"
+        if installed.count(marker) != 1:
+            raise RuntimeError("Missing installed self-test start")
+        receipts["validate_checks"](installed[installed.index(marker) + 1:])
     if args.extended_fixture:
         # Host dependencies are opt-in. Nothing here uses a production service.
         helper = Path(__file__).resolve().parents[1] / "ci/run-extended.py"

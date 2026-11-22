@@ -13,7 +13,7 @@ open-with open-with-receiver parsing-fuzz staging-budget theme
 """.split())
 sources = {p.stem for p in (ROOT / "tests").glob("*.cpp")}
 expected = set(required)
-if (not required or len(required) != len(expected) or expected & other
+if (len(required) < 80 or len(required) != len(expected) or expected & other
         or sources != expected | other):
     raise SystemExit(f"Invalid test inventory. Missing: {sorted((expected | other) - sources)}; "
                      f"unclassified: {sorted(sources - (expected | other))}; "

@@ -1,6 +1,7 @@
 name: Listi qualification
 on:
   pull_request:
+    branches: [haiku-native]
   push:
     branches: [haiku-native]
   workflow_dispatch:
@@ -31,6 +32,7 @@ jobs:
           if [[ -z "$BASE" || "$BASE" =~ ^0+$ ]]; then
             BASE=$(git rev-parse HEAD^)
           fi
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           bash ci/portable.sh "$BASE" 2>&1 | tee "$RUNNER_TEMP/portable.log"
         shell: bash
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
