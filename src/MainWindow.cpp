@@ -2,9 +2,8 @@
 #include <stdexcept>
 #include "MainWindow.h"
 #include "RecoveryInventory.h"
-#include <TextView.h>
-#include <ScrollView.h>
-#include <Alert.h>
+#include "AdaptiveScrollView.h"
+#include "ThemeTextView.h"
 #include "FlatView.h"
 #include "MainWindowMenu.h"
 #include "ApplicationServices.h"
@@ -574,10 +573,15 @@ public:
       auto *review = new BWindow(BRect(0, 0, 610, 365),
                                  "Listi recovery review", B_TITLED_WINDOW,
                                  B_CLOSE_ON_ESCAPE | B_AUTO_UPDATE_SIZE_LIMITS);
-      auto *report = new BTextView("recovery records");
+      auto *report = new ThemeTextView("recovery records",
+                                       B_DOCUMENT_BACKGROUND_COLOR,
+                                       B_DOCUMENT_TEXT_COLOR);
       report->MakeEditable(false);
+      report->MakeSelectable(true);
+      report->SetWordWrap(true);
       report->SetText(text.c_str());
-      auto *scroll = new BScrollView("recovery scroll", report, 0, false, true);
+      auto *scroll = new Listi::AdaptiveScrollView("recovery scroll", report, false);
+      scroll->SetExplicitMinSize(BSize(320, 140));
       BLayoutBuilder::Group<>(review, B_VERTICAL)
           .SetInsets(8)
           .Add(scroll);
