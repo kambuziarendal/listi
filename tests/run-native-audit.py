@@ -34,7 +34,7 @@ audit-io theme-text connection-defaults ssh-key-format
 WRAPS = {
     "removable-copy": ["fsync", "write", "read"],
     "archive-move-faults": ['rename'],
-    "archive-editor-faults": ['rename', 'fsync'],
+    "archive-editor-faults": ['rename', 'renameat', 'fsync'],
     "archive-local-move-faults": ['rename', 'unlink'],
     "file-operation-faults": ['mkstemp', 'write', 'unlinkat', 'stat', 'close', 'fsync', '_ZN5BNode10RemoveAttrEPKc'],
     "message-store-faults": ["mkstemp", "write", "close", "fsync", "renameat"],

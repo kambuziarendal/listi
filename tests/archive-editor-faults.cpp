@@ -71,7 +71,6 @@ bool corrupt(const std::string &root) {
 extern "C" int __real_rename(const char *, const char *);
 extern "C" int __wrap_rename(const char *from, const char *to) {
   if (!injected && ((fault == ArchiveRename && to == archivePath) ||
-                    (fault == Journal && published && to == journalPath) ||
                     (fault == Baseline && published && to == baselinePath))) {
     injected = true;
     errno = EIO;
@@ -81,6 +80,17 @@ extern "C" int __wrap_rename(const char *from, const char *to) {
   if (!status && to == archivePath)
     published = true;
   return status;
+}
+extern "C" int __real_renameat(int, const char *, int, const char *);
+extern "C" int __wrap_renameat(int from, const char *oldPath, int to,
+                                const char *newPath) {
+  if (!injected && fault == Journal && published &&
+      Leaf(journalPath) == newPath) {
+    injected = true;
+    errno = EIO;
+    return -1;
+  }
+  return __real_renameat(from, oldPath, to, newPath);
 }
 extern "C" int __real_fsync(int);
 extern "C" int __wrap_fsync(int fd) {
