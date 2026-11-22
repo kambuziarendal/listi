@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Link native regression cases against the current Haiku build and run them."""
 from pathlib import Path
+import hashlib
 import platform
 import re
 import shlex
@@ -73,6 +74,14 @@ def git_version():
     return revision + (" (dirty)" if changes else " (clean)")
 
 
+def file_digest(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def run():
     names = sys.argv[1:] or REQUIRED
     for name in names:
@@ -84,7 +93,9 @@ def run():
     print("Commit:", git_version())
     print("System:", platform.platform(), platform.machine())
     print("Compiler:", version)
-    print("Executable:", config["target"])
+    app = SRC / config["target"]
+    print("Executable:", app)
+    print("Executable SHA-256:", file_digest(app))
     print("Selected:", " ".join(names), "+ Listi --self-test")
     print("Case status is process exit status; fixture SKIP messages are not executed coverage.")
     packages = Path("/boot/system/packages")
@@ -92,7 +103,6 @@ def run():
     print("System packages:", " ".join(sorted(p.name for p in packages.glob("*.hpkg"))) or "unknown",
           flush=True)
 
-    app = SRC / config["target"]
     all_objects = [SRC / item for item in shlex.split(config["objects"])]
     for path in [app, *all_objects]:
         if not path.is_file():

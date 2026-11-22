@@ -246,6 +246,25 @@ LISTI_TEST_VOLUME=/path/to/test-volume python3 tests/run-native-audit.py cross-v
 Use a dedicated disposable volume for disk-full checks. Never fill an
 ordinary working volume to exercise a failure path.
 
+## Native release evidence
+
+Run `make audit` on Haiku in a clean checkout. Save its complete output and
+process status. For an exported tree, pair the log with the exported commit
+and a verified file manifest, since Git metadata is not included. The runner
+reports the source revision when available, executable digest, compiler,
+selected cases and package inventory. Check fixture output for explicit skips,
+particularly when a case needs a second volume or optional archive tooling.
+Run the opt-in network suite separately against disposable servers for each
+protocol you intend to qualify.
+
+Build the package separately, record the HPKG digest, install it on the test
+system, confirm the installed executable digest and repeat the relevant
+app self-tests and UI operations against that executable. QEMU exercise with
+USB hot-unplug is not a physical test. Record physical combinations separately,
+including clean eject, disconnect, remount and content comparison. A passing
+source audit alone does not qualify an installed artifact, another architecture,
+another filesystem, or physical device behavior.
+
 ## UI and package checks
 
 Automated tests do not replace installed-package checks in Haiku. Relevant
