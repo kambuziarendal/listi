@@ -356,11 +356,13 @@ Result RunArchiveEdit(const Job &job, const Hooks &hooks,
     Require(!lstat(outputPath.c_str(), &namedOutput) &&
                 Unchanged(verifiedOutput, namedOutput),
             "The verified output changed. Original archive was retained.");
+    FD parent(open(job.destinationFolder.c_str(), O_RDONLY | O_DIRECTORY));
+    Require(parent.n >= 0,
+            "Cannot open the archive directory before publishing. Original archive was retained.");
     Require(
         !rename(outputPath.c_str(), job.destination.c_str()),
         "Could not publish the updated archive. The original was left in place.");
-    FD parent(open(job.destinationFolder.c_str(), O_RDONLY));
-    Require(parent.n >= 0 && !fsync(parent.n),
+    Require(!fsync(parent.n),
             "Updated archive was published, but its directory could not be flushed. Durability after restart is unknown.");
     if (secret)
       try {

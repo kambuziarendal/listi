@@ -480,7 +480,7 @@ struct Runner {
         row.detail = "Cancelled before commit.";
       throw;
     } catch (const std::runtime_error &error) {
-      if (before != mutations)
+      if (before != mutations && Outcome(src).status == "unprocessed")
         Outcome(src).status = "partial";
       Problem(src, error.what());
       throw;
@@ -567,6 +567,11 @@ struct Runner {
     if (!Allow(dst))
       return false;
     Guard();
+    const auto parentPath = ParentLocation(dst);
+    FD parent(open(parentPath.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW));
+    struct stat parentIdentity;
+    if (parent.n < 0 || fstat(parent.n, &parentIdentity))
+      Fail(parentPath);
     // Keep staging on the target volume without extending a possibly
     // maximum-length destination leaf.
     std::string pattern = dst.substr(0, dst.rfind('/') + 1) + ".listi-copy-XXXXXX";
@@ -677,8 +682,24 @@ struct Runner {
         throw std::runtime_error(tmp + ": staging file changed");
       if (S_ISREG(st.st_mode) && staged.st_size != st.st_size)
         throw std::runtime_error(src + ": copied size does not match the source");
+      if (out.n >= 0 && close(std::exchange(out.n, -1)))
+        Fail(tmp);
       CheckDestinationDevice(stagingIdentity.st_dev);
+      struct stat namedParent;
+      if (lstat(parentPath.c_str(), &namedParent) ||
+          namedParent.st_dev != parentIdentity.st_dev ||
+          namedParent.st_ino != parentIdentity.st_ino)
+        throw std::runtime_error(parentPath + ": destination folder changed");
       Commit(tmp, dst, existed, before);
+      // Removable media have their own interruptible file flush. A directory
+      // flush on the queue thread would reintroduce a hang on unplug.
+      if (!backingDevices.at(stagingIdentity.st_dev).removable && fsync(parent.n)) {
+        ++mutations;
+        Outcome(src, dst).status = "published-flush-failed";
+        throw std::runtime_error(dst +
+            ": published, but its directory could not be flushed. Source retained; "
+            "durability after restart is unknown.");
+      }
       Done(src, dst, staged);
     } catch (const RemovableCopyInterrupted &) {
       // The mount may still answer cached lookups or hang on cleanup. Never
@@ -689,9 +710,12 @@ struct Runner {
       if (device != backingDevices.end() && device->second.removable)
         CheckDestinationDevice(stagingIdentity.st_dev);
       struct stat current;
-      if (lstat(tmp.c_str(), &current) == 0 &&
-          current.st_dev == stagingIdentity.st_dev && current.st_ino == stagingIdentity.st_ino)
-        unlink(tmp.c_str());
+      const auto leaf = Leaf(tmp);
+      if (fstatat(parent.n, leaf.c_str(), &current, AT_SYMLINK_NOFOLLOW) == 0 &&
+          current.st_dev == stagingIdentity.st_dev && current.st_ino == stagingIdentity.st_ino &&
+          unlinkat(parent.n, leaf.c_str(), 0))
+        result.errors.push_back(tmp + ": temporary copy could not be removed: " +
+                                strerror(errno));
       throw;
     }
     return true;
