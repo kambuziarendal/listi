@@ -44,9 +44,9 @@ def wait_listening(port, process):
 
 
 def extended(config, output, ssh, scratch):
-    def guest(command, log, **kwargs):
+    def guest(command, log, connection=ssh, **kwargs):
         with (output / log).open("wb") as stream:
-            subprocess.run([*ssh, command], stdout=stream, stderr=subprocess.STDOUT,
+            subprocess.run([*connection, command], stdout=stream, stderr=subprocess.STDOUT,
                            timeout=600, check=True, **kwargs)
 
     cert, key = config / "ftps.pem", config / "ftps.key"
@@ -79,23 +79,17 @@ def extended(config, output, ssh, scratch):
         forwards = []
         for port in (1445, 2121, 2222, 2143, *range(31000, 31020), *range(31300, 31310)):
             forwards.extend(["-R", f"127.0.0.1:{port}:127.0.0.1:{port}"])
-        tunnel = stack.enter_context(service(
-            [*ssh[:-1], "-N", "-o", "ExitOnForwardFailure=yes", *forwards, ssh[-1]],
-            output / "forwarding.log"))
-        # Wait for the guest end, not just a running SSH client.
-        guest("python3 -c " + shlex.quote(
-            "import socket,time\nfor _ in range(40):\n try:\n  "
-            "socket.create_connection(('127.0.0.1',2121),1).close(); break\n "
-            "except OSError: time.sleep(.25)\nelse: raise SystemExit(1)"), "ready.log")
-        if tunnel.poll() is not None:
-            raise RuntimeError("Fixture forwarding failed")
+        # The test command and its forwards share one SSH connection. Each
+        # invocation waits for its own forwarding requests during SSH startup
+        # and closes all channels on exit, including after a client timeout.
+        forwarded_ssh = [*ssh[:-1], "-o", "ExitOnForwardFailure=yes", *forwards, ssh[-1]]
         guest("set -e; cd ~/listi-ephemeral; "
               'LISTI_TEST_NETWORK_HOST=127.0.0.1 LISTI_TEST_FTPS=1 /boot/system/apps/Listi '
               '--virtual-test "$PWD/build/virtual" "$PWD/build/known-hosts"',
-              "installed-protocols.log")
+              "installed-protocols.log", connection=forwarded_ssh)
         guest_root = subprocess.check_output([*ssh, "cd ~/listi-ephemeral && pwd"],
                                              text=True, timeout=20).strip()
-        (scratch / "ssh").write_text("#!/bin/sh\nexec " + shlex.join(ssh) + ' "$@"\n')
+        (scratch / "ssh").write_text("#!/bin/sh\nexec " + shlex.join(forwarded_ssh) + ' "$@"\n')
         (scratch / "ssh").chmod(0o700)
         env = os.environ.copy()
         env.pop("NET_CASES", None)
