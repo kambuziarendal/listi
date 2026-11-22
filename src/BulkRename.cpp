@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+#include "StagingSpace.h"
 #include "BulkRename.h"
 #include "JobSnapshot.h"
 #include "NamedEntry.h"
@@ -330,7 +331,7 @@ public:
   void Record(const std::string &line) const {
     size_t at = 0;
     while (at < line.size()) {
-      const auto n = write(file.fd, line.data() + at, line.size() - at);
+      const auto n = WriteStaging(file.fd, line.data() + at, line.size() - at);
       if (n < 0 && errno == EINTR)
         continue;
       if (n <= 0)

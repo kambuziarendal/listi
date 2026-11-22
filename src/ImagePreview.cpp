@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+#include "StagingSpace.h"
 #include "AdaptiveScrollView.h"
 #include "ImagePreview.h"
 #include "ViewVisibility.h"
@@ -128,7 +129,7 @@ public:
             if (total > 32 * 1024 * 1024)
               throw std::runtime_error("File is too large for a network preview");
             while (size) {
-              ssize_t written = write(fd, data, size);
+              ssize_t written = Listi::WriteStaging(fd, data, size);
               if (written < 0 && errno == EINTR)
                 continue;
               if (written <= 0)

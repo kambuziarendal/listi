@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+#include "StagingSpace.h"
 #include "InspectorDocument.h"
 #include <cerrno>
 #include <chrono>
@@ -115,6 +116,8 @@ public:
       Fail("Create text recovery file");
     try {
       size_t written = 0;
+      if (!Listi::StagingSpaceAvailable(file.fd, bytes.size()))
+        Fail("Text recovery volume has insufficient free space");
       WriteBytes(file.fd, bytes, written);
       Sync(file.fd);
       Sync(parent.fd);
