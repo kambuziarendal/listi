@@ -63,35 +63,96 @@ std::string Printable(const std::string &path) {
   }
   return out;
 }
+void Field(status_t status) {
+  if (status != B_OK)
+    throw std::runtime_error("Cannot prepare Listi recovery record.");
+}
+void Identify(BMessage &message, const struct stat &expected) {
+  Field(message.SetInt64("device", expected.st_dev));
+  Field(message.SetInt64("node", expected.st_ino));
+  Field(message.SetInt64("created", expected.st_crtime));
+}
+void IdentifyParent(BMessage &message, const std::string &entry) {
+  struct stat st;
+  if (stat(fs::path(entry).parent_path().c_str(), &st))
+    throw std::runtime_error("Cannot identify the recovery entry's parent.");
+  Field(message.SetInt64("parent_device", st.st_dev));
+  Field(message.SetInt64("parent_node", st.st_ino));
+}
 } // namespace
+
+void RecoveryRecord::Reserve(const std::string &directory) {
+  if (lstat(directory.c_str(), &inventoryIdentity) || !S_ISDIR(inventoryIdentity.st_mode) ||
+      (inventoryIdentity.st_mode & 0077) || inventoryIdentity.st_uid != geteuid())
+    throw std::runtime_error("Listi recovery inventory changed.");
+  path = directory + "/record-XXXXXX";
+  const int fd = mkstemp(path.data());
+  if (fd < 0)
+    throw std::runtime_error("Cannot reserve a Listi recovery record.");
+  const bool known = !fstat(fd, &identity);
+  if (close(fd) || !known)
+    throw std::runtime_error("Cannot identify a reserved recovery record.");
+}
+
+void RecoveryRecord::Save() {
+  SaveMessageStore(path, message, &identity, &identity, &inventoryIdentity);
+}
 
 RecoveryRecord::RecoveryRecord(const std::string &kind, const std::string &entry,
                                const struct stat &expected,
-                               const std::string &inventory) {
-  const auto directory = Directory(inventory, true);
-  BMessage message(kRecovery);
-  const auto parent = fs::path(entry).parent_path();
-  struct stat parentStat;
-  if (stat(parent.c_str(), &parentStat))
-    throw std::runtime_error("Cannot identify the recovery entry's parent.");
-  if (message.AddString("kind", kind.c_str()) != B_OK ||
-      message.AddString("path", entry.c_str()) != B_OK ||
-      message.AddInt64("device", expected.st_dev) != B_OK ||
-      message.AddInt64("node", expected.st_ino) != B_OK ||
-      message.AddInt64("created", expected.st_crtime) != B_OK ||
-      message.AddInt64("parent_device", parentStat.st_dev) != B_OK ||
-      message.AddInt64("parent_node", parentStat.st_ino) != B_OK)
-    throw std::runtime_error("Cannot prepare Listi recovery record.");
+                               const std::string &inventory)
+    : message(kRecovery), stage(entry) {
+  Field(message.AddString("kind", kind.c_str()));
+  Field(message.AddString("path", entry.c_str()));
+  Identify(message, expected);
+  IdentifyParent(message, entry);
+  Reserve(Directory(inventory, true));
+  try { Save(); }
+  catch (...) { Retire(); throw; }
+}
 
-  auto pattern = directory + "/record-XXXXXX";
-  const int fd = mkstemp(pattern.data());
-  if (fd < 0)
-    throw std::runtime_error("Cannot reserve a Listi recovery record.");
-  close(fd);
-  path = std::move(pattern);
-  SaveMessageStore(path, message);
-  if (lstat(path.c_str(), &identity) || !S_ISREG(identity.st_mode))
-    throw std::runtime_error("Cannot identify the stored Listi recovery record.");
+RecoveryRecord::RecoveryRecord(const std::string &kind, const std::string &folder,
+                               const std::string &prefix, const std::string &source,
+                               const std::string &destination, const std::string &inventory)
+    : message(kRecovery) {
+  Reserve(Directory(inventory, true));
+  const auto id = path.substr(path.rfind('-') + 1);
+  stage = folder + (folder.back() == '/' ? "" : "/") + prefix + id;
+  if (kind == "upload") {
+    backup = stage + ".previous";
+    stage += ".part";
+    Field(message.AddString("backup", backup.c_str()));
+  } else {
+    IdentifyParent(message, stage);
+  }
+  Field(message.AddString("kind", kind.c_str()));
+  Field(message.AddString("path", stage.c_str()));
+  Field(message.AddString("source", source.c_str()));
+  Field(message.AddString("destination", destination.c_str()));
+  Field(message.AddInt32("phase", static_cast<int32>(phase)));
+  if (kind == "copy") {
+    struct stat st;
+    if (!lstat(source.c_str(), &st)) {
+      Field(message.AddInt64("source_device", st.st_dev));
+      Field(message.AddInt64("source_node", st.st_ino));
+    }
+    if (!lstat(destination.c_str(), &st)) {
+      Field(message.AddInt64("original_device", st.st_dev));
+      Field(message.AddInt64("original_node", st.st_ino));
+    }
+  }
+  try { Save(); }
+  catch (...) { Retire(); throw; }
+}
+
+void RecoveryRecord::Advance(RecoveryPhase next, const struct stat *bound) {
+  if (int(next) != int(phase) + 1)
+    throw std::logic_error("Invalid Listi recovery transition.");
+  if (bound)
+    Identify(message, *bound);
+  Field(message.SetInt32("phase", static_cast<int32>(next)));
+  Save();
+  phase = next;
 }
 
 void RecoveryRecord::Retire() {
@@ -103,6 +164,7 @@ void RecoveryRecord::Retire() {
   struct stat now;
   const auto leaf = record.filename();
   const bool removed =
+      !fstat(parent, &now) && Same(inventoryIdentity, now) &&
       !fstatat(parent, leaf.c_str(), &now, AT_SYMLINK_NOFOLLOW) &&
       Same(identity, now) && !unlinkat(parent, leaf.c_str(), 0) && !fsync(parent);
   close(parent);
@@ -132,19 +194,40 @@ std::string ReviewRecovery(const std::string &inventory) {
       const auto message = LoadMessageStore(record);
       const std::string kind = message.GetString("kind", "");
       const std::string path = message.GetString("path", "");
-      if (message.what != kRecovery || (kind != "archive" && kind != "rename") ||
-          path.empty() || path[0] != '/')
+      const bool remote = kind == "upload";
+      if (message.what != kRecovery ||
+          (kind != "archive" && kind != "rename" && kind != "copy" && kind != "codec" && !remote) ||
+          path.empty() || (!remote && path[0] != '/'))
         throw std::runtime_error("Invalid record.");
       struct stat st, parent;
-      const bool matched = !lstat(path.c_str(), &st) &&
+      const bool matched = !remote && !lstat(path.c_str(), &st) &&
           !stat(fs::path(path).parent_path().c_str(), &parent) &&
           st.st_dev == message.GetInt64("device", -1) &&
           st.st_ino == message.GetInt64("node", -1) &&
           st.st_crtime == message.GetInt64("created", -1) &&
           parent.st_dev == message.GetInt64("parent_device", -1) &&
           parent.st_ino == message.GetInt64("parent_node", -1);
-      review += (kind == "archive" ? "Archive staging: " : "Bulk rename journal: ");
+      const int phase = message.GetInt32("phase", -1);
+      review += kind == "archive" ? "Archive staging: " : kind == "rename" ?
+          "Bulk rename journal: " : remote ? "Remote upload: " :
+          kind == "codec" ? "Codec scratch: " : "File copy: ";
       review += Printable(path);
+      if (phase >= 0) {
+        review += "\nSource: " + Printable(message.GetString("source", "")) +
+                  "\nDestination: " + Printable(message.GetString("destination", ""));
+        if (remote)
+          review += "\nPossible original (manual inspection): " +
+                    Printable(message.GetString("backup", ""));
+        const char *labels[] = {"Stage creation not confirmed; inspect manually.",
+            "Writing or verifying; not published.", "Ready for publication.",
+            "Uncertain publication; inspect both names.",
+            "Published; cleanup or directory flush not confirmed."};
+        review += "\n" + std::string(phase < 5 ? labels[phase] : "Unknown stage; inspect manually.");
+      }
+      if (remote) {
+        review += "\nRemote ownership cannot be proved; review only.\n";
+        continue;
+      }
       review += matched ? "\nRecorded identity matches. Review only.\n"
                         : "\nMissing or identity changed. Do not reuse this path.\n";
     } catch (const std::exception &) {

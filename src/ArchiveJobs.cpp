@@ -8,6 +8,7 @@
 #include "JobSnapshot.h"
 #include "LocalMoveTree.h"
 #include "RecoveryInventory.h"
+#include "PrivateScratch.h"
 #include "VirtualFile.h"
 #include <Directory.h>
 #include <Entry.h>
@@ -38,34 +39,6 @@ std::string PathOf(BDirectory &dir) {
           "The working folder disappeared.");
   return p.Path();
 }
-bool RemoveContents(BDirectory &dir, dev_t device, unsigned depth = 0) {
-  if (depth > 64 || dir.SetPermissions(0700) != B_OK)
-    return false;
-  bool clean = true;
-  BEntry entry;
-  status_t next;
-  while ((next = dir.GetNextEntry(&entry, false)) == B_OK) {
-    struct stat st;
-    if (entry.GetStat(&st) != B_OK || st.st_dev != device) {
-      clean = false;
-      continue;
-    }
-    if (S_ISDIR(st.st_mode)) {
-      BDirectory child(&entry);
-      node_ref opened;
-      if (child.GetNodeRef(&opened) != B_OK || opened.device != st.st_dev ||
-          opened.node != st.st_ino || !RemoveContents(child, device, depth + 1)) {
-        clean = false;
-        continue;
-      }
-    }
-    struct stat current;
-    if (entry.GetStat(&current) != B_OK || current.st_dev != st.st_dev ||
-        current.st_ino != st.st_ino || entry.Remove() != B_OK)
-      clean = false;
-  }
-  return clean && next == B_ENTRY_NOT_FOUND;
-}
 struct Stage {
   BDirectory parent, dir;
   std::string path, leaf;
@@ -76,12 +49,9 @@ struct Stage {
   Stage(const std::string &folder, Result &result)
       : parent(folder.c_str()), result(result) {
     Require(parent.InitCheck() == B_OK, "Cannot open destination folder.");
-    std::string pattern = Join(folder, ".Listi-archive-stage-XXXXXX");
-    std::vector<char> bytes(pattern.begin(), pattern.end());
-    bytes.push_back(0);
-    char *made = mkdtemp(bytes.data());
-    Require(made, "Cannot create archive staging folder.");
-    path = made;
+    recovery.emplace("archive", PathOf(parent), ".Listi-archive-stage-", "", folder);
+    path = recovery->Stage();
+    Require(mkdir(path.c_str(), 0700) == 0, "Cannot create archive staging folder.");
     leaf = Leaf(path);
     BEntry created(&parent, leaf.c_str(), false);
     Require(dir.SetTo(&created) == B_OK && dir.GetNodeRef(&identity) == B_OK,
@@ -91,7 +61,7 @@ struct Stage {
       struct stat identity;
       Require(dir.GetStat(&identity) == B_OK && parent.Sync() == B_OK,
               "Cannot flush the newly created archive staging directory.");
-      recovery.emplace("archive", path, identity);
+      recovery->Advance(RecoveryPhase::Writing, &identity);
       RegisterArchiveStage(path, identity.st_dev, identity.st_ino);
     } catch (...) {
       node_ref named;
@@ -112,7 +82,7 @@ struct Stage {
       node_ref named;
       if (entry.GetNodeRef(&named) == B_OK &&
           named.device == identity.device && named.node == identity.node &&
-          RemoveContents(dir, identity.device) &&
+          RemoveStageContents(dir, identity.device) &&
           entry.GetNodeRef(&named) == B_OK &&
           named.device == identity.device && named.node == identity.node &&
           entry.Remove() == B_OK && parent.Sync() == B_OK) {

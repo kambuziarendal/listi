@@ -4,6 +4,8 @@
 #include "JobSnapshot.h"
 #include "Trash.h"
 #include <Node.h>
+#include <fcntl.h>
+#include <cstdarg>
 #include <fs_attr.h>
 #include <algorithm>
 #include <cerrno>
@@ -44,14 +46,21 @@ bool Has(const Result &result, const fs::path &source, const fs::path &dest,
 }
 }
 
-extern "C" int __real_mkstemp(char *);
-extern "C" int __wrap_mkstemp(char *path) {
-  if (deniedStage == path) {
+extern "C" int __real_openat(int, const char *, int, ...);
+extern "C" int __wrap_openat(int directory, const char *path, int flags, ...) {
+  if (!(flags & O_CREAT))
+    return __real_openat(directory, path, flags);
+  va_list args;
+  va_start(args, flags);
+  const auto mode = va_arg(args, int);
+  va_end(args);
+  const bool stage = std::string(path).rfind(".listi-copy-", 0) == 0;
+  if (stage && !deniedStage.empty()) {
     errno = EACCES;
     return -1;
   }
-  const bool watch = watchedStage == path;
-  const int fd = __real_mkstemp(path);
+  const bool watch = stage && !watchedStage.empty();
+  const int fd = __real_openat(directory, path, flags, mode);
   if (watch) {
     watchedFd = fd;
     stageForClose = fd;

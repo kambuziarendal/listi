@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "LhaWriter.h"
 #include "StagingSpace.h"
+#include "PrivateScratch.h"
 #include "ArchiveBackend.h"
 #include "ArchiveCompressor.h"
 #include "ArchiveTextLocale.h"
@@ -32,24 +33,6 @@ struct FD {
   ~FD() {
     if (value >= 0)
       close(value);
-  }
-};
-
-struct Scratch {
-  std::string path;
-  Scratch() {
-    char pattern[] = "/tmp/listi-lha-XXXXXX";
-    Require(mkdtemp(pattern), "Cannot create LHA staging folder.");
-    path = pattern;
-  }
-  ~Scratch() {
-    std::error_code error;
-    for (fs::recursive_directory_iterator it(path, error), end;
-         !error && it != end; it.increment(error)) {
-      if (fs::is_directory(it->symlink_status(error)))
-        chmod(it->path().c_str(), 0700);
-    }
-    fs::remove_all(path, error);
   }
 };
 
@@ -188,7 +171,7 @@ void LhaCreate(int outputFd, const std::vector<std::string> &sources, int level,
   TransferControl control{hooks.proceed, {}};
   control.Check();
 
-  Scratch scratch;
+  PrivateScratch scratch("listi-lha-");
   const std::string canonical = fs::canonical(scratch.path).string();
   for (const auto &source : sources) {
     const std::string root = fs::canonical(source).string();

@@ -9,6 +9,7 @@
 #include "MoveVolume.h"
 #include "RemovableCopy.h"
 #include "StagingSpace.h"
+#include "RecoveryInventory.h"
 #include "Trash.h"
 #include "VirtualFile.h"
 #include <Directory.h>
@@ -586,30 +587,35 @@ struct Runner {
       Fail(parentPath);
     // Keep staging on the target volume without extending a possibly
     // maximum-length destination leaf.
-    std::string pattern = dst.substr(0, dst.rfind('/') + 1) + ".listi-copy-XXXXXX";
-    std::vector<char> name(pattern.begin(), pattern.end());
-    name.push_back(0);
-    FD out(mkstemp(name.data()));
-    if (out.n < 0)
-      Fail(dst);
-    std::string tmp = name.data();
-    struct stat stagingIdentity;
-    if (fstat(out.n, &stagingIdentity))
-      Fail(tmp);
+    RecoveryRecord recovery("copy", parentPath, ".listi-copy-", src, dst);
+    const auto &tmp = recovery.Stage();
+    const auto leaf = Leaf(tmp);
+    FD out(-1);
+    struct stat stagingIdentity{};
+    bool bound = false, published = false;
     try {
+      if (S_ISLNK(st.st_mode)) {
+        char link[PATH_MAX];
+        const auto n = readlink(src.c_str(), link, sizeof(link));
+        if (n < 0 || size_t(n) == sizeof(link))
+          Fail(src);
+        link[n] = 0;
+        if (symlinkat(link, parent.n, leaf.c_str()) ||
+            fstatat(parent.n, leaf.c_str(), &stagingIdentity, AT_SYMLINK_NOFOLLOW))
+          Fail(tmp);
+      } else {
+        out.n = openat(parent.n, leaf.c_str(),
+                       O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+        if (out.n < 0 || fstat(out.n, &stagingIdentity))
+          Fail(tmp);
+      }
+      bound = true;
+      recovery.Advance(RecoveryPhase::Writing, &stagingIdentity);
       CheckDestinationDevice(stagingIdentity.st_dev);
       if (deferCompletion || guardedJob->copyForArchiveMove)
         RequireSameMoveVolume(guardedJob->expectedDestination.device,
                               stagingIdentity.st_dev);
       if (S_ISLNK(st.st_mode)) {
-        char link[PATH_MAX];
-        ssize_t n = readlink(src.c_str(), link, sizeof(link) - 1);
-        if (n < 0)
-          Fail(src);
-        link[n] = 0;
-        if (unlink(tmp.c_str()) || symlink(link, tmp.c_str()) ||
-            lstat(tmp.c_str(), &stagingIdentity))
-          Fail(tmp);
         // BNode opens the link itself, including a dangling link.
         Attributes(src, tmp);
         struct timespec times[2] = {st.st_atim, st.st_mtim};
@@ -648,7 +654,7 @@ struct Runner {
                                   : endpoint.mount;
           WriteRemovableStagingFile(std::exchange(in.n, -1),
                                     std::exchange(out.n, -1), st, checkpoint,
-                                    h.privateStaging);
+                                    true);
           interruptedFolder.clear();
         } else {
           std::vector<char> buf(131072);
@@ -664,9 +670,7 @@ struct Runner {
             }
             ssize_t at = 0;
             while (at < n) {
-              const auto w = h.privateStaging
-                                 ? WriteStaging(out.n, buf.data() + at, n - at)
-                                 : write(out.n, buf.data() + at, n - at);
+              const auto w = WriteStaging(out.n, buf.data() + at, n - at);
               if (w < 0 && errno == EINTR)
                 continue;
               if (w <= 0)
@@ -705,7 +709,25 @@ struct Runner {
           namedParent.st_dev != parentIdentity.st_dev ||
           namedParent.st_ino != parentIdentity.st_ino)
         throw std::runtime_error(parentPath + ": destination folder changed");
-      Commit(tmp, dst, existed, before);
+      recovery.Advance(RecoveryPhase::Ready);
+      recovery.Advance(RecoveryPhase::Publishing);
+      Guard();
+      struct stat currentTarget;
+      if (fstatat(parent.n, leaf.c_str(), &currentTarget, AT_SYMLINK_NOFOLLOW) ||
+          currentTarget.st_dev != stagingIdentity.st_dev ||
+          currentTarget.st_ino != stagingIdentity.st_ino)
+        throw std::runtime_error(tmp + ": staging identity changed before publication");
+      if (existed) {
+        const auto target = Leaf(dst);
+        if (fstatat(parent.n, target.c_str(), &currentTarget, AT_SYMLINK_NOFOLLOW) ||
+            !SameEntry(before, currentTarget))
+          throw std::runtime_error(dst + ": destination changed during operation; left untouched");
+        if (renameat(parent.n, leaf.c_str(), parent.n, target.c_str()))
+          Fail(dst);
+      } else {
+        Commit(tmp, dst, false, before);
+      }
+      published = true;
       // Removable media have their own interruptible file flush. A directory
       // flush on the queue thread would reintroduce a hang on unplug.
       if (!backingDevices.at(stagingIdentity.st_dev).removable && fsync(parent.n)) {
@@ -714,6 +736,14 @@ struct Runner {
         throw std::runtime_error(dst +
             ": published, but its directory could not be flushed. Source retained; "
             "durability after restart is unknown.");
+      }
+      try {
+        recovery.Advance(RecoveryPhase::Published);
+        recovery.Retire();
+      } catch (const std::exception &error) {
+        ++mutations;
+        Outcome(src, dst).status = "published-recovery-pending";
+        throw std::runtime_error(dst + ": published, but recovery bookkeeping failed: " + error.what());
       }
       Done(src, dst, staged);
     } catch (const RemovableCopyInterrupted &) {
@@ -725,12 +755,18 @@ struct Runner {
       if (device != backingDevices.end() && device->second.removable)
         CheckDestinationDevice(stagingIdentity.st_dev);
       struct stat current;
-      const auto leaf = Leaf(tmp);
-      if (fstatat(parent.n, leaf.c_str(), &current, AT_SYMLINK_NOFOLLOW) == 0 &&
-          current.st_dev == stagingIdentity.st_dev && current.st_ino == stagingIdentity.st_ino &&
-          unlinkat(parent.n, leaf.c_str(), 0))
-        result.errors.push_back(tmp + ": temporary copy could not be removed: " +
-                                strerror(errno));
+      if (!published) {
+        if (!fstatat(parent.n, leaf.c_str(), &current, AT_SYMLINK_NOFOLLOW)) {
+          if (bound && current.st_dev == stagingIdentity.st_dev &&
+              current.st_ino == stagingIdentity.st_ino &&
+              !unlinkat(parent.n, leaf.c_str(), 0))
+            recovery.Retire();
+          else
+            result.errors.push_back(tmp + ": temporary name retained for manual inspection.");
+        } else if (errno == ENOENT) {
+          recovery.Retire();
+        }
+      }
       throw;
     }
     return true;

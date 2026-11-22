@@ -2,6 +2,7 @@
 #include "FileOperation.h"
 #include "StagingSpace.h"
 #include "Sha256.h"
+#include "RecoveryInventory.h"
 #include "VirtualFile.h"
 #include <atomic>
 #include <cerrno>
@@ -15,13 +16,6 @@
 
 namespace Listi {
 namespace {
-std::atomic<unsigned long> sequence{0};
-std::string Token() {
-  return ".listi-" + std::to_string(getpid()) + "-" +
-         std::to_string(++sequence) + "-" +
-         std::to_string(
-             std::chrono::steady_clock::now().time_since_epoch().count());
-}
 struct TempFile {
   std::string folder, path;
   int fd = -1;
@@ -306,14 +300,16 @@ struct Runner {
     result.outcomes.push_back({src, dst, "unprocessed", "", UploadVerification{}});
     auto &entry = result.outcomes.back();
     auto &receipt = *entry.upload;
-    auto staged = ChildLocation(ParentLocation(dst), Token() + ".part"),
-         backup = ChildLocation(ParentLocation(dst), Token() + ".previous");
+    RecoveryRecord recovery("upload", ParentLocation(dst), ".listi-", src, dst);
+    const auto &staged = recovery.Stage();
+    const auto &backup = recovery.Backup();
     bool stagedExists = false, backupExists = false, committed = false,
          commitAttempted = false;
     try {
       FileEntry check;
       if (StatFile(staged, check, control) || StatFile(backup, check, control))
         throw std::runtime_error("Temporary transfer name collision");
+      recovery.Advance(RecoveryPhase::Writing);
       stagedExists = true;
       UploadFile(temp.path, staged, control);
       receipt.bytesWritten = stagedBytes;
@@ -335,10 +331,12 @@ struct Runner {
         throw std::runtime_error(
             "Uploaded content differs from the source; destination was not replaced.");
       receipt.contentVerified = true;
+      recovery.Advance(RecoveryPhase::Ready);
       bool now = StatFile(dst, check, control);
       if (now != exists || (now && !Same(target, check)))
         throw std::runtime_error(
             "Destination changed during transfer; it was left untouched");
+      recovery.Advance(RecoveryPhase::Publishing);
       if (exists) {
         // The server may rename successfully and lose the acknowledgement.
         // Track the recovery name before sending the mutation, not afterward.
@@ -352,12 +350,14 @@ struct Runner {
       stagedExists = false;
       committed = true;
       receipt.publication = Publication::Published;
+      recovery.Advance(RecoveryPhase::Published);
       entry.status = "completed";
       entry.detail = "Upload content verified.";
       if (backupExists) {
         RemoveFile(backup, false, {});
         backupExists = false;
       }
+      recovery.Retire();
       if (hooks.fileDone)
         hooks.fileDone(src, dst);
     } catch (...) {
@@ -404,6 +404,7 @@ struct Runner {
         }
         throw std::runtime_error(message);
       }
+      recovery.Retire();
       std::rethrow_exception(failure);
     }
   }

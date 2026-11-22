@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "MessageStore.h"
 #include <DataIO.h>
+#include "StagingSpace.h"
 #include <cerrno>
 #include <cstring>
 #include <cstdio>
@@ -15,8 +16,8 @@ namespace {
 constexpr size_t MaxFile = 1024 * 1024;
 void Fail() { throw std::runtime_error(strerror(errno)); }
 struct DirectoryFd {
-  explicit DirectoryFd(const std::string &path)
-      : fd(open(path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC)) {
+  DirectoryFd(const std::string &path, bool noFollow)
+      : fd(open(path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | (noFollow ? O_NOFOLLOW : 0))) {
     if (fd < 0)
       Fail();
   }
@@ -25,7 +26,7 @@ struct DirectoryFd {
 };
 }
 BMessage LoadMessageStore(const std::string &file) {
-  int fd = open(file.c_str(), O_RDONLY | O_NONBLOCK);
+  int fd = open(file.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
   if (fd < 0) {
     if (errno == ENOENT) {
       BMessage absent;
@@ -61,7 +62,9 @@ BMessage LoadMessageStore(const std::string &file) {
     throw std::runtime_error("Invalid settings message.");
   return message;
 }
-void SaveMessageStore(const std::string &file, const BMessage &message) {
+void SaveMessageStore(const std::string &file, const BMessage &message,
+                      const struct stat *expected, struct stat *stored,
+                      const struct stat *inventory) {
   ssize_t size = message.FlattenedSize();
   if (size <= 0 || size > ssize_t(MaxFile))
     throw std::runtime_error("Settings are too large.");
@@ -72,7 +75,13 @@ void SaveMessageStore(const std::string &file, const BMessage &message) {
   const std::string folder = slash == std::string::npos ? "." :
       slash == 0 ? "/" : file.substr(0, slash);
   const std::string target = file.substr(slash + 1);
-  DirectoryFd parent(folder);
+  DirectoryFd parent(folder, inventory != nullptr);
+  if (inventory) {
+    struct stat st;
+    if (fstat(parent.fd, &st) || st.st_dev != inventory->st_dev ||
+        st.st_ino != inventory->st_ino)
+      throw std::runtime_error("Recovery inventory directory changed.");
+  }
   std::string pattern = file + ".tmp.XXXXXX";
   std::vector<char> temp(pattern.begin(), pattern.end());
   temp.push_back(0);
@@ -92,7 +101,7 @@ void SaveMessageStore(const std::string &file, const BMessage &message) {
       throw std::runtime_error("Settings staging directory changed.");
     size_t at = 0;
     while (at < bytes.size()) {
-      ssize_t n = write(fd, bytes.data() + at, bytes.size() - at);
+      ssize_t n = WriteStaging(fd, bytes.data() + at, bytes.size() - at);
       if (n < 0 && errno == EINTR)
         continue;
       if (n < 0)
@@ -113,6 +122,11 @@ void SaveMessageStore(const std::string &file, const BMessage &message) {
         stat(folder.c_str(), &namedParent) || savedParent.st_dev != namedParent.st_dev ||
         savedParent.st_ino != namedParent.st_ino)
       throw std::runtime_error("Settings directory or temporary file changed.");
+    if (expected &&
+        (fstatat(parent.fd, target.c_str(), &named, AT_SYMLINK_NOFOLLOW) ||
+         !S_ISREG(named.st_mode) || expected->st_dev != named.st_dev ||
+         expected->st_ino != named.st_ino || expected->st_crtime != named.st_crtime))
+      throw std::runtime_error("Recovery record changed; replacement refused.");
     if (renameat(parent.fd, leaf.c_str(), parent.fd, target.c_str()))
       Fail();
   } catch (...) {
@@ -122,6 +136,8 @@ void SaveMessageStore(const std::string &file, const BMessage &message) {
       unlinkat(parent.fd, leaf.c_str(), 0);
     throw;
   }
+  if (stored)
+    *stored = opened;
   if (fsync(parent.fd))
     throw std::runtime_error(
         std::string("Settings were replaced, but their directory could not be flushed: ") +

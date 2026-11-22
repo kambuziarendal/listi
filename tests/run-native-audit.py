@@ -36,7 +36,7 @@ WRAPS = {
     "archive-move-faults": ['rename'],
     "archive-editor-faults": ['rename', 'renameat', 'fsync'],
     "archive-local-move-faults": ['rename', 'unlink'],
-    "file-operation-faults": ['mkstemp', 'write', 'unlinkat', 'stat', 'close', 'fsync', '_ZN5BNode10RemoveAttrEPKc'],
+    "file-operation-faults": ['openat', 'write', 'unlinkat', 'stat', 'close', 'fsync', '_ZN5BNode10RemoveAttrEPKc'],
     "message-store-faults": ["mkstemp", "write", "close", "fsync", "renameat"],
     "inspector-document": ['fsync'],
     "bulk-rename": ['renameat', 'fstatat'],
@@ -114,7 +114,8 @@ def run():
         inputs = objects
         if name == "virtual-operation-faults":
             inputs = [SRC / "VirtualOperation.cpp", SRC / "VirtualFile.cpp",
-                      SRC / "VirtualLocation.cpp", SRC / "Sha256.cpp"]
+                      SRC / "VirtualLocation.cpp", SRC / "Sha256.cpp",
+                      SRC / "RecoveryInventory.cpp", SRC / "MessageStore.cpp"]
         binary = OUTPUT / name
         subprocess.run([
             *compiler, *shlex.split(config["flags"]), ROOT / "tests" / f"{name}.cpp",

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "ArjWriter.h"
 #include "StagingSpace.h"
+#include "PrivateScratch.h"
 #include "ArchiveBackend.h"
 #include "ArchiveCompressor.h"
 #include "LocalMoveTree.h"
@@ -156,7 +157,8 @@ struct Compression {
     uint32_t stamp, size, crc;
   };
   std::map<std::string, Member> members;
-  char path[sizeof("/tmp/listi-arj-XXXXXX")] = "/tmp/listi-arj-XXXXXX";
+  std::unique_ptr<PrivateScratch> scratch;
+  std::string path;
   explicit Compression(const std::vector<std::string> &sources) {
     const auto parent = fs::canonical("/tmp");
     for (const auto &source : sources) {
@@ -164,11 +166,8 @@ struct Compression {
       Require(ancestor.empty() || *ancestor.begin() == "..",
               "Cannot archive a folder that contains the ARJ staging folder.");
     }
-    Require(mkdtemp(path), "Cannot create the ARJ staging folder.");
-  }
-  ~Compression() {
-    std::error_code error;
-    fs::remove_all(path, error);
+    scratch = std::make_unique<PrivateScratch>("listi-arj-");
+    path = scratch->path;
   }
   void Finish(int output, int level, const Hooks &hooks) {
     if (members.empty())
