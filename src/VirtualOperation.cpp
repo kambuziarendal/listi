@@ -8,6 +8,7 @@
 #include <cstring>
 #include <exception>
 #include <fcntl.h>
+#include <limits>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -48,7 +49,9 @@ struct TempFile {
       if (r < 0 && errno == EINTR)
         continue;
       if (r <= 0)
-        throw std::runtime_error(strerror(errno));
+        throw std::runtime_error(
+            std::string("Could not write private transfer staging: ") +
+            strerror(r < 0 ? errno : EIO));
       p += r;
       n -= r;
     }
@@ -142,9 +145,17 @@ struct Runner {
   uint64_t Stage(const std::string &src, const FileEntry &expected, TempFile &temp,
              const TransferControl &control, Sha256 *digest = nullptr) {
     uint64_t bytes = 0;
+    if (expected.sizeKnown && expected.size < 0)
+      throw std::runtime_error("Source reported an invalid transfer size.");
+    const uint64_t limit = expected.sizeKnown
+                               ? uint64_t(expected.size)
+                               : std::numeric_limits<uint64_t>::max();
     ReadFile(
         src,
         [&](const char *data, size_t size) {
+          if (size > limit - bytes)
+            throw std::runtime_error(
+                "Source exceeded its declared size; destination was not committed.");
           temp.Write(data, size);
           if (digest)
             digest->Update(data, size);

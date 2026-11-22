@@ -12,7 +12,7 @@ namespace {
 struct Remote { std::string data; int64_t modified = 1; };
 std::map<std::string, Remote> files;
 bool corruptUpload = false, denyReadback = false, cancelReadback = false;
-bool truncateUpload = false, omitStageSize = false;
+bool truncateUpload = false, omitStageSize = false, growSourceOnRead = false;
 bool failCommit = false, failRollback = false, failPartCleanup = false,
      failBackupCleanup = false, cancelAfterBackup = false, cancelled = false,
      mutateDestination = false, loseBackupReply = false, loseCommitReply = false;
@@ -59,7 +59,13 @@ void ReadNetwork(const Location &l, const DataSink &sink, const TransferControl 
   }
   if (denyReadback && suffix(l.URL(), ".part")) throw std::runtime_error("readback denied");
   auto &data = files.at(l.URL()).data;
-  sink(data.data(), data.size()); c.Tick(data.size());
+  if (growSourceOnRead && l.URL() == "sftp://fixture/in/input") {
+    std::string grown = data + "more data";
+    sink(grown.data(), grown.size());
+  } else {
+    sink(data.data(), data.size());
+  }
+  c.Tick(data.size());
 }
 void UploadNetwork(const std::string &local, const Location &l, const TransferControl &c) {
   std::ifstream stream(local);
@@ -133,6 +139,16 @@ int main() {
         r.outcomes.front().upload->contentVerified &&
         r.outcomes.front().upload->publication == Publication::Published,
         "successful replacement commits once and removes its backup");
+  reset(); growSourceOnRead = true;
+  const std::string remote = "sftp://fixture/in/input";
+  files[remote] = {"initial", 1};
+  r = RunVirtual(Job{Action::Copy, {remote}, "sftp://fixture/out"}, hooks);
+  check(!r.completed && !done && !has(".part") &&
+        errorHas(r, "exceeded its declared size") &&
+        files.at(remote).data == "initial" &&
+        files.at(destination).data == "old contents",
+        "staging rejects actual bytes beyond the declared source size before upload");
+  growSourceOnRead = false;
   reset(); truncateUpload = true; r = RunVirtual(job, hooks);
   check(!r.completed && !done && !r.errors.empty() && files.size() == 1 &&
         files.at(destination).data == "old contents",
