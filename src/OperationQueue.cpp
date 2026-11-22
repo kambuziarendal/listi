@@ -15,36 +15,24 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
-#include <dirent.h>
+#include <limits>
 #include <set>
 #include <sys/stat.h>
 namespace {
 constexpr uint32 kCancelAll = 'jcab', kJobAccepted = 'jacp',
                  kDismissError = 'jder';
 
-uint64_t Size(const std::string &p, const std::function<bool()> &proceed,
-              unsigned depth = 0) {
-  if (depth > 64 || !proceed())
-    return 0;
-  struct stat st;
-  if (lstat(p.c_str(), &st))
-    return 0;
-  if (S_ISREG(st.st_mode))
-    return st.st_size;
-  if (!S_ISDIR(st.st_mode))
-    return 0;
+uint64_t EstimateBytes(const std::vector<std::string> &sources,
+                       const std::function<bool()> &proceed) {
   uint64_t total = 0;
-  DIR *dir = opendir(p.c_str());
-  if (!dir)
-    return 0;
-  while (auto e = readdir(dir)) {
-    if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
-      continue;
-    total += Size(Listi::Join(p, e->d_name), proceed, depth + 1);
-    if (!proceed())
-      break;
+  for (const auto &source : sources) {
+    struct stat st;
+    if (Listi::IsVirtual(source) || !proceed() || lstat(source.c_str(), &st) ||
+        !S_ISREG(st.st_mode) || st.st_size < 0 ||
+        uint64_t(st.st_size) > uint64_t(std::numeric_limits<int64_t>::max()) - total)
+      return 0;
+    total += st.st_size;
   }
-  closedir(dir);
   return total;
 }
 const char *Verb(Listi::Action a) {
@@ -372,7 +360,7 @@ public:
         if (hasByteEstimate)
           bar->SetToolTip(s);
         else
-          file->SetToolTip(s);
+          file->SetToolTip(BString(file->Text()) << "\n" << s);
       }
       break;
     }
@@ -689,16 +677,13 @@ void OperationQueue::Loop() {
     start.AddBool("start", true);
     Publish(start);
     uint64_t total = 0;
-    const bool localSources = std::none_of(job.sources.begin(), job.sources.end(),
-        [](const auto &source) { return Listi::IsVirtual(source); });
-    if (localSources && (job.action == Listi::Action::Copy ||
+    if (job.action == Listi::Action::Copy ||
         job.action == Listi::Action::Move ||
         job.action == Listi::Action::Duplicate ||
         job.action == Listi::Action::CreateArchive ||
         job.action == Listi::Action::EditArchive ||
-        job.action == Listi::Action::MoveArchive))
-      for (auto &s : job.sources)
-        total += Size(s, [this] { return Proceed(); });
+        job.action == Listi::Action::MoveArchive)
+      total = EstimateBytes(job.sources, [this] { return Proceed(); });
     BMessage size(kJobUpdate);
     size.AddInt64("operation", operation);
     size.AddInt64("total", total);

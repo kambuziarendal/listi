@@ -43,7 +43,7 @@ WRAPS = {
     "clipboard-text-file": ['write'],
     "archive-move-scaling": ['lstat'],
     "directory-delivery": ['_ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl'],
-    "operation-queue": ['_ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl'],
+    "operation-queue": ['_ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl', 'opendir'],
     "flat-view": ['_ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl', 'opendir'],
     "folder-compare": ['opendir'],
     "properties-faults": ['_ZN5BNode9WriteAttrEPKcjlPKvm', '_ZN5BNode4SyncEv', 'fsync'],

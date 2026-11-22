@@ -18,6 +18,7 @@
 #include <Entry.h>
 #include <Path.h>
 #include <atomic>
+#include <dirent.h>
 #include <fstream>
 #include <iostream>
 #include <set>
@@ -25,6 +26,14 @@
 #include <unistd.h>
 using namespace Listi;
 std::atomic<int> failedWakes{0};
+std::atomic<int> rootDirectoryOpens{0};
+std::string measuredFolder;
+extern "C" DIR *__real_opendir(const char *);
+extern "C" DIR *__wrap_opendir(const char *path) {
+  if (measuredFolder == path)
+    ++rootDirectoryOpens;
+  return __real_opendir(path);
+}
 extern "C" status_t __real__ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl(const BMessenger*,BMessage*,BHandler*,bigtime_t);
 extern "C" status_t __wrap__ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl(const BMessenger* self,BMessage* m,BHandler* reply,bigtime_t timeout){
  if(m->what==kQueueWake&&failedWakes.load()>0){--failedWakes;return B_TIMED_OUT;}
@@ -109,6 +118,19 @@ int main(){
  window->Unlock();
  bool intact=true;for(int i=0;i<20;++i)intact&=bytes(root+"/out/item"+std::to_string(i))==std::string(32768,char('A'+i));check(intact,"all 20 destinations contain exact payloads");
 
+ measuredFolder = root + "/in/tree";
+ mkdir(measuredFolder.c_str(), 0700);
+ std::ofstream(measuredFolder + "/nested") << "entry";
+ Job folderJob{Action::Copy, {measuredFolder}, root + "/out"};
+ FreezeLocalJob(folderJob, folderJob.destination);
+ const auto started = system_time();
+ window->queue->Enqueue(folderJob);
+ const bool folderFinished = wait([&]{return !window->queue->Busy();});
+ std::cout << "Folder copy: " << rootDirectoryOpens.load() << " root opens in "
+           << system_time() - started << " us including test polling\n";
+ check(folderFinished && rootDirectoryOpens == 1 &&
+           bytes(root + "/out/tree/nested") == "entry",
+       "folder copy opens its tree once, without a progress pre-scan");
  std::ofstream(root + "/in/item0") << "must not replace the destination";
  std::ofstream(root + "/in/item20") << "following job";
  const auto active = window->queue->Enqueue(job(0, 101));
