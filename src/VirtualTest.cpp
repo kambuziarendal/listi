@@ -188,11 +188,12 @@ int VirtualTest(const std::string &fixtures, const std::string &hosts) {
         "special files rejected without waiting for a writer");
   const char *configuredHost = getenv("LISTI_TEST_NETWORK_HOST");
   const std::string host = configuredHost ? configuredHost : "10.0.2.2";
-  for (auto protocol : {"smb", "ftp", "sftp"}) {
-    std::string url = std::string(protocol) + "://" + host +
-                      (std::string(protocol) == "smb"   ? ":1445/files"
-                       : std::string(protocol) == "ftp" ? ":2121/"
-                                                        : ":2222/");
+  std::vector<std::pair<std::string, std::string>> endpoints{
+      {"smb", ":1445/files"}, {"ftp", ":2121/"}, {"sftp", ":2222/"}};
+  if (getenv("LISTI_TEST_FTPS"))
+    endpoints.emplace_back("ftps", ":2143/");
+  for (const auto &[protocol, suffix] : endpoints) {
+    const std::string url = protocol + "://" + host + suffix;
     Connection auth;
     auth.username = "listitest";
     auth.password = "fixture-only";
