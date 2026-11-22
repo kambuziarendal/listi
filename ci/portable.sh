@@ -2,6 +2,10 @@
 # Run at the repository root in a clean checkout. BASE is a Git revision.
 set -euo pipefail
 base=${1:?usage: bash ci/portable.sh BASE}
+if [[ -n "$(git status --porcelain)" ]]; then
+  echo "Portable qualification requires a clean checkout." >&2
+  exit 1
+fi
 printf 'Commit: '; git rev-parse HEAD
 git diff --check "$base" HEAD
 python3 - <<'PY'

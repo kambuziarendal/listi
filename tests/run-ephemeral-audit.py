@@ -40,6 +40,11 @@ def main():
         parser.error("Package qualification requires the full suite.")
     if args.extended_fixture:
         args.qualify_package = True
+    if args.qualify_package:
+        if Path.cwd().resolve() != Path(__file__).resolve().parents[1]:
+            parser.error("Run package qualification from this checkout's root.")
+        if subprocess.check_output(["git", "status", "--porcelain"], text=True).strip():
+            parser.error("Package qualification requires a clean checkout.")
     base = args.base.resolve(strict=True)
     key = args.key.resolve(strict=True)
     output = args.output.resolve()
