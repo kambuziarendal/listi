@@ -114,6 +114,7 @@ void MainWindowMenu::AddViewMenu() {
   fileView->AddItem(new BMenuItem("Use workspace default", resetView));
   viewMenu->AddItem(fileView);
   bankToggle = AddCommand(viewMenu, "Show function buttons", kToggleBank);
+  fullBankToggle = AddCommand(viewMenu, "Full action buttons", kToggleFullBank);
   compactActions = new BMenu("Function actions");
   viewMenu->AddItem(compactActions);
   AddItem(viewMenu);
@@ -199,9 +200,12 @@ void MainWindowMenu::SetFileActions(int32 viewMode, bool flat, bool canOpenFlatV
   undoBulkRenameItem->SetEnabled(canUndoBulkRename);
 }
 
-void MainWindowMenu::SetFunctionButtonState(bool available, bool requested, bool overflow) {
+void MainWindowMenu::SetFunctionButtonState(bool available, bool requested, bool overflow,
+                                           bool fullAvailable, bool full) {
   bankToggle->SetEnabled(available);
   bankToggle->SetMarked(available && requested);
+  fullBankToggle->SetEnabled(fullAvailable);
+  fullBankToggle->SetMarked(full);
   compactActions->Superitem()->SetEnabled(overflow);
 }
 

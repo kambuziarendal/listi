@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 #pragma once
+#include <SupportDefs.h>
+#include <vector>
 
 class BGroupView;
 class BStringView;
@@ -29,6 +31,7 @@ public:
   bool Toggle(bool promptPending);
 
 private:
+  const std::vector<int32> &Actions() const;
   void ChooseDensity(float width);
   void SetBankVisible(bool visible);
 

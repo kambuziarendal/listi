@@ -255,6 +255,13 @@ class MainWindow : public BWindow {
       if (toolbar.Toggle(actionArea->Pending()))
         Save();
       break;
+    case kToggleFullBank:
+      if (!prefs.SinglePane() && !prefs.actionButtons.empty()) {
+        prefs.fullActionButtons = !prefs.fullActionButtons;
+        toolbar.Resize(Bounds().Width(), actionArea->Pending());
+        Save();
+      }
+      break;
     case kOpenWorkspaceEditor:
       if (!PromptBlocksCommand())
         OpenWorkspaceEditor(BMessenger(this), prefs, m->GetBool("modules", false));

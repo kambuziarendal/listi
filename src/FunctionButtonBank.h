@@ -13,14 +13,14 @@ class FunctionButtonBank : public BGroupView {
 public:
   explicit FunctionButtonBank(MainWindowMenu &menu);
 
-  void SetActions(const std::vector<int32> &actions, bool compact);
+  void SetActions(const std::vector<int32> &actions, bool compact, bool wrap = false);
   bool IsCompact() const { return fCompact; }
 
 private:
   MainWindowMenu &fMenu;
   BGridView *fGrid = nullptr;
   std::vector<int32> fActions;
-  bool fCompact = false;
+  bool fCompact = false, fWrap = false;
 };
 
 }

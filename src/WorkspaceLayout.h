@@ -89,7 +89,7 @@ inline const char *SidebarModeLabel(SidebarMode mode) {
 // general preferences are deliberately not part of a named profile.
 struct WorkspaceLayout {
   static constexpr int32 ActionButtonCount = 13;
-  bool buttons = true, command = false;
+  bool buttons = true, command = false, fullActionButtons = false;
   bool bankTop = false, commandTop = false, inspectorLeft = false;
   bool panelsStacked = false;
   bool treeRight = false, filterBottom = false, adaptive = false;

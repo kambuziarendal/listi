@@ -44,7 +44,6 @@ static void CheckFunctionButtons() {
   auto *fallbackItem = menu.FindItem("Function actions");
   assert(fallbackItem && fallbackItem->Submenu());
   auto *fallback = fallbackItem->Submenu();
-  assert(bank.FindView("shortcuts"));
 
   auto grid = [&]() -> BGridView * {
     for (int32 i = 0; i < bank.CountChildren(); ++i)
@@ -82,7 +81,9 @@ static void CheckToolPlacement(BWindow *window) {
   auto *top = window->FindView("top workspace tools");
   auto *bottom = window->FindView("bottom workspace tools");
   auto *bank = window->FindView("workspace action buttons");
-  assert(top && bottom && bank && bottom->CountChildren() == 2);
+  auto *transfer = window->FindView("panel transfer target");
+  assert(top && bottom && bank && transfer && transfer->Parent() == top &&
+         bottom->CountChildren() == 2);
   auto *command = dynamic_cast<BTextControl *>(bottom->ChildAt(1));
   assert(command);
   command->SetText("echo retained draft");
@@ -90,6 +91,7 @@ static void CheckToolPlacement(BWindow *window) {
     WorkspaceLayout layout;
     layout.bankTop = layout.commandTop = above;
     layout.command = true;
+    layout.fullActionButtons = true;
     layout.actionButtons = {2};
     BMessage apply(kApplyWorkspaceEditor), saved, profiles;
     layout.Archive(saved);
@@ -98,16 +100,30 @@ static void CheckToolPlacement(BWindow *window) {
     window->MessageReceived(&apply);
     auto *target = above ? top : bottom;
     auto *empty = above ? bottom : top;
-    assert(target->CountChildren() == 2 && empty->CountChildren() == 0);
-    assert(target->ChildAt(0) == bank && target->ChildAt(1) == command);
+    assert(target->CountChildren() == (above ? 3 : 2) &&
+           empty->CountChildren() == (above ? 0 : 1));
+    assert(target->ChildAt(0) == bank && bank->Parent() == target &&
+           command->Parent() == target);
     assert(std::string(command->Text()) == "echo retained draft");
     assert(!command->IsHidden(target) && !target->IsHidden(target));
-    assert(empty->IsHidden(empty));
+    assert(empty->IsHidden(empty) == above);
   }
 
   auto *menu = static_cast<BMenuBar *>(window->FindView("menu"));
   auto *toggle = menu->FindItem(kToggleBank);
+  auto *full = menu->FindItem(kToggleFullBank);
   auto *fallback = menu->FindItem("Function actions");
+  assert(full && full->IsEnabled() && full->IsMarked());
+  BMessage compact(kToggleFullBank);
+  window->MessageReceived(&compact);
+  assert(!full->IsMarked());
+  auto *compactGrid = dynamic_cast<BGridView *>(bank->ChildAt(0));
+  assert(compactGrid && compactGrid->CountChildren() == 5);
+  const uint32 expected[] = {kView, kCopy, kMove, kRename, kMkdir};
+  for (int32 i = 0; i < 5; ++i) {
+    auto *button = dynamic_cast<BButton *>(compactGrid->ChildAt(i));
+    assert(button && button->Message()->what == expected[i]);
+  }
   assert(toggle && fallback && toggle->IsEnabled() && toggle->IsMarked());
   assert(!bank->IsHidden(bank) && !fallback->IsEnabled());
   BMessage prompt(kInlineNotice);

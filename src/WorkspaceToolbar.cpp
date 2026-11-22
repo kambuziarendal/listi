@@ -6,6 +6,7 @@
 #include "FunctionButtonBank.h"
 #include "MainWindowMenu.h"
 #include "ViewVisibility.h"
+#include "WorkspaceActions.h"
 #include <GroupLayout.h>
 #include <GroupView.h>
 #include <StringView.h>
@@ -81,8 +82,13 @@ void WorkspaceToolbar::Resize(float width, bool promptPending) {
   Refresh(promptPending);
 }
 
+const std::vector<int32> &WorkspaceToolbar::Actions() const {
+  return fPrefs.fullActionButtons ? fPrefs.actionButtons : kCompactWorkspaceActions;
+}
+
 void WorkspaceToolbar::ChooseDensity(float width) {
-  fBank->SetActions(fPrefs.actionButtons, fPrefs.adaptive && width < 850);
+  const bool narrow = fPrefs.fullActionButtons && fPrefs.adaptive && width < 850;
+  fBank->SetActions(Actions(), !fPrefs.fullActionButtons || narrow, narrow);
 }
 
 void WorkspaceToolbar::SetBankVisible(bool visible) {
@@ -98,7 +104,7 @@ void WorkspaceToolbar::SetBankVisible(bool visible) {
 }
 
 void WorkspaceToolbar::Refresh(bool promptPending) {
-  const bool available = !fPrefs.SinglePane() && !fPrefs.actionButtons.empty();
+  const bool available = !fPrefs.SinglePane() && !Actions().empty();
   const bool requested = fPrefs.ActionButtonsVisible();
   const bool visible = available && requested && !promptPending;
   bool overflow = false;
@@ -108,8 +114,8 @@ void WorkspaceToolbar::Refresh(bool promptPending) {
     // Measure before the window's auto-size pass can impose a larger frame.
     auto minimum = fWindow.GetLayout()->MinSize();
     const auto bounds = fWindow.Bounds();
-    if (minimum.width > bounds.Width() && !fBank->IsCompact()) {
-      fBank->SetActions(fPrefs.actionButtons, true);
+    if (minimum.width > bounds.Width()) {
+      fBank->SetActions(Actions(), true, true);
       minimum = fWindow.GetLayout()->MinSize();
     }
     overflow =
@@ -117,11 +123,13 @@ void WorkspaceToolbar::Refresh(bool promptPending) {
     if (overflow)
       SetBankVisible(false);
   }
-  fMenu.SetFunctionButtonState(available, requested, overflow);
+  fMenu.SetFunctionButtonState(available, requested, overflow,
+                             !fPrefs.SinglePane() && !fPrefs.actionButtons.empty(),
+                             fPrefs.fullActionButtons);
 }
 
 bool WorkspaceToolbar::Toggle(bool promptPending) {
-  if (fPrefs.SinglePane() || fPrefs.actionButtons.empty())
+  if (fPrefs.SinglePane() || Actions().empty())
     return false;
   auto &choice =
       fPrefs.IsSmidja() ? fPrefs.smidjaButtons : fPrefs.tviskiptButtons;

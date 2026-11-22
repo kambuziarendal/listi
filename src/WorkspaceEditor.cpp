@@ -100,7 +100,7 @@ class WorkspaceEditor : public BWindow {
   BButton *loadProfile, *updateProfile, *renameProfile, *removeProfile;
   BMenuField *panelArrangement, *bankZone, *commandZone, *previewZone;
   BMenuField *treeZone, *filterZone, *leftSidebar, *rightSidebar;
-  BCheckBox *showBank, *showCommand, *adaptive;
+  BCheckBox *showBank, *showCommand, *adaptive, *fullBank;
   BTextControl *profileName;
   BStringView *workspaceLabel, *status;
   std::vector<int32> availableActions;
@@ -169,6 +169,7 @@ class WorkspaceEditor : public BWindow {
     SetChoice(leftSidebar, static_cast<int32>(layout.smidjaSidebar[0]));
     SetChoice(rightSidebar, static_cast<int32>(layout.smidjaSidebar[1]));
     showBank->SetValue(layout.buttons ? B_CONTROL_ON : B_CONTROL_OFF);
+    fullBank->SetValue(layout.fullActionButtons ? B_CONTROL_ON : B_CONTROL_OFF);
     showCommand->SetValue(layout.command ? B_CONTROL_ON : B_CONTROL_OFF);
     adaptive->SetValue(layout.adaptive ? B_CONTROL_ON : B_CONTROL_OFF);
   }
@@ -185,6 +186,7 @@ class WorkspaceEditor : public BWindow {
     layout.SetSidebar(Workspace::smidja, 1,
                       static_cast<SidebarMode>(SelectedChoice(rightSidebar)));
     layout.buttons = showBank->Value() == B_CONTROL_ON;
+    layout.fullActionButtons = fullBank->Value() == B_CONTROL_ON;
     layout.command = showCommand->Value() == B_CONTROL_ON;
     layout.adaptive = adaptive->Value() == B_CONTROL_ON;
   }
@@ -290,9 +292,11 @@ class WorkspaceEditor : public BWindow {
     later = new BButton("move action down", "Move down",
                         new BMessage(kActionLater));
 
+    fullBank = new BCheckBox("Use full action buttons", nullptr);
     auto page = new BGroupView("Action buttons", B_VERTICAL);
     BLayoutBuilder::Group<>(page, B_VERTICAL, 8)
         .SetInsets(B_USE_WINDOW_SPACING)
+        .Add(fullBank)
         .AddGroup(B_HORIZONTAL, 8)
         .AddGroup(B_VERTICAL, 5)
         .Add(new BStringView("available label", "Available actions"))
@@ -347,7 +351,7 @@ class WorkspaceEditor : public BWindow {
     rightSidebar = Choice("Smiðja second sidebar:", sidebarChoices);
     adaptive =
         new BCheckBox("adaptive workspace",
-                      "Compact action buttons in narrow windows", nullptr);
+                      "Wrap full action buttons in narrow windows", nullptr);
     adaptive->SetToolTip(
         "Uses three columns and shorter button labels without moving panels.");
 

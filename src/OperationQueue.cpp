@@ -4,6 +4,7 @@
 #include "ArchivePasswords.h"
 #include "ArchiveBackend.h"
 #include "VirtualFile.h"
+#include "ViewVisibility.h"
 #include <Button.h>
 #include <MessageRunner.h>
 #include <GroupView.h>
@@ -18,7 +19,8 @@
 #include <set>
 #include <sys/stat.h>
 namespace {
-constexpr uint32 kCancelAll = 'jcab', kJobAccepted = 'jacp';
+constexpr uint32 kCancelAll = 'jcab', kJobAccepted = 'jacp',
+                 kDismissError = 'jder';
 
 uint64_t Size(const std::string &p, const std::function<bool()> &proceed,
               unsigned depth = 0) {
@@ -104,7 +106,29 @@ class ProgressView : public BView {
   BStringView *title, *file, *summary;
   BStatusBar *bar;
   BButton *pause, *cancelButton, *cancelAllButton;
-  BString lastError;
+  BGroupView *errorRow;
+  BStringView *errorText;
+  BButton *dismissError;
+  std::deque<std::string> unreadErrors;
+  bool hasCompletion = false;
+
+  void ShowNextError() {
+    Listi::SetViewVisible(errorRow, !unreadErrors.empty());
+    if (unreadErrors.empty())
+      return;
+    BString label("Error: ");
+    label << unreadErrors.front().c_str();
+    if (unreadErrors.size() > 1)
+      label << " (+" << int64(unreadErrors.size() - 1) << ")";
+    errorText->SetText(label);
+    errorText->SetToolTip(label);
+  }
+  void KeepError(const char *error) {
+    if (!*error || (!unreadErrors.empty() && unreadErrors.back() == error))
+      return;
+    unreadErrors.emplace_back(error);
+    ShowNextError();
+  }
   BGroupView *choices;
   BView *details;
   BButton *detailsButton;
@@ -148,6 +172,8 @@ public:
         new BButton("cancel-all", "Cancel all", new BMessage(kCancelAll));
     pause->SetEnabled(false);
     cancelButton->SetEnabled(false);
+    pause->Hide();
+    cancelButton->Hide();
     cancelAllButton->SetEnabled(false);
     file->Hide();
     bar->Hide();
@@ -174,6 +200,15 @@ public:
         .End();
     details->Hide();
     detailsButton = new BButton("Details", new BMessage(kShowJobs));
+    errorText = new BStringView("operation error", "");
+    errorText->SetExplicitMinSize(BSize(0, B_SIZE_UNSET));
+    errorText->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
+    errorText->SetTruncation(B_TRUNCATE_END);
+    dismissError = new BButton("Dismiss error", new BMessage(kDismissError));
+    errorRow = new BGroupView(B_HORIZONTAL, 8);
+    errorRow->AddChild(errorText);
+    errorRow->AddChild(dismissError);
+    errorRow->Hide();
     BLayoutBuilder::Group<>(this, B_VERTICAL, 4)
         .SetInsets(8, 4, 8, 6)
         .AddGroup(B_HORIZONTAL, 8)
@@ -186,11 +221,13 @@ public:
         .End()
         .Add(file)
         .Add(bar)
+        .Add(errorRow)
         .Add(details);
     SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
   }
   void AttachedToWindow() override {
     pause->SetTarget(this);
+    dismissError->SetTarget(this);
     detailsButton->SetTarget(this);
     cancelButton->SetTarget(this);
     cancelAllButton->SetTarget(this);
@@ -200,7 +237,8 @@ public:
   }
   bool compact = false, visible = true;
   void UpdateVisibility() {
-    const bool show = !compact || expanded || choicesVisible || owner->Busy();
+    const bool show = !compact || expanded || choicesVisible || activeOperation ||
+                      owner->Busy() || hasCompletion || !unreadErrors.empty();
     if (visible == show)
       return;
     visible = show;
@@ -240,11 +278,16 @@ public:
       Toggle();
       break;
     case kFileErrorSelected:
-      if (lastError == m->GetString("error", ""))
-        break;
-      lastError = m->GetString("error", "");
-      Expand(true);
-      results->ShowFileError(lastError.String());
+      if (const char *error = m->GetString("error", nullptr)) {
+        if (unreadErrors.empty() || unreadErrors.back() != error)
+          results->ShowFileError(error);
+        KeepError(error);
+      }
+      break;
+    case kDismissError:
+      if (!unreadErrors.empty())
+        unreadErrors.pop_front();
+      ShowNextError();
       break;
     case kPause: {
       const auto operation = m->GetInt64("operation", 0);
@@ -303,6 +346,7 @@ public:
           break;
         lastStarted = activeOperation = operation;
         results->Started(operation);
+        hasCompletion = false;
         cancelling = false;
         ShowChoices(false);
         for (auto *button : {pause, cancelButton, cancelAllButton}) {
@@ -311,10 +355,10 @@ public:
           button->SetMessage(message);
           button->SetEnabled(true);
         }
-        if (file->IsHidden())
-          file->Show();
-        if (bar->IsHidden())
-          bar->Show();
+        Listi::SetViewVisible(pause, true);
+        Listi::SetViewVisible(cancelButton, true);
+        Listi::SetViewVisible(file, true);
+        Listi::SetViewVisible(bar, true);
         bar->Reset();
         bar->SetMaxValue(1);
         pause->SetLabel("Pause");
@@ -356,20 +400,27 @@ public:
         pause->SetEnabled(false);
         cancelButton->SetEnabled(false);
         cancelAllButton->SetEnabled(false);
+        Listi::SetViewVisible(pause, false);
+        Listi::SetViewVisible(cancelButton, false);
         const char *transfer = m->GetString("transferResult", "");
-        if (*transfer) {
+        hasCompletion = *transfer != '\0';
+        if (hasCompletion) {
           file->SetText(transfer);
           file->SetToolTip(transfer);
-        } else if (!file->IsHidden()) {
-          file->Hide();
         }
-        if (!bar->IsHidden())
-          bar->Hide();
+        Listi::SetViewVisible(file, hasCompletion);
+        Listi::SetViewVisible(bar, false);
       }
       if (!activeOperation && !owner->Busy())
         title->SetText("Queue finished");
-      if (m->HasString("retainedSource") || m->HasString("error"))
-        Expand(true);
+      const char *error;
+      for (int32 i = 0; m->FindString("error", i, &error) == B_OK; ++i)
+        KeepError(error);
+      if (m->HasString("retainedSource")) {
+        BString retained("Complete copy retained at: ");
+        retained << m->GetString("retainedDestination", "");
+        KeepError(retained);
+      }
       break;
     }
     case B_COLORS_UPDATED:

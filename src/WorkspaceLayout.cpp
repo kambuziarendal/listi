@@ -67,6 +67,7 @@ void WorkspaceLayout::Load(const BMessage &m) {
       m.GetBool("workbenchPreview", m.GetBool("smidjaPreview", true));
 
   buttons = m.GetBool("buttons", true);
+  fullActionButtons = m.GetBool("fullActionButtons", false);
   command = m.GetBool("command", false);
   bankTop = m.GetBool("bankTop", false);
   commandTop = m.GetBool("commandTop", false);
@@ -152,6 +153,7 @@ void WorkspaceLayout::Archive(BMessage &m) const {
   m.AddBool("workbenchPreview", smidjaPreview);
 
   m.AddBool("buttons", buttons);
+  m.AddBool("fullActionButtons", fullActionButtons);
   m.AddBool("command", command);
   m.AddBool("bankTop", bankTop);
   m.AddBool("commandTop", commandTop);
