@@ -270,7 +270,9 @@ Network and archive spools, decoded 7z data, private archive copies and
 Listi-controlled writer outputs check the live available capacity of the
 backing volume before growing staged files. Multiple temporary files on the
 same volume draw on the same available space. The reserve is 0.25% of volume
-capacity, at least one volume block and at most 16 MiB. Known transfer
+capacity, at least one volume block and at most 16 MiB. Haiku growth
+checks also leave a 256 KiB allowance for filesystem preallocation and
+extent metadata. Known transfer
 lengths also bound actual spooled bytes. There is no fixed maximum file size
 introduced by the reserve.
 
@@ -303,7 +305,7 @@ export without compilation. It does not configure hosted CI. Run
 `make audit-sanitize fuzz-parsers` separately on a POSIX host with ASan/UBSan
 support for the portable transfer fault suite and seeded URL/digest tests.
 
- Save its complete output and
+ Save the complete native log and
 process status. For an exported tree, pair the log with the exported commit
 and a verified file manifest, since Git metadata is not included. The runner
 reports the source revision when available, executable digest, compiler,

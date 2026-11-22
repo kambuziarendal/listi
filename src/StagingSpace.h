@@ -40,7 +40,14 @@ inline bool StagingSpaceAvailable(int fd, uint64_t growth) {
   }
   const auto reserve = std::max<uint64_t>(
       1, std::min<uint64_t>(blocks / 400, 16 * 1024 * 1024 / block));
-  const auto needed = growth / block + (growth % block != 0);
+  auto needed = growth / block + (growth % block != 0);
+#ifdef __HAIKU__
+  // BFS may preallocate beyond the byte count, and allocate extent metadata.
+  // Allow another 256 KiB for those allocations on a growing write.
+  if (growth && needed < std::numeric_limits<uint64_t>::max())
+    needed += std::min<uint64_t>(std::numeric_limits<uint64_t>::max() - needed,
+                                 std::max<uint64_t>(1, 256 * 1024 / block));
+#endif
   if (free < reserve || needed > free - reserve) {
     errno = ENOSPC;
     return false;

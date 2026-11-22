@@ -48,8 +48,12 @@ int main() try {
       std::max<uint64_t>(1, std::min<uint64_t>(info.total_blocks / 400, 16 * 1024 * 1024 / block));
   // BFS also consumes metadata blocks; the next write cannot be attempted
   // after the guard reaches reserve, but allow one block of allocator overhead.
+  const auto finalAttempt = WriteStaging(b, bytes.data(), bytes.size());
+  std::cout << "Written " << written << " bytes, reserve " << containerReserve
+            << " blocks, free " << info.free_blocks << ", next write "
+            << finalAttempt << ", errno " << errno << '\n';
   if (!written || uint64_t(info.free_blocks) + 1 < containerReserve ||
-      WriteStaging(b, bytes.data(), bytes.size()) >= 0 || errno != ENOSPC)
+      finalAttempt >= 0 || errno != ENOSPC)
     throw std::runtime_error("The combined output did not stop at the shared reserve.");
   close(a);
   close(b);
