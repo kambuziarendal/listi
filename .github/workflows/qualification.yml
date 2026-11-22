@@ -1,0 +1,76 @@
+name: Listi qualification
+on:
+  pull_request:
+  push:
+    branches: [haiku-native]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qualification-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  portable:
+    name: Portable
+    if: github.event.repository.private == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check source, sanitizers and gate failure propagation
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          CXX: clang++
+        run: |
+          if [[ -z "$BASE" || "$BASE" =~ ^0+$ ]]; then
+            BASE=$(git rev-parse HEAD^)
+          fi
+          bash ci/portable.sh "$BASE" 2>&1 | tee "$RUNNER_TEMP/portable.log"
+        shell: bash
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: portable-${{ github.sha }}
+          path: ${{ runner.temp }}/portable.log
+          retention-days: 1
+          if-no-files-found: error
+
+  native:
+    name: Haiku native
+    if: github.event.repository.private == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Download the public disposable test image and guest-only test identity
+        env:
+          IMAGE_URL: ${{ vars.LISTI_CI_IMAGE_URL }}
+          IMAGE_SHA256: ${{ vars.LISTI_CI_IMAGE_SHA256 }}
+          IDENTITY_URL: ${{ vars.LISTI_CI_IDENTITY_URL }}
+          IDENTITY_SHA256: ${{ vars.LISTI_CI_IDENTITY_SHA256 }}
+        run: |
+          bash ci/fetch-public-fixtures.sh "$RUNNER_TEMP"
+      - name: Install QEMU
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils
+      - name: Build, run full native audit and test the installed package
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+          python3 tests/run-ephemeral-audit.py --base "$RUNNER_TEMP/haiku.qcow2" \
+            --key "$RUNNER_TEMP/guest-identity" --output "$RUNNER_TEMP/haiku-log" --qualify-package
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: native-${{ github.sha }}
+          path: ${{ runner.temp }}/haiku-log
+          retention-days: 1
+          if-no-files-found: error

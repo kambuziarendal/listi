@@ -9,6 +9,7 @@ import shlex
 import socket
 import subprocess
 import tarfile
+import sys
 import tempfile
 import time
 
@@ -27,10 +28,18 @@ def main():
     parser.add_argument("--accel", choices=("kvm", "tcg", "hvf"), default="tcg")
     parser.add_argument("--jobs", type=int, default=2)
     parser.add_argument("--preflight", action="store_true", help="boot and verify an exported tree only")
+    parser.add_argument("--qualify-package", action="store_true",
+                        help="require the complete suite and test the exact newly installed HPKG")
+    parser.add_argument("--extended-fixture", type=Path, metavar="DIRECTORY",
+                        help="run opt-in local storage and network qualification; see docs/CI.md")
     parser.add_argument("tests", nargs="*", help="leave empty for the full native suite")
     args = parser.parse_args()
     if args.jobs < 1:
         parser.error("--jobs must be positive")
+    if (args.qualify_package or args.extended_fixture) and (args.preflight or args.tests):
+        parser.error("Package qualification requires the full suite.")
+    if args.extended_fixture:
+        args.qualify_package = True
     base = args.base.resolve(strict=True)
     key = args.key.resolve(strict=True)
     output = args.output.resolve()
@@ -58,7 +67,7 @@ def run(args, base, key, output, scratch):
                "-serial", f"file:{output / 'serial.log'}"]
     if args.bios_dir:
         command.extend(["-L", str(args.bios_dir.resolve(strict=True))])
-    ssh = ["ssh", "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
+    ssh = ["ssh", "-F", "/dev/null", "-o", "ForwardAgent=no", "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
            "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=3",
            "-o", f"UserKnownHostsFile={scratch / 'known-hosts'}",
            "-i", str(key), "-p", str(port), f"{args.user}@127.0.0.1"]
@@ -121,6 +130,37 @@ def audit(args, output, ssh, archive):
                                      "TESTS=" + " ".join(args.tests)])
     with (output / "audit.log").open("wb") as log:
         subprocess.run([*ssh, remote], stdout=log, stderr=subprocess.STDOUT, check=True)
+
+
+    if args.qualify_package:
+        lines = (output / "audit.log").read_text(errors="replace").splitlines()
+        skips = [line for line in lines if line.startswith("SKIP ")]
+        if skips:
+            raise RuntimeError("Incomplete native qualification: " + "; ".join(skips))
+        if not lines or not re.fullmatch(
+            r"PASS Listi --self-test; [1-9][0-9]* selected native cases exited successfully",
+            lines[-1]
+        ):
+            raise RuntimeError("Missing final native suite result")
+        package = """set -eu
+cd ~/listi-ephemeral
+make package
+set -- dist/*.hpkg
+test "$#" -eq 1
+pkgman install -R -y "$PWD/$1"
+metadata=$(awk '$1 == "version" {print $2}' PackageInfo)
+active=/boot/system/packages/listi-${metadata}-x86_64.hpkg
+cmp "$1" "$active"
+cmp src/objects.*-release/Listi /boot/system/apps/Listi
+sha256sum "$1" "$active" /boot/system/apps/Listi
+/boot/system/apps/Listi --self-test
+"""
+        with (output / "installed.log").open("wb") as log:
+            subprocess.run([*ssh, package], stdout=log, stderr=subprocess.STDOUT, check=True)
+    if args.extended_fixture:
+        # Host dependencies are opt-in. Nothing here uses a production service.
+        helper = Path(__file__).resolve().parents[1] / "ci/run-extended.py"
+        subprocess.run([sys.executable, helper, args.extended_fixture, output, *ssh], check=True)
 
 
 if __name__ == "__main__":

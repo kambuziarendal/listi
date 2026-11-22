@@ -1,0 +1,120 @@
+"""Internal host driver for run-ephemeral-audit.py --extended-fixture.
+
+Use an isolated host with the loopback fixture ports exclusively available.
+"""
+import contextlib
+import json
+import os
+import shlex
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+@contextlib.contextmanager
+def service(command, log):
+    with log.open("wb") as stream:
+        proc = subprocess.Popen(command, stdout=stream, stderr=subprocess.STDOUT)
+        try:
+            yield proc
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+
+
+def wait_listening(port, process):
+    deadline = time.monotonic() + 20
+    while process.poll() is None and time.monotonic() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=1):
+                return
+        except OSError:
+            time.sleep(0.2)
+    raise RuntimeError(f"Fixture failed to listen on {port}")
+
+
+def extended(config, output, ssh, scratch):
+    def guest(command, log, **kwargs):
+        with (output / log).open("wb") as stream:
+            subprocess.run([*ssh, command], stdout=stream, stderr=subprocess.STDOUT,
+                           timeout=600, check=True, **kwargs)
+
+    cert, key = config / "ftps.pem", config / "ftps.key"
+    if not cert.is_file() or not key.is_file():
+        raise ValueError("Missing guest-test FTPS server certificate/key")
+    guest("set -e; cd ~/listi-ephemeral; LISTI_TEST_VOLUME=/ListiTest "
+          "python3 tests/run-native-audit.py staging-budget cross-volume-move; "
+          "python3 ci/link-network-case.py; python3 ci/virtual-fixtures.py build/virtual",
+          "extended-storage.log")
+
+    network = scratch / "network"
+    tls = scratch / "tls-share"
+    tls.mkdir()
+    with contextlib.ExitStack() as stack:
+        server = stack.enter_context(service(
+            [sys.executable, ROOT / "tests/network-failure-fixture.py", "--directory", network],
+            output / "network-fixture.log"))
+        ftps = stack.enter_context(service(
+            [sys.executable, ROOT / "ci/ftps-fixture.py", tls, cert, key],
+            output / "ftps-fixture.log"))
+        for port in (1445, 2121, 2222, 23990):
+            wait_listening(port, server)
+        wait_listening(2143, ftps)
+        for share in (network / "share", tls):
+            (share / "hello world.txt").write_bytes(b"Listi network fixture\n")
+            (share / "Årsrapport.txt").write_bytes(b"UTF-8 test\n")
+
+        with (network / "known_hosts").open("rb") as known:
+            guest("cat > ~/listi-ephemeral/build/known-hosts", "known-host.log", stdin=known)
+        forwards = []
+        for port in (1445, 2121, 2222, 2143, *range(31000, 31020), *range(31300, 31310)):
+            forwards.extend(["-R", f"127.0.0.1:{port}:127.0.0.1:{port}"])
+        tunnel = stack.enter_context(service(
+            [*ssh[:-1], "-N", "-o", "ExitOnForwardFailure=yes", *forwards, ssh[-1]],
+            output / "forwarding.log"))
+        # Wait for the guest end, not just a running SSH client.
+        guest("python3 -c " + shlex.quote(
+            "import socket,time\nfor _ in range(40):\n try:\n  "
+            "socket.create_connection(('127.0.0.1',2121),1).close(); break\n "
+            "except OSError: time.sleep(.25)\nelse: raise SystemExit(1)"), "ready.log")
+        if tunnel.poll() is not None:
+            raise RuntimeError("Fixture forwarding failed")
+        guest("set -e; cd ~/listi-ephemeral; "
+              'LISTI_TEST_NETWORK_HOST=127.0.0.1 LISTI_TEST_FTPS=1 /boot/system/apps/Listi '
+              '--virtual-test "$PWD/build/virtual" "$PWD/build/known-hosts"',
+              "installed-protocols.log")
+        guest_root = subprocess.check_output([*ssh, "cd ~/listi-ephemeral && pwd"],
+                                             text=True, timeout=20).strip()
+        (scratch / "ssh").write_text("#!/bin/sh\nexec " + shlex.join(ssh) + ' "$@"\n')
+        (scratch / "ssh").chmod(0o700)
+        env = os.environ.copy()
+        env.pop("NET_CASES", None)
+        env.pop("NET_RUN", None)
+        env.update(LISTI_NETWORK_TEST_BINARY=guest_root + "/build/network-interruptions",
+                   LISTI_NETWORK_KNOWN_HOSTS=guest_root + "/build/known-hosts")
+        try:
+            with (output / "interruptions.log").open("wb") as stream:
+                subprocess.run([sys.executable, ROOT / "tests/run-network-interruptions.py", scratch],
+                               env=env, stdout=stream, stderr=subprocess.STDOUT,
+                               timeout=2400, check=True)
+        finally:
+            for entry in (*scratch.glob("*.log"), *scratch.glob("network-results.json")):
+                shutil.copyfile(entry, output / entry.name)
+        results = json.loads((output / "network-results.json").read_text())
+        if len(results) != 27 or len({(r["protocol"], r["mode"]) for r in results}) != 27:
+            raise RuntimeError("Incomplete interruption matrix")
+
+
+if __name__ == "__main__":
+    with tempfile.TemporaryDirectory(prefix="listi-extended-") as directory:
+        extended(Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3:], Path(directory))
