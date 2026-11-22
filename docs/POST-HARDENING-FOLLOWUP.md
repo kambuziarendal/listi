@@ -62,3 +62,96 @@ quota-enabled filesystem experiment.
    Keep uncertain data and logs. Only retry in a fresh fixture. A missing
    source/sentinel, silent replacement of unrelated data, or claimed success
    with incomplete output fails qualification.
+
+## Performance: measurable improvement, target missed
+
+All 550 individual observations, including wall time, CPU, bytes and syscall
+counters, are in [the CSV](benchmarks/copy-followup.csv). See the
+[benchmark protocol](../tests/performance/README.md) for reproduction and
+counter coverage. Ten repetitions per build and case, alternating execution
+order, same release compiler (GCC 13.3), same warm-source policy, same BFS
+guest (hrev59866+79, QEMU KVM, 2 vCPU, 2048 MiB). This measures the native
+copy operation linked against each build's release objects, not a GUI gesture.
+The exact application revisions were 734fa69, 64e26b3 and eacb4c3. The final
+qualification pin bdce5f3 has identical application code to eacb4c3. The first
+attempt to run the historical comparison produced no samples: a Python import
+collision in the probe directory stopped argument parsing. Only completed runs
+are included. No arbitrary timing threshold is enforced.
+
+| Series | Dataset | Destination | -10 ms | -11 ms | Final ms |
+|---|---|---|---:|---:|---:|
+| before | small | fresh | 92.08 | 580.81 | n/a |
+| before | small | overwrite | 83.20 | 520.27 | n/a |
+| final | small | fresh | 77.20 | 506.46 | 351.46 |
+| final | small | overwrite | 85.53 | 541.57 | 354.66 |
+| final | small | cancel | 3.72 | 11.97 | 12.34 |
+| final | one | fresh | 2.97 | 17.29 | 12.18 |
+| final | one | overwrite | 3.07 | 17.04 | 10.85 |
+| final | one | cancel | 3.85 | 12.38 | 12.22 |
+| final | nested | fresh | 79.66 | 537.44 | 359.98 |
+| final | nested | overwrite | 88.45 | 553.58 | 357.96 |
+| final | nested | cancel | 4.49 | 14.28 | 14.51 |
+| final | medium | fresh | 139.85 | 150.49 | 158.14 |
+| final | medium | overwrite | 145.93 | 151.70 | 154.16 |
+| final | medium | cancel | 4.17 | 13.47 | 14.36 |
+| final | tiny | fresh | 731.50 | 4935.94 | 3511.82 |
+| final | tiny | overwrite | 763.03 | 4753.54 | 3401.48 |
+| final | tiny | cancel | 4.51 | 14.52 | 15.10 |
+| simulated-usb | small | fresh | 249.55 | 726.42 | 544.08 |
+| simulated-usb | small | overwrite | 250.39 | 720.97 | 525.37 |
+
+Final series, fresh 32 × 4 KiB, medians (times in ms; overlapping summaries
+of different runs are not additive):
+
+| Revision | Wall | CPU | Journal bytes | Journal fsyncs / ms | Directory fsyncs / ms | Data fsyncs / ms | renameat calls |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 734fa69 | 77.2 | 17.3 | 0 | 0 / 0.0 | 32 / 6.6 | 32 / 61.2 | 0 |
+| 64e26b3 | 506.5 | 126.4 | 104828 | 160 / 305.0 | 224 / 86.6 | 32 / 60.5 | 160 |
+| eacb4c3 | 351.5 | 91.1 | 61412 | 96 / 188.4 | 160 / 59.9 | 32 / 61.8 | 96 |
+
+The old five record replacements per file, their directory flushes and removal
+are the main measured difference; the time is not predominantly CPU. Removing
+two redundant replacements per file reduced fresh median latency by 31% and
+overwrite by 35% relative to revision 11. The fresh median still exceeds the
+matched revision 10 by 4.55×, and the historical 153.75 ms stretch target by
+2.29×. Medium fresh copies regressed by about 5% compared with revision 11;
+cancellation did not improve consistently. Do not generalize the small-file
+speedup to sequential I/O. No NAS performance, temp-space high-water mark,
+cold-cache, physical USB or power-loss conclusion follows from these tests.
+
+## Durability contract and tests
+
+Intent must be durable before exclusive creation; Writing must bind the stage
+identity before writing data. Local copies still verify and sync data before
+persisting Publishing. Only then can the checked rename occur. The destination
+directory must be synced before checked retirement and its directory sync.
+Writing excludes publication, whereas Publishing permits either outcome,
+including an already durable rename. A failure after publication is not
+success. Nothing in review authorizes deletion or replay. This contract was
+recorded before implementation (perf/invariant-before-code.txt). There is no
+cross-file batching, ownership by prefix, new journal format or removed flush
+from a retained transition. The separate remote path retains all five phases.
+
+The copy-crash-recovery suite terminates the copying process before and after
+publication-intent record replacement, after destination rename, after directory
+sync, and at record removal. It also interrupts the earlier stages and injects
+ENOSPC at initial record creation, preparation, publication and retirement.
+It checks bytes, outstanding record count, repeated read-only review and
+substituted stages. This is process termination, not a simulated drive cache
+loss. We did not merge the editor or legacy rename journals or batch distinct
+files: no tested multi-object crash contract justified that change.
+
+## GitHub activation and ownership
+
+Read-only GitHub API snapshot: public default branch haiku-native at 255a06f,
+Actions enabled, zero workflows and zero runs, protection endpoint 404,
+protected=false, empty rulesets. There is no successful hosted run ID or
+required check. We did not publish the private candidate to this public repo
+or change repository settings. The workflow targets PRs and pushes to
+haiku-native and manual dispatch, uses pinned actions, bounded standard
+hosted runners, read-only contents and no persistent checkout credential.
+No privileged self-hosted PR runner. Local actionlint 1.7.7 passed. The
+[owner procedure](CI.md#enabling-public-ci-without-paid-services) separates
+the first green Portable and Haiku native runs, disposable public fixture
+requirements, manual native verification and an actual refused merge. Do not
+make a missing or skipped check mandatory.
