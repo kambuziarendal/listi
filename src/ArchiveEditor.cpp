@@ -440,7 +440,6 @@ bool ArchiveEditSession::Save(const Hooks &hooks) {
   ValidateArchive();
   auto edit = target;
   SetArchiveEditAdditions(edit, {candidate});
-  edit.archiveVerifyOutput = true;
   Job published;
   Hooks internal = hooks;
   // Saving this one selected member explicitly replaces its previous version.

@@ -139,7 +139,7 @@ void CopyMetadata(const std::string &fromPath, const std::string &toPath,
   Require(status == B_ENTRY_NOT_FOUND, "Cannot enumerate archive metadata.");
 }
 void VerifyMovedEntry(const std::string &, const std::string &,
-                      const TransferControl &, unsigned depth = 0);
+                      const TransferControl &, bool exactTree = false, unsigned depth = 0);
 Result RunArchiveEdit(const Job &job, const Hooks &hooks,
                       const std::function<void()> &beforePublish = {}) {
   Result result;
@@ -307,7 +307,10 @@ Result RunArchiveEdit(const Job &job, const Hooks &hooks,
       SealDataIso(output.n, internal);
     Require(!fsync(output.n), "Cannot flush updated archive metadata.");
     check();
-    if (job.archiveVerifyOutput) {
+    struct stat verifiedOutput;
+    Require(!fstat(output.n, &verifiedOutput), "Cannot identify updated archive.");
+    {
+      ArchiveListingScope listingScope;
       if (secret) {
         struct stat st;
         Require(!lstat(outputPath.c_str(), &st),
@@ -319,6 +322,11 @@ Result RunArchiveEdit(const Job &job, const Hooks &hooks,
       }
       TransferControl verify;
       verify.proceed = internal.proceed;
+      // Report the verification phase without double-counting transfer bytes.
+      verify.progress = [&](uint64_t) {
+        if (hooks.progress)
+          hooks.progress(job.destination, 0);
+      };
       const auto root = OpenArchive(outputPath, verify);
       Require(
           !root.empty(),
@@ -328,7 +336,7 @@ Result RunArchiveEdit(const Job &job, const Hooks &hooks,
           ListFiles(root, verify).size() == children.size(),
           "Updated archive has a different member set. Original archive was retained.");
       for (const auto &child : children)
-        VerifyMovedEntry(child, ChildLocation(root, Leaf(child)), verify);
+        VerifyMovedEntry(child, ChildLocation(root, Leaf(child)), verify, true);
       check();
     }
     // Full external tree guards belong at the destructive publication boundary,
@@ -344,12 +352,16 @@ Result RunArchiveEdit(const Job &job, const Hooks &hooks,
             !lstat(job.destination.c_str(), &named) &&
             Unchanged(original, named),
         "The archive was replaced while it was being edited. Nothing was changed.");
+    struct stat namedOutput;
+    Require(!lstat(outputPath.c_str(), &namedOutput) &&
+                Unchanged(verifiedOutput, namedOutput),
+            "The verified output changed. Original archive was retained.");
     Require(
         !rename(outputPath.c_str(), job.destination.c_str()),
         "Could not publish the updated archive. The original was left in place.");
     FD parent(open(job.destinationFolder.c_str(), O_RDONLY));
     Require(parent.n >= 0 && !fsync(parent.n),
-            "Could not flush the updated archive directory.");
+            "Updated archive was published, but its directory could not be flushed. Durability after restart is unknown.");
     if (secret)
       try {
         struct stat published;
@@ -376,7 +388,7 @@ Result RunArchiveEdit(const Job &job, const Hooks &hooks,
 // Compare the durable destination's decoded bytes with the private source
 // snapshot. A directory merge may retain additional destination entries.
 void VerifyMovedEntry(const std::string &local, const std::string &destination,
-                      const TransferControl &control, unsigned depth) {
+                      const TransferControl &control, bool exactTree, unsigned depth) {
   control.Check();
   Require(depth <= 64, "Move verification exceeds the folder depth limit.");
   struct stat st;
@@ -386,9 +398,13 @@ void VerifyMovedEntry(const std::string &local, const std::string &destination,
               bool(S_ISDIR(st.st_mode)) == target.directory,
           "Destination verification failed. Source entries were retained.");
   if (S_ISDIR(st.st_mode)) {
-    for (const auto &child : Children(local))
+    const auto children = Children(local);
+    if (exactTree)
+      Require(ListFiles(destination, control).size() == children.size(),
+              "Updated archive has a different member set. Original archive was retained.");
+    for (const auto &child : children)
       VerifyMovedEntry(child, ChildLocation(destination, Leaf(child)), control,
-                       depth + 1);
+                       exactTree, depth + 1);
     return;
   }
   Require(
@@ -401,6 +417,8 @@ void VerifyMovedEntry(const std::string &local, const std::string &destination,
   ReadFile(
       destination,
       [&](const char *bytes, size_t size) {
+        Require(size <= uint64_t(st.st_size - total),
+                "Destination verification exceeded the expected content size.");
         while (size) {
           control.Check();
           const auto amount = std::min(size, buffer.size());

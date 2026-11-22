@@ -57,8 +57,6 @@ struct Job {
   // application restart with this handle, which is intentional.
   uint64_t archivePasswordToken = 0;
   bool archiveEncryptNames = false;
-  bool archiveVerifyOutput =
-      false; // Decode and compare before replacing an edited archive.
   // EditArchive uses destination as the local archive, sources as local entries
   // to add, archivePath as the internal destination folder, and archiveRemove
   // as normalized member paths without a leading slash.

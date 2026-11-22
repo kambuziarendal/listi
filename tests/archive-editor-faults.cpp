@@ -17,7 +17,7 @@
 #include <unistd.h>
 using namespace Listi;
 namespace {
-enum Fault { None, Publication, Journal, Baseline } fault = None;
+enum Fault { None, Publication, Journal, Baseline, DirectorySync } fault = None;
 std::string archivePath, journalPath, baselinePath;
 bool injected = false, published = false;
 std::string bytes(const std::string &p) {
@@ -81,6 +81,17 @@ extern "C" int __wrap_rename(const char *from, const char *to) {
   if (!status && to == archivePath)
     published = true;
   return status;
+}
+extern "C" int __real_fsync(int);
+extern "C" int __wrap_fsync(int fd) {
+  struct stat st;
+  if (fault == DirectorySync && published && !injected &&
+      !fstat(fd, &st) && S_ISDIR(st.st_mode)) {
+    injected = true;
+    errno = EIO;
+    return -1;
+  }
+  return __real_fsync(fd);
 }
 int main() {
   BApplication app("application/x-vnd.Listi-editor-fault-test");
@@ -197,6 +208,49 @@ int main() {
       }
     }
   }
+  auto create = PrepareArchiveJob(false, {root + "/item"});
+  create.archiveFormat = "tar";
+  SetArchiveDestination(create, root, "ordinary");
+  if (Run(create, {}).completed != 1)
+    return 2;
+  archivePath = create.destination;
+  const auto original = bytes(archivePath);
+  const auto addition = root + "/addition";
+  writeFile(addition, "editor corruption probe");
+  auto edit = PrepareArchiveEditJob(archivePath, {addition}, {});
+  injected = published = false;
+  Hooks damage;
+  damage.proceed = [&] {
+    if (!injected)
+      injected = corrupt(root);
+    return true;
+  };
+  auto rejected = Run(edit, damage);
+  check(injected && !published && !rejected.completed && !rejected.errors.empty() &&
+            bytes(archivePath) == original,
+        "ordinary archive addition rejects same-size damaged member before replacing original");
+  if (published) {
+    clean(root);
+    return 1;
+  }
+  bool stopped = false;
+  Hooks cancel;
+  cancel.proceed = [&] {
+    if (!stopped)
+      stopped = corrupt(root);
+    return !stopped;
+  };
+  rejected = Run(edit, cancel);
+  check(stopped && rejected.cancelled && !published && bytes(archivePath) == original,
+        "cancel while rebuilt archive is staged preserves original");
+  injected = published = false;
+  fault = DirectorySync;
+  auto uncertain = Run(edit, {});
+  fault = None;
+  check(injected && published && !uncertain.completed && !uncertain.errors.empty() &&
+            uncertain.errors.front().find("published") != std::string::npos &&
+            bytes(archivePath) != original,
+        "post-publication directory sync failure reports visible archive replacement");
   clean(root);
   std::cout << checks << " checks, " << failures << " failures\n";
   return failures ? 1 : 0;

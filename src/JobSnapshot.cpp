@@ -38,7 +38,6 @@ BMessage EncodeJob(const Job &job, uint32 what) {
   m.AddInt32("archiveLevel", job.archiveLevel);
   m.AddInt64("archivePasswordToken", job.archivePasswordToken);
   m.AddBool("archiveEncryptNames", job.archiveEncryptNames);
-  m.AddBool("archiveVerifyOutput", job.archiveVerifyOutput);
   m.AddString("archivePath", job.archivePath.c_str());
   for (const auto &path : job.archiveRemove)
     m.AddString("archiveRemove", path.c_str());
@@ -85,7 +84,6 @@ Job DecodeJob(const BMessage &m) {
   job.archiveLevel = m.GetInt32("archiveLevel", 6);
   job.archivePasswordToken = m.GetInt64("archivePasswordToken", 0);
   job.archiveEncryptNames = m.GetBool("archiveEncryptNames", false);
-  job.archiveVerifyOutput = m.GetBool("archiveVerifyOutput", false);
   job.archivePath = m.GetString("archivePath", "");
   job.entryName = m.GetString("entryName", "");
   job.destination = m.GetString("destination", "");
