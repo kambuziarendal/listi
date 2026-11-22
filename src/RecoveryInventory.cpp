@@ -29,8 +29,20 @@ std::string Directory(const std::string &override, bool create) {
       throw std::runtime_error("Cannot locate Listi recovery settings.");
     directory = path.Path();
   }
-  if (create && mkdir(directory.c_str(), 0700) && errno != EEXIST)
-    throw std::runtime_error("Cannot create private Listi recovery inventory.");
+  if (create) {
+    if (mkdir(directory.c_str(), 0700) == 0) {
+      const int parent = open(fs::path(directory).parent_path().c_str(),
+                              O_RDONLY | O_DIRECTORY);
+      if (parent < 0)
+        throw std::runtime_error("Cannot open the recovery inventory parent.");
+      const bool synced = fsync(parent) == 0;
+      close(parent);
+      if (!synced)
+        throw std::runtime_error("Cannot sync the recovery inventory parent.");
+    } else if (errno != EEXIST) {
+      throw std::runtime_error("Cannot create private Listi recovery inventory.");
+    }
+  }
   struct stat st;
   if (lstat(directory.c_str(), &st)) {
     if (!create && errno == ENOENT)

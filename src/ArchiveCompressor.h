@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 #pragma once
 #include "VirtualFile.h"
+#include "ArchiveJobChecks.h"
+#include "StagingSpace.h"
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
@@ -19,6 +21,13 @@ inline void RunArchiveCompressor(const char *name, const std::string &working,
   };
   const std::string tool(name);
   control.Check();
+  ArchiveJobChecks::FD scratch(open(working.c_str(),
+                                   O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+  auto checkSpace = [&] {
+    require(scratch.n >= 0 && StagingSpaceAvailable(scratch.n, 0),
+            "Not enough free space to preserve the " + tool + " staging reserve.");
+  };
+  checkSpace();
   std::vector<char *> argv;
   for (auto &arg : args)
     argv.push_back(arg.data());
@@ -62,6 +71,7 @@ inline void RunArchiveCompressor(const char *name, const std::string &working,
         throw std::runtime_error("Cannot wait for the " + tool + " writer.");
       }
       control.Check();
+      checkSpace();
       usleep(20000);
     }
   } catch (...) {
@@ -74,6 +84,7 @@ inline void RunArchiveCompressor(const char *name, const std::string &working,
   }
   require(WIFEXITED(status) && WEXITSTATUS(status) == 0,
           "The " + tool + " writer could not create the archive.");
+  checkSpace();
   control.Check();
 }
 } // namespace Listi

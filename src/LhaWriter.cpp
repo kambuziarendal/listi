@@ -215,6 +215,7 @@ void LhaCreate(int outputFd, const std::vector<std::string> &sources, int level,
     args.emplace_back("./" + name);
   }
   Hooks copying;
+  copying.privateStaging = true;
   copying.proceed = hooks.proceed;
   copying.progress = hooks.progress;
   const auto copied = Run(stage, copying);

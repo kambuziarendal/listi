@@ -15,10 +15,12 @@ void Require(bool ok) {
 }
 void Exercise(const std::string &input) {
   auto path = input;
-  std::replace(path.begin(), path.end(), '\0', '0');
+  for (auto &byte : path)
+    if (byte == '\0' || byte == '\r' || byte == '\n')
+      byte = '_';
   Require(Listi::DecodePath(Listi::EncodePath(path)) == path);
 
-  for (const std::string prefix : {"", "sftp://Fixture/", "archive:///fixture!"}) {
+  for (const std::string prefix : {"", "sftp://Fixture/", "archive:///fixture!/"}) {
     Listi::Location location;
     try {
       location = Listi::ParseLocation(prefix + input);

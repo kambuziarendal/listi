@@ -211,7 +211,9 @@ that an entry blocking recovery is retained. If rollback cannot finish, the
 operation report lists verified locations (including hidden
 `.listi-rename-*` names) or says when an entry could not be located. Inspect
 these paths before retrying. An interrupted process may leave a hidden
-`.listi-recovery-rename-*` review record in the affected folder. It records
+`.listi-recovery-rename-*` review record in the affected folder. Open **View → Review interrupted
+operations…** to see the journal path and check its identity before reading
+it. It records
 the frozen folder, planned names, entry identities and each flushed rename
 intent, including rollback. An intent does not prove that a rename took
 place. Show hidden files, inspect the original, target and temporary names,
@@ -249,7 +251,12 @@ ordinary working volume to exercise a failure path.
 ### Recovering a staging directory
 
 A failed archive operation reports if Listi cannot remove its staging folder.
-After a process crash, look for hidden `.Listi-archive-stage-*` directories
+On restart, **View → Review interrupted operations…** reads Listi's
+private stage and bulk rename inventory. It shows the recorded path and
+whether its entry and parent still match. It never resumes, relocates or
+deletes an entry. A missing or substituted name is not safe to reuse.
+A match is only advisory, especially after devices are remounted.
+In the destination you can also look for hidden `.Listi-archive-stage-*` directories
 in the affected destination. The name alone does not establish ownership.
 Inspect the contents and compare them with the source and destination before
 removing anything. Listi does not delete staging-looking names on restart.
@@ -257,9 +264,46 @@ Only identities belonging to live operations are excluded from listings and
 search. Regular-file staging can leave `.listi-copy-*` files when driver I/O
 remains pending after cancellation; check them after reconnecting.
 
+### Staging capacity
+
+Network and archive spools, decoded 7z data, private archive copies and
+Listi-controlled writer outputs check the live available capacity of the
+backing volume before growing staged files. Multiple temporary files on the
+same volume draw on the same available space. The reserve is 0.25% of volume
+capacity, at least one volume block and at most 16 MiB. Known transfer
+lengths also bound actual spooled bytes. There is no fixed maximum file size
+introduced by the reserve.
+
+The external LHA and ARJ codecs own their scratch writes. Listi checks the
+shared reserve before launch, while waiting and before accepting output, and
+stops the codec if space runs low. Haiku does not provide the per-child file
+size resource limit needed to guard each external write. Other processes
+and buffered filesystem metadata may also allocate between checks. This is
+not a global filesystem quota or a guarantee against every full-volume
+event.
+
+The opt-in `staging-budget` test requires a disposable BFS volume of at most
+128 MiB, separate from `/tmp`. It writes real data into two files until the
+shared reserve rejects more bytes. Never point it at a working volume.
+
 ## Native release evidence
 
-Run `make audit` on Haiku in a clean checkout. Save its complete output and
+Run `make audit` on Haiku in a clean checkout. An opt-in local alternative
+uses a disposable QEMU overlay of an existing Haiku image with SSH, compiler
+and Listi build dependencies already installed:
+
+```sh
+python3 tests/run-ephemeral-audit.py --base /path/to/haiku.qcow2 \
+  --key /path/to/private-test-key --output /path/to/new-audit-output
+```
+
+The runner exports and verifies the committed source, records logs, uses
+loopback-only SSH and discards the overlay. `--preflight` verifies boot and
+export without compilation. It does not configure hosted CI. Run
+`make audit-sanitize fuzz-parsers` separately on a POSIX host with ASan/UBSan
+support for the portable transfer fault suite and seeded URL/digest tests.
+
+ Save its complete output and
 process status. For an exported tree, pair the log with the exported commit
 and a verified file manifest, since Git metadata is not included. The runner
 reports the source revision when available, executable digest, compiler,

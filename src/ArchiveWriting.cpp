@@ -28,29 +28,10 @@
 namespace Listi {
 namespace {
 using namespace ArchiveJobChecks;
-la_ssize_t BudgetArchiveWrite(archive *archive, void *opaque,
-                              const void *data, size_t size) {
-  const auto fd = *static_cast<int *>(opaque);
-  size_t at = 0;
-  while (at < size) {
-    const auto count = WriteStaging(fd, static_cast<const char *>(data) + at,
-                                     size - at);
-    if (count < 0 && errno == EINTR)
-      continue;
-    if (count <= 0) {
-      const auto code = count ? errno : EIO;
-      DynamicLibrary lib{"libarchive.so", "libarchive.so.13"};
-      LIBCALL(lib, archive_set_error)(archive, code, "Archive staging: %s",
-                                      strerror(code));
-      return -1;
-    }
-    at += count;
-  }
-  return size;
-}
 struct Writer {
   DynamicLibrary lib{"libarchive.so", "libarchive.so.13"};
   archive *a = nullptr;
+  int fd = -1;
   Writer() {
     Require(
         lib.Available(),
@@ -136,6 +117,25 @@ const ArchiveFormat formats[] = {
     {"cab", "Microsoft Cabinet", ".cab", false},
     {"lha", "LHA", ".lha", true},
     {"iso", "ISO 9660 (data disc)", ".iso", false}};
+la_ssize_t BudgetArchiveWrite(archive *archive, void *opaque,
+                              const void *data, size_t size) {
+  auto &writer = *static_cast<Writer *>(opaque);
+  size_t at = 0;
+  while (at < size) {
+    const auto count = WriteStaging(writer.fd, static_cast<const char *>(data) + at,
+                                     size - at);
+    if (count < 0 && errno == EINTR)
+      continue;
+    if (count <= 0) {
+      const auto code = count ? errno : EIO;
+      LIBCALL(writer.lib, archive_set_error)(archive, code, "Archive staging: %s",
+                                      strerror(code));
+      return -1;
+    }
+    at += count;
+  }
+  return size;
+}
 struct Pack {
   Writer &writer;
   const Hooks &hooks;
@@ -267,8 +267,10 @@ void CreateArchiveOutput(int output, const std::string &format,
   else {
     Writer writer;
     writer.Configure(format, level, secret);
-    writer.Check(LIBCALL(writer.lib, archive_write_open)(writer.a, &output,
-        nullptr, BudgetArchiveWrite, nullptr));
+    writer.fd = output;
+    writer.Check(LIBCALL(writer.lib, archive_write_set_bytes_in_last_block)(writer.a, 1));
+    writer.Check(LIBCALL(writer.lib, archive_write_open)(
+        writer.a, &writer, nullptr, BudgetArchiveWrite, nullptr));
     Pack pack{writer, hooks, format == "zip"};
     std::map<std::string, std::string> isoMembers;
     if (format == "iso")
