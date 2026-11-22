@@ -210,7 +210,16 @@ The native regression injects failures after staging, checks rollback and verifi
 that an entry blocking recovery is retained. If rollback cannot finish, the
 operation report lists verified locations (including hidden
 `.listi-rename-*` names) or says when an entry could not be located. Inspect
-these paths before retrying. There is no crash-recovery journal.
+these paths before retrying. An interrupted process may leave a hidden
+`.listi-recovery-rename-*` review record in the affected folder. It records
+the frozen folder, planned names, entry identities and each flushed rename
+intent, including rollback. An intent does not prove that a rename took
+place. Show hidden files, inspect the original, target and temporary names,
+and compare their current filesystem identities with the record. If an
+identity is absent, ambiguous, or on a remounted/reassigned device, do not
+guess. Keep the record and entries until the correct mapping is confirmed.
+Listi never replays the record or deletes unrelated entries on restart.
+A successful filesystem flush is not a guarantee against power loss.
 
 Haiku does not provide atomic no-replace or identity-conditional rename.
 Listi pins the parent directory and checks the source and target immediately

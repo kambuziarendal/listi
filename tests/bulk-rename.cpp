@@ -14,12 +14,13 @@
 #include <limits>
 #include <stdexcept>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 using namespace Listi;
 
 namespace {
-int renameCalls = 0, failRename = 0;
+int renameCalls = 0, failRename = 0, stopBefore = 0, stopAfter = 0;
 std::string blockRestore;
 bool simulateLarge = false;
 }
@@ -37,7 +38,12 @@ extern "C" int __wrap_renameat(int from, const char *before, int to,
     errno = EIO;
     return -1;
   }
-  return __real_renameat(from, before, to, after);
+  if (renameCalls == stopBefore)
+    _exit(21);
+  const auto status = __real_renameat(from, before, to, after);
+  if (!status && renameCalls == stopAfter)
+    _exit(21);
+  return status;
 }
 // BFS may allocate blocks for extending a file. Simulate an oversized
 // entry in the worker's stat call rather than consuming 512 MiB on disk.
@@ -142,6 +148,43 @@ void CheckMappings(const std::string &folder) {
   rmdir(folder.c_str());
   Check(true, "216 rename mappings preserve exact contents, diagnose blocked chains and undo all valid changes");
 }
+void CheckCrash(const std::string &folder, int boundary, bool after) {
+  std::filesystem::create_directory(folder);
+  const auto a = Join(folder, "a"), b = Join(folder, "b");
+  Write(a, "first");
+  Write(b, "second");
+  BulkRenameOptions rules;
+  rules.overrides = {{a, "b"}, {b, "a"}};
+  const auto swap = PreviewBulkRename(FreezeBulkRename(folder, {a, b}), rules);
+  const pid_t child = fork();
+  if (child == 0) {
+    renameCalls = 0;
+    (after ? stopAfter : stopBefore) = boundary;
+    Run(swap.job, {});
+    _exit(22);
+  }
+  int status;
+  if (child < 0 || waitpid(child, &status, 0) != child ||
+      !WIFEXITED(status) || WEXITSTATUS(status) != 21)
+    throw std::runtime_error("Crash fixture missed the expected boundary");
+  std::string record, stage;
+  for (const auto &entry : std::filesystem::directory_iterator(folder)) {
+    const auto path = entry.path().string();
+    if (Leaf(path).rfind(".listi-recovery-rename-", 0) == 0)
+      record = Read(path);
+    else if (Leaf(path).rfind(".listi-rename-", 0) == 0)
+      stage = Read(path);
+  }
+  const int moves = boundary - (after ? 0 : 1);
+  Check(record.find("Review only") != std::string::npos &&
+            record.find("intent ") != std::string::npos &&
+            record.find("committed") == std::string::npos &&
+            Read(a) == (moves == 0 ? "first" : moves == 1 ? "" : "second") &&
+            Read(b) == (moves < 2 ? "second" : moves == 2 ? "" : "first") &&
+            stage == ((moves == 1 || moves == 2) ? "first" : ""),
+        "process death retains a flushed intent and actual names without replay");
+  std::filesystem::remove_all(folder);
+}
 } // namespace
 
 int main() {
@@ -152,6 +195,10 @@ int main() {
   const std::string root(temp), folder = root + "/entries";
   try {
     CheckMappings(root + "/mappings");
+    for (int boundary = 1; boundary <= 3; ++boundary) {
+      CheckCrash(root + "/before", boundary, false);
+      CheckCrash(root + "/after", boundary, true);
+    }
     if (mkdir(folder.c_str(), 0700))
       throw std::runtime_error("Cannot create fixture directory");
     const auto a = folder + "/find find.txt", b = folder + "/find folder.v1",

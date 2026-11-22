@@ -296,10 +296,11 @@ void MoveName(int parent, const std::string &before, const std::string &after,
     throw std::runtime_error(before + " -> " + after + ": " + strerror(errno));
 }
 
-std::string TemporaryName(int parent, const std::set<std::string> &reserved) {
+std::string TemporaryName(int parent, const std::set<std::string> &reserved,
+                          const char *prefix = ".listi-rename-") {
   const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
   for (int attempt = 0; attempt < 100; ++attempt) {
-    auto name = ".listi-rename-" + std::to_string(getpid()) + "-" +
+    auto name = prefix + std::to_string(getpid()) + "-" +
                 std::to_string(nonce) + "-" + std::to_string(attempt);
     if (reserved.count(name))
       continue;
@@ -312,6 +313,73 @@ std::string TemporaryName(int parent, const std::set<std::string> &reserved) {
   }
   throw std::runtime_error("Cannot find a free temporary rename name.");
 }
+
+// This is an intent log, not permission to make mutations after a restart.
+class RenameJournal {
+public:
+  RenameJournal(int parent, const std::set<std::string> &reserved)
+      : parent(parent),
+        name(TemporaryName(parent, reserved, ".listi-recovery-rename-")),
+        file(openat(parent, name.c_str(),
+                    O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600)) {
+    if (file.fd < 0)
+      throw std::runtime_error("Cannot create bulk rename recovery record.");
+  }
+
+  void Record(const std::string &line) const {
+    size_t at = 0;
+    while (at < line.size()) {
+      const auto n = write(file.fd, line.data() + at, line.size() - at);
+      if (n < 0 && errno == EINTR)
+        continue;
+      if (n <= 0)
+        throw std::runtime_error("Cannot write bulk rename recovery record.");
+      at += n;
+    }
+  }
+  void Sync() const {
+    if (fsync(file.fd) || fsync(parent))
+      throw std::runtime_error("Cannot flush bulk rename recovery record or folder.");
+  }
+  void Intent(const NodeIdentity &identity, const std::string &from,
+              const std::string &to) const {
+    Record(Format("intent", identity, from, to));
+    Sync();
+  }
+  void Finish() const {
+    struct stat opened, named;
+    if (fstat(file.fd, &opened) || !Stat(parent, name, named) ||
+        opened.st_dev != named.st_dev || opened.st_ino != named.st_ino ||
+        unlinkat(parent, name.c_str(), 0) || fsync(parent))
+      throw std::runtime_error("Could not confirm removal of the bulk rename recovery record.");
+  }
+  static std::string Format(const char *kind, const NodeIdentity &identity,
+                            const std::string &from, const std::string &to) {
+    return std::string(kind) + " " + std::to_string(identity.device) + " " +
+           std::to_string(identity.inode) + " " + Quote(from) + " " +
+           Quote(to) + "\n";
+  }
+
+  const int parent;
+  const std::string name;
+
+private:
+  const FileDescriptor file;
+
+  static std::string Quote(const std::string &name) {
+    static const char hex[] = "0123456789abcdef";
+    std::string escaped = "\"";
+    for (const unsigned char byte : name) {
+      if (byte < ' ' || byte == 127 || byte == '\\' || byte == '"') {
+        escaped += "\\x";
+        escaped += hex[byte >> 4];
+        escaped += hex[byte & 15];
+      } else
+        escaped += char(byte);
+    }
+    return escaped + '"';
+  }
+};
 
 std::string CurrentFolder(const Job &job) {
   struct stat st;
@@ -491,6 +559,7 @@ Result RunBulkRename(const Job &job, const Hooks &hooks) {
   constexpr uint64_t kUndoByteLimit = 512ull * 1024 * 1024;
   size_t entriesLeft = kUndoEntryLimit;
   uint64_t bytesLeft = kUndoByteLimit;
+  std::optional<RenameJournal> journal;
   auto move = [&](size_t i, const std::string &target) {
     Check(hooks);
     InspectFolder(job);
@@ -500,6 +569,7 @@ Result RunBulkRename(const Job &job, const Hooks &hooks) {
                     entriesLeft, bytesLeft) !=
             job.bulkFingerprints.at(job.sources[i]).contents)
       throw std::runtime_error("Undo stopped: contents changed: " + job.sources[i]);
+    journal->Intent(*identities[i], step.before, step.after);
     MoveName(folder.fd, step.before, step.after, *identities[i],
              stamp == rootStamps.end() ? "" : stamp->second);
     history.push_back(std::move(step));
@@ -541,6 +611,17 @@ Result RunBulkRename(const Job &job, const Hooks &hooks) {
       bytesLeft = kUndoByteLimit * 2;
     }
 
+    journal.emplace(folder.fd, reserved);
+    journal->Record("Listi bulk rename recovery record v1. Review only. Do not execute.\n");
+    journal->Record(RenameJournal::Format("folder", job.expectedDestination,
+                                         job.destinationFolder, ""));
+    for (const auto &item : pending) {
+      const size_t i = item.second;
+      journal->Record(RenameJournal::Format("plan", *identities[i],
+          confirmed.rows[i].before, confirmed.rows[i].after));
+    }
+    journal->Sync();
+
     // Rename chains from the free end. In a cycle, free one original by moving
     // it to a temporary leaf, then finish that row after its target is free.
     while (!pending.empty() || !ready.empty()) {
@@ -581,6 +662,7 @@ Result RunBulkRename(const Job &job, const Hooks &hooks) {
     // since the failed step, and continue restoring independent rows.
     for (auto step = history.rbegin(); step != history.rend(); ++step) {
       try {
+        journal->Intent(*identities[step->row], step->after, step->before);
         MoveName(folder.fd, step->after, step->before, *identities[step->row]);
         current[step->row] = step->before;
       } catch (const std::runtime_error &error) {
@@ -642,9 +724,36 @@ Result RunBulkRename(const Job &job, const Hooks &hooks) {
         ++result.skipped;
       }
     }
+    if (journal) {
+      try {
+        if (!result.bulkRenameRecoveryNeeded) {
+          journal->Record("restored\n");
+          journal->Sync();
+          journal->Finish();
+        }
+      } catch (const std::runtime_error &error) {
+        result.errors.push_back(error.what());
+        result.bulkRenameRecoveryNeeded = true;
+      }
+      if (result.bulkRenameRecoveryNeeded)
+        result.errors.push_back("Review retained rename record: " +
+                                Join(actualFolder.empty() ? job.destinationFolder
+                                                         : actualFolder,
+                                     journal->name));
+    }
     return result;
   }
 
+  try {
+    journal->Record("committed\n");
+    journal->Sync();
+    journal->Finish();
+  } catch (const std::runtime_error &error) {
+    result.bulkRenameRecoveryNeeded = true;
+    result.errors.push_back(std::string("Names were changed. ") + error.what() +
+                            " Review recovery record if present: " +
+                            Join(job.destinationFolder, journal->name));
+  }
   Job reverse;
   reverse.action = Action::UndoBulkRename;
   reverse.destinationFolder = job.destinationFolder;
