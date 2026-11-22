@@ -18,6 +18,8 @@ The current [test candidate](../README.md#install) is available for Haiku x86_64
 
 ## Current priorities
 
+Everyday responsiveness and trustworthy file operations come before new workflows. Compare navigation and cancellation with Tracker on the same Haiku machine, measure small-file copy time separately, and preserve the journal and staged-write checks. [Current measurements](VERIFICATION.md#current-development-build) are from a VM; there is no physical-hardware or Tracker benchmark yet.
+
 1. **Before beta: interrupted file jobs.** In 0.36.1-3, late removal of a virtual USB disk
    left a copy waiting for over 100 seconds even after cancellation was requested.
    Revision 0.38.0-4 isolates writes and flushes to the private staging file.
@@ -158,8 +160,8 @@ See the [workflow guide](GUIDE.md) for the controls and limitations.
 
 - **Keep the native test runner as the reference.** Add focused suite selection
   and a failing exit status for missing or failed required checks where needed.
-  Start CI with checks that genuinely run on the available host; label those
-  separately from native Haiku builds, fault tests and installed-package checks.
+  Keep the [portable CI checks](CI.md) distinct
+  from native Haiku builds, fault tests and installed-package checks.
   Do not make paid or hosted Haiku capacity a prerequisite.
 - **Split App.cpp at a real change boundary.** At 2,314 lines in 0.32.0, extract
   the command or panel responsibility touched by the first workflow, with tests
@@ -167,8 +169,7 @@ See the [workflow guide](GUIDE.md) for the controls and limitations.
 - **Localise incrementally.** Introduce Haiku translation contexts in the first
   changed workflow, including errors and plural counts. Verify catalogue
   extraction, fallback text and layout with a longer translation before rollout.
-- **Make releases easier to follow and report against.** Start a concise
-  changelog with user-visible changes and compatibility notes; add SECURITY.md
+- **Make releases easier to follow and report against.** Maintain the [changelog](../CHANGELOG.md) with user-visible changes and compatibility notes; add SECURITY.md
   once a monitored private reporting route is confirmed. Keep reproduction
   instructions in the existing verification guide.
 - **Review the duplicate-finder prototype rather than importing it wholesale.**

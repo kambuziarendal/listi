@@ -6,7 +6,13 @@ Listi is a native Haiku file manager. Browse a single folder, compare two panels
 
 *Quick view in Listi 0.35.0. [Image credit](docs/screenshots/CREDITS.md).*
 
+## Current development focus
+
+We want you to be able to browse another folder or cancel a copy while hundreds of small files are moving, without losing track of what actually reached the destination. The development build groups updates to an open folder instead of repeatedly rescanning it as files arrive. We are measuring the cost of recording each transfer safely and testing what happens when a copy stops partway through. The next hardware check is a physical USB disconnect during a copy. See the [test results and limits](docs/VERIFICATION.md#current-development-build).
+
 ## Install
+
+The latest packaged build is older than the development source on this page. To try the changes described above, [build from source](#build-from-source); there is no published 0.38.0 HPKG.
 
 Download the **[0.37.1-2 alpha test candidate for Haiku x86_64](https://github.com/kambuziarendal/listi/releases/tag/v0.37.1-2)**. Open the HPKG in HaikuDepot, or install it from the download folder:
 

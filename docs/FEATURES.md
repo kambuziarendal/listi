@@ -4,7 +4,7 @@ Listi is a native Haiku file manager. Browse one folder at a time or set up a
 source and destination side by side, then use the same menus, clipboard and
 file actions in either layout.
 
-This tour covers the [0.37.0-1 alpha test candidate for Haiku x86_64][release].
+The screenshots show earlier alpha builds. The latest [packaged alpha for Haiku x86_64][release] predates the [current development work](../README.md#current-development-focus).
 Follow the [installation instructions](../README.md#install), then try the examples with
 disposable files. Installing an older package does not reverse file operations.
 
@@ -237,6 +237,6 @@ layout profiles are not saved project sessions.
 
 *Language-model assistance was used during development and documentation.*
 
-[release]: https://github.com/kambuziarendal/listi/releases/tag/v0.37.0-1
+[release]: https://github.com/kambuziarendal/listi/releases/tag/v0.37.1-2
 [jobs]: GUIDE.md#panels-and-jobs
 [archives]: GUIDE.md#archives

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased: 0.38.0 development source
+
+- An open destination folder now shows newly copied files in batches. Finishing or cancelling a job still refreshes the final listing.
+- Recording recoverable file operations costs less during small-file copies. The journal is still written; this is not a fast mode that skips safety checks.
+- The native qualification tools exercise interrupted jobs, storage pressure and the installed application. See [what was tested](docs/VERIFICATION.md#current-development-build). The revisions below describe source milestones, not separate public downloads.
+
 ## 0.38.0-6 alpha test candidate
 
 - Network copies read the staged upload back before replacing the destination.

@@ -1,7 +1,6 @@
 # Qualification gates
 
-Configuration is not a recorded green check. The hosted workflow and required
-branch checks are **not enabled or verified by this change**. A local Haiku
+The workflow is configured for pushes and pull requests to `haiku-native`. Check the [run history](https://github.com/kambuziarendal/listi/actions/workflows/qualification.yml) for the exact commit and job. A configured workflow is not proof of a successful run or an enforced branch rule. A local Haiku
 audit does not prove that GitHub Actions, the extended driver or physical
 hardware passed. Keep the outcome for each separate lane.
 

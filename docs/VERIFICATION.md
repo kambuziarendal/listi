@@ -4,6 +4,12 @@ Listi is alpha software that works directly on files. Tests provide evidence for
 specific cases, not proof that every filesystem, server or archive variant is
 safe. Use disposable fixtures and independent backups.
 
+## Current development build
+
+On Haiku R1/beta6 x86_64 in QEMU, we copied 120 files of 64 KiB into an open folder on a throttled virtual USB disk. The panel started 78 and 77 directory scans in two baseline runs, versus 30 and 31 with the [refresh change](https://github.com/kambuziarendal/listi/commit/a85d258040e8d4e185c03cdf85b4465fcffed0fb). Every copied file matched its source. This counts scans, not UI latency or elapsed copy time. Separate GUI checks covered navigation away during a copy, external folder changes, cancellation and the final listing. The built-in self-test passed 58 of 58 checks.
+
+An earlier [qualification run](POST-HARDENING-FOLLOWUP.md) measured the median time to copy 32 small files to a fresh destination: 351 ms versus 506 ms before the journal changes. That run also covered recovery after process termination. Neither test demonstrates power-loss durability or physical USB behaviour. For hosted results, check [GitHub Actions](https://github.com/kambuziarendal/listi/actions/workflows/qualification.yml) for the exact commit.
+
 ## Hands-on testing on physical hardware
 
 The developer tests Listi on a ThinkPad X1 Carbon (6th Gen) running Haiku R1/beta6 directly on the hardware, not in a VM. Add one row per hands-on test. No individual result has been supplied yet. Use **Passed**, **Failed** or **Not tested** once the status is known; an unreported test is not necessarily untested.
