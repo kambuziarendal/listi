@@ -103,7 +103,7 @@ def run():
         print("TEST", name, flush=True)
         inputs = objects
         if name == "virtual-operation-faults":
-            inputs = [SRC / "VirtualOperation.cpp", SRC / "VirtualFile.cpp"]
+            inputs = [SRC / "VirtualOperation.cpp", SRC / "VirtualFile.cpp", SRC / "Sha256.cpp"]
         binary = OUTPUT / name
         subprocess.run([
             *compiler, *shlex.split(config["flags"]), ROOT / "tests" / f"{name}.cpp",

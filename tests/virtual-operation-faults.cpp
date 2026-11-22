@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Compile on POSIX: c++ -std=c++17 -Isrc tests/virtual-operation-faults.cpp
-// src/VirtualOperation.cpp src/VirtualFile.cpp -o /tmp/listi-faults
+// src/VirtualOperation.cpp src/VirtualFile.cpp src/Sha256.cpp -o /tmp/listi-faults
 // Real staging/dispatch code, deterministic fake network commit failures.
 #include "FileOperation.h"
 #include "VirtualFile.h"
@@ -11,6 +11,7 @@
 namespace {
 struct Remote { std::string data; int64_t modified = 1; };
 std::map<std::string, Remote> files;
+bool corruptUpload = false, denyReadback = false;
 bool truncateUpload = false, omitStageSize = false;
 bool failCommit = false, failRollback = false, failPartCleanup = false,
      failBackupCleanup = false, cancelAfterBackup = false, cancelled = false,
@@ -51,12 +52,15 @@ std::vector<FileEntry> ListNetwork(const Location &l, const TransferControl &c) 
   return out;
 }
 void ReadNetwork(const Location &l, const DataSink &sink, const TransferControl &c) {
-  c.Check(); auto &data = files.at(l.URL()).data;
+  c.Check();
+  if (denyReadback && suffix(l.URL(), ".part")) throw std::runtime_error("readback denied");
+  auto &data = files.at(l.URL()).data;
   sink(data.data(), data.size()); c.Tick(data.size());
 }
 void UploadNetwork(const std::string &local, const Location &l, const TransferControl &c) {
   std::ifstream stream(local);
   std::string data(std::istreambuf_iterator<char>(stream), {});
+  if (corruptUpload && !data.empty()) data.front() ^= 1;
   files[l.URL()] = {truncateUpload ? data.substr(0, data.size() / 2) : data, 1};
   if (mutateDestination) files[destination] = {"concurrent edit", 2};
   c.Tick(data.size());
@@ -99,7 +103,7 @@ int main() {
     std::cout << (ok ? "PASS " : "FAIL ") << label << '\n';
   };
   auto reset = [&] {
-    truncateUpload = omitStageSize = false;
+    corruptUpload = denyReadback = truncateUpload = omitStageSize = false;
     files = {{destination, {"old contents", 1}}}; done = 0;
     failCommit = failRollback = failPartCleanup = failBackupCleanup = false;
     cancelAfterBackup = cancelled = mutateDestination = loseBackupReply = loseCommitReply = false;
@@ -118,7 +122,12 @@ int main() {
   hooks.fileDone = [&](const std::string &, const std::string &) { ++done; };
   reset(); auto r = RunVirtual(job, hooks);
   check(r.completed == 1 && r.errors.empty() && done == 1 &&
-        files.size() == 1 && files.at(destination).data == "new contents",
+        files.size() == 1 && files.at(destination).data == "new contents" &&
+        r.outcomes.size() == 1 && r.outcomes.front().upload &&
+        r.outcomes.front().upload->bytesWritten == 12 &&
+        r.outcomes.front().upload->destinationSizeChecked &&
+        r.outcomes.front().upload->contentVerified &&
+        r.outcomes.front().upload->publication == Publication::Published,
         "successful replacement commits once and removes its backup");
   reset(); truncateUpload = true; r = RunVirtual(job, hooks);
   check(!r.completed && !done && !r.errors.empty() && files.size() == 1 &&
@@ -132,6 +141,18 @@ int main() {
   check(!r.completed && !done && !r.errors.empty() && files.size() == 1 &&
         files.at(destination).data == "old contents",
         "short upload with no server size cannot replace the original");
+  for (bool knownSize : {false, true}) {
+    reset(); corruptUpload = true; omitStageSize = !knownSize; r = RunVirtual(job, hooks);
+    check(!r.completed && !done && !r.errors.empty() && files.size() == 1 &&
+          files.at(destination).data == "old contents",
+          "same-length corruption cannot replace the original");
+  }
+  reset(); denyReadback = true; r = RunVirtual(job, hooks);
+  check(!r.completed && !done && !r.errors.empty() && files.size() == 1 &&
+        files.at(destination).data == "old contents", "unreadable stage cannot publish");
+  denyReadback = false; r = RunVirtual(job, hooks);
+  check(r.completed == 1 && done == 1 && files.at(destination).data == "new contents",
+        "retry after failed verification succeeds");
   reset(); loseBackupReply = true; r = RunVirtual(job, hooks);
   check(!r.completed && !done && !r.errors.empty() && files.size()==1 &&
         files.at(destination).data=="old contents",

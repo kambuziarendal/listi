@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "FileOperation.h"
+#include "Sha256.h"
 #include "VirtualFile.h"
 #include <atomic>
 #include <cerrno>
@@ -139,12 +140,14 @@ struct Runner {
             }};
   }
   uint64_t Stage(const std::string &src, const FileEntry &expected, TempFile &temp,
-             const TransferControl &control) {
+             const TransferControl &control, Sha256 *digest = nullptr) {
     uint64_t bytes = 0;
     ReadFile(
         src,
         [&](const char *data, size_t size) {
           temp.Write(data, size);
+          if (digest)
+            digest->Update(data, size);
           bytes += size;
         },
         control);
@@ -281,7 +284,11 @@ struct Runner {
     if (exists && !Replace(dst))
       return;
     TempFile temp(LocationLeaf(dst));
-    const auto stagedBytes = Stage(src, source, temp, Control(src, false));
+    Sha256 expected;
+    const auto stagedBytes = Stage(src, source, temp, Control(src, false), &expected);
+    result.outcomes.push_back({src, dst, "unprocessed", "", UploadVerification{}});
+    auto &entry = result.outcomes.back();
+    auto &receipt = *entry.upload;
     auto staged = ChildLocation(ParentLocation(dst), Token() + ".part"),
          backup = ChildLocation(ParentLocation(dst), Token() + ".previous");
     bool stagedExists = false, backupExists = false, committed = false,
@@ -292,22 +299,25 @@ struct Runner {
         throw std::runtime_error("Temporary transfer name collision");
       stagedExists = true;
       UploadFile(temp.path, staged, control);
+      receipt.bytesWritten = stagedBytes;
       control.Check();
       if (!StatFile(staged, check, control) || check.directory || check.link ||
           (check.sizeKnown && (check.size < 0 || uint64_t(check.size) != stagedBytes)))
         throw std::runtime_error(
             "Uploaded file is missing or incomplete; destination was not replaced");
-      if (!check.sizeKnown) {
-        uint64_t received = 0;
-        ReadFile(staged, [&](const char *, size_t n) {
-          if (n > stagedBytes - received)
-            throw std::runtime_error("Uploaded file is larger than the source");
-          received += n;
-        }, Control(src, false));
-        if (received != stagedBytes)
-          throw std::runtime_error(
-              "Uploaded file is incomplete; destination was not replaced");
-      }
+      receipt.destinationSizeChecked = check.sizeKnown;
+      uint64_t received = 0;
+      Sha256 actual;
+      ReadFile(staged, [&](const char *data, size_t n) {
+        if (n > stagedBytes - received)
+          throw std::runtime_error("Uploaded file is larger than the source");
+        actual.Update(data, n);
+        received += n;
+      }, Control(src, false));
+      if (received != stagedBytes || actual.Finish() != expected.Finish())
+        throw std::runtime_error(
+            "Uploaded content differs from the source; destination was not replaced.");
+      receipt.contentVerified = true;
       bool now = StatFile(dst, check, control);
       if (now != exists || (now && !Same(target, check)))
         throw std::runtime_error(
@@ -320,9 +330,13 @@ struct Runner {
       }
       control.Check();
       commitAttempted = true;
+      receipt.publication = Publication::Unknown;
       RenameFile(staged, dst, control);
       stagedExists = false;
       committed = true;
+      receipt.publication = Publication::Published;
+      entry.status = "completed";
+      entry.detail = "Upload content verified.";
       if (backupExists) {
         RemoveFile(backup, false, {});
         backupExists = false;
@@ -348,6 +362,11 @@ struct Runner {
           }
         } catch (...) {
         }
+      entry.status = committed ? "partial" : commitAttempted ? "outcome unknown" : "source-retained";
+      if (stagedExists)
+        receipt.recoveryPaths.push_back(staged);
+      if (backupExists)
+        receipt.recoveryPaths.push_back(backup);
       if (backupExists || stagedExists || (commitAttempted && !committed)) {
         std::string message = committed ? "New file committed; cleanup failed. "
                                         : "Transfer interrupted. ";

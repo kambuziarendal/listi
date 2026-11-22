@@ -18,6 +18,13 @@ def fire(mode):
   if state['mode']==mode and not state['triggered']:
    state['triggered']=True;print('INJECT',mode,flush=True);return True
  return False
+def corrupt_stage():
+ if state['mode']!='corrupt-stage':return
+ parts=list(root.glob('*.part'))
+ if len(parts)!=1 or not parts[0].stat().st_size:return
+ if fire('corrupt-stage'):
+  with parts[0].open('r+b') as stream:
+   first=stream.read(1);stream.seek(0);stream.write(bytes([first[0]^1]))
 def cut(sock):
  try:sock.shutdown(socket.SHUT_RDWR)
  except OSError:pass
@@ -58,6 +65,7 @@ def hook(command,fn):
 def io_hook(kind):
  def run(old,cid,srv,packet):
   request=(smb2.SMB2Read if kind=='download' else smb2.SMB2Write)(packet['Data'])
+  if kind=='download':corrupt_stage()
   result=old(cid,srv,packet)
   if request['Offset']>=65536 and fire(kind):disconnect_smb()
   return result
@@ -101,6 +109,9 @@ class DTP(DTPHandler):
   return result
 class FTP(FTPHandler):
  dtp_handler=DTP;use_sendfile=False
+ def ftp_RETR(self,path):
+  if path.endswith('.part'):corrupt_stage()
+  return super().ftp_RETR(path)
  def ftp_RNTO(self,path):
   source=self._rnfr or ''
   if source.endswith('.part') and fire('publish-before'):self.close();return
@@ -144,6 +155,7 @@ class SFTP(paramiko.SFTPServerInterface):
    fd=os.open(self.local(path),flags,0o600);f=os.fdopen(fd,'r+b' if flags&os.O_RDWR else 'wb' if flags&os.O_WRONLY else 'rb');h=paramiko.SFTPHandle(flags);h.readfile=f;h.writefile=f
    read=h.read;write=h.write
    def interrupted_read(offset,length):
+    if path.endswith('.part'):corrupt_stage()
     if offset>=65536 and fire('download'):self.transport.close();return paramiko.SFTP_FAILURE
     return read(offset,min(length,65536))
    def interrupted_write(offset,data):

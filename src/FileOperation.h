@@ -83,8 +83,19 @@ struct Hooks {
   std::function<void(const std::string &, const std::string &)> fileDone;
   std::function<void(const std::string &, const std::string &)> fileFailed;
 };
+enum class Publication { NotAttempted, Unknown, Published };
+struct UploadVerification {
+  // Accepted upload length, not a count of unacknowledged partial writes.
+  std::optional<uint64_t> bytesWritten;
+  bool destinationSizeChecked = false;
+  bool contentVerified = false;
+  Publication publication = Publication::NotAttempted;
+  bool sourceRetained = true; // Network uploads are copies, never deletions.
+  std::vector<std::string> recoveryPaths;
+};
 struct EntryOutcome {
   std::string source, destination, status, detail;
+  std::optional<UploadVerification> upload;
 };
 struct Result {
   int completed = 0, skipped = 0;
