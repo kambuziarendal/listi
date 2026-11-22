@@ -44,6 +44,9 @@
 #include <unistd.h>
 
 namespace {
+constexpr uint32 kRefreshDirectory = 'rdir';
+constexpr bigtime_t kRefreshInterval = 250000;
+
 bool ColumnEntryUnchanged(const BMessage &action) {
   const char *path = action.GetString("clickedPath", nullptr);
   if (!path)
@@ -537,6 +540,7 @@ void Pane::UpdateNavigation() {
 }
 void Pane::StartNavigation(const std::string &request, int target, bool trash) {
   stop_watching(this);
+  directoryRefreshPending = false;
   mediaReadSuspended = false;
   reveal = {};
   columnAction.MakeEmpty();
@@ -583,6 +587,23 @@ void Pane::StartNavigation(const std::string &request, int target, bool trash) {
     failed.AddString("error",
                      "Cannot start directory reader. Reload to try again.");
     MessageReceived(&failed);
+  }
+}
+void Pane::ScheduleDirectoryRefresh() {
+  if (mediaReadSuspended)
+    return;
+  directoryRefreshPending = true;
+  // Arm once per burst rather than postponing on every event: a long
+  // transfer should still show newly published files as it runs.
+  if (!directoryRefreshTimer) {
+    BMessage refresh(kRefreshDirectory);
+    directoryRefreshTimer.reset(new BMessageRunner(BMessenger(this),
+                                                    &refresh, kRefreshInterval, 1));
+    if (directoryRefreshTimer->InitCheck() != B_OK) {
+      directoryRefreshTimer.reset();
+      directoryRefreshPending = false;
+      Reload();
+    }
   }
 }
 void Pane::Reload() {
@@ -743,7 +764,18 @@ void Pane::MessageReceived(BMessage *m) {
       progressTimer.reset();
     break;
   }
+  case kRefreshDirectory:
+    directoryRefreshTimer.reset();
+    if (directoryRefreshPending) {
+      directoryRefreshPending = false;
+      Reload();
+    }
+    break;
   case kFileProgress: {
+    if (const char *destination = m->GetString("destination", nullptr)) {
+      if (Listi::ParentLocation(destination) == path.String())
+        ScheduleDirectoryRefresh();
+    }
     std::string file = m->GetString("path", "");
     auto &transfer = transfers[file];
     transfer.state = m->GetInt32("state", 0);
@@ -771,6 +803,7 @@ void Pane::MessageReceived(BMessage *m) {
   case kJobDone:
     if (m->GetBool("beforeStart", false))
       break;
+    directoryRefreshPending = false;
     for (auto &transfer : transfers)
       if (transfer.second.state == 1) {
         transfer.second.state = 3;
@@ -1168,8 +1201,7 @@ void Pane::MessageReceived(BMessage *m) {
     break;
   }
   case B_NODE_MONITOR:
-    if (!mediaReadSuspended)
-      Reload();
+    ScheduleDirectoryRefresh();
     break;
   case B_COLORS_UPDATED:
     Apply(prefs);

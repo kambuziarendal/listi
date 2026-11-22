@@ -154,6 +154,9 @@ private:
   bool mediaReadSuspended = false;
   std::shared_ptr<struct DirectoryScanDelivery> scanDelivery;
   std::unique_ptr<BMessageRunner> scanTimer;
+  std::unique_ptr<BMessageRunner> directoryRefreshTimer;
+  bool directoryRefreshPending = false;
+  void ScheduleDirectoryRefresh();
   std::shared_ptr<std::atomic<int64>> generation;
   int64 serial = 0;
   bool scanning = false, refreshPending = false;

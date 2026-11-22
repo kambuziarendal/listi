@@ -541,12 +541,8 @@ public:
       break;
     }
     case kFileProgress:
-      for (auto p : panes) {
+      for (auto p : panes)
         p->MessageReceived(m);
-        if (m->HasString("destination") &&
-            Listi::ParentLocation(m->GetString("destination", "")) == p->Path())
-          p->Reload();
-      }
       break;
     case kQueueWake:
       for (auto &done : queue.TakeEvents()) {
