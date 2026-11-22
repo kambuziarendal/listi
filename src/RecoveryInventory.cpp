@@ -81,6 +81,8 @@ void IdentifyParent(BMessage &message, const std::string &entry) {
 }
 } // namespace
 
+RecoveryRecord::~RecoveryRecord() = default;
+
 void RecoveryRecord::Reserve(const std::string &directory) {
   if (lstat(directory.c_str(), &inventoryIdentity) || !S_ISDIR(inventoryIdentity.st_mode) ||
       (inventoryIdentity.st_mode & 0077) || inventoryIdentity.st_uid != geteuid())
@@ -95,17 +97,17 @@ void RecoveryRecord::Reserve(const std::string &directory) {
 }
 
 void RecoveryRecord::Save() {
-  SaveMessageStore(path, message, &identity, &identity, &inventoryIdentity);
+  SaveMessageStore(path, *message, &identity, &identity, &inventoryIdentity);
 }
 
 RecoveryRecord::RecoveryRecord(const std::string &kind, const std::string &entry,
                                const struct stat &expected,
                                const std::string &inventory)
-    : message(kRecovery), stage(entry) {
-  Field(message.AddString("kind", kind.c_str()));
-  Field(message.AddString("path", entry.c_str()));
-  Identify(message, expected);
-  IdentifyParent(message, entry);
+    : message(std::make_unique<BMessage>(kRecovery)), stage(entry) {
+  Field(message->AddString("kind", kind.c_str()));
+  Field(message->AddString("path", entry.c_str()));
+  Identify(*message, expected);
+  IdentifyParent(*message, entry);
   Reserve(Directory(inventory, true));
   try { Save(); }
   catch (...) { Retire(); throw; }
@@ -114,31 +116,31 @@ RecoveryRecord::RecoveryRecord(const std::string &kind, const std::string &entry
 RecoveryRecord::RecoveryRecord(const std::string &kind, const std::string &folder,
                                const std::string &prefix, const std::string &source,
                                const std::string &destination, const std::string &inventory)
-    : message(kRecovery) {
+    : message(std::make_unique<BMessage>(kRecovery)) {
   Reserve(Directory(inventory, true));
   const auto id = path.substr(path.rfind('-') + 1);
   stage = folder + (folder.back() == '/' ? "" : "/") + prefix + id;
   if (kind == "upload") {
     backup = stage + ".previous";
     stage += ".part";
-    Field(message.AddString("backup", backup.c_str()));
+    Field(message->AddString("backup", backup.c_str()));
   } else {
-    IdentifyParent(message, stage);
+    IdentifyParent(*message, stage);
   }
-  Field(message.AddString("kind", kind.c_str()));
-  Field(message.AddString("path", stage.c_str()));
-  Field(message.AddString("source", source.c_str()));
-  Field(message.AddString("destination", destination.c_str()));
-  Field(message.AddInt32("phase", static_cast<int32>(phase)));
+  Field(message->AddString("kind", kind.c_str()));
+  Field(message->AddString("path", stage.c_str()));
+  Field(message->AddString("source", source.c_str()));
+  Field(message->AddString("destination", destination.c_str()));
+  Field(message->AddInt32("phase", static_cast<int32>(phase)));
   if (kind == "copy") {
     struct stat st;
     if (!lstat(source.c_str(), &st)) {
-      Field(message.AddInt64("source_device", st.st_dev));
-      Field(message.AddInt64("source_node", st.st_ino));
+      Field(message->AddInt64("source_device", st.st_dev));
+      Field(message->AddInt64("source_node", st.st_ino));
     }
     if (!lstat(destination.c_str(), &st)) {
-      Field(message.AddInt64("original_device", st.st_dev));
-      Field(message.AddInt64("original_node", st.st_ino));
+      Field(message->AddInt64("original_device", st.st_dev));
+      Field(message->AddInt64("original_node", st.st_ino));
     }
   }
   try { Save(); }
@@ -149,8 +151,8 @@ void RecoveryRecord::Advance(RecoveryPhase next, const struct stat *bound) {
   if (int(next) != int(phase) + 1)
     throw std::logic_error("Invalid Listi recovery transition.");
   if (bound)
-    Identify(message, *bound);
-  Field(message.SetInt32("phase", static_cast<int32>(next)));
+    Identify(*message, *bound);
+  Field(message->SetInt32("phase", static_cast<int32>(next)));
   Save();
   phase = next;
 }
@@ -196,7 +198,7 @@ std::string ReviewRecovery(const std::string &inventory) {
       const std::string path = message.GetString("path", "");
       const bool remote = kind == "upload";
       if (message.what != kRecovery ||
-          (kind != "archive" && kind != "rename" && kind != "copy" && kind != "codec" && !remote) ||
+          (kind != "archive" && kind != "rename" && kind != "copy" && kind != "codec" && kind != "scratch" && !remote) ||
           path.empty() || (!remote && path[0] != '/'))
         throw std::runtime_error("Invalid record.");
       struct stat st, parent;
@@ -210,7 +212,7 @@ std::string ReviewRecovery(const std::string &inventory) {
       const int phase = message.GetInt32("phase", -1);
       review += kind == "archive" ? "Archive staging: " : kind == "rename" ?
           "Bulk rename journal: " : remote ? "Remote upload: " :
-          kind == "codec" ? "Codec scratch: " : "File copy: ";
+          kind == "codec" ? "Codec scratch: " : kind == "scratch" ? "Local transfer staging: " : "File copy: ";
       review += Printable(path);
       if (phase >= 0) {
         review += "\nSource: " + Printable(message.GetString("source", "")) +

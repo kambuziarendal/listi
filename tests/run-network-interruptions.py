@@ -35,7 +35,9 @@ for protocol in protocols:
   actual=(share/'input').read_bytes() if (share/'input').exists() else None
   previous=[x.read_bytes() for x in share.glob('*.previous')]
   ok=p.returncode==0 and (mode in ('none','cancel-download') or state['triggered']) and actual==wanted
-  if mode=='corrupt-stage':ok=ok and set(files)=={'input','hello','download'} and 'Uploaded content differs' in p.stdout
+  if mode=='corrupt-stage':
+   extras=set(files)-{'input','hello','download'}
+   ok=ok and len(extras)==1 and next(iter(extras)).endswith('.part') and 'Uploaded content differs' in p.stdout and '.part' in p.stdout
   if mode in ('publish-reply','cleanup'):ok=ok and previous==[b'old contents'] and '.previous' in p.stdout
   result=dict(protocol=protocol,mode=mode,ok=ok,exit=p.returncode,fixture=state,files=files,seconds=round(time.monotonic()-start,3));results.append(result)
   (r/('network-results'+os.getenv('NET_RUN','')+'.json')).write_text(json.dumps(results,indent=2))

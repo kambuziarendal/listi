@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 OUTPUT = ROOT / "build/native-audit-tests"
 REQUIRED = """
-file-operation-faults worker-lifecycle virtual-operation-faults archive-read-scope
+file-operation-faults copy-crash-recovery worker-lifecycle virtual-operation-faults archive-read-scope
 operation-queue removable-copy archive-move-scaling directory-delivery search-filters
 archive-local-move-faults archive-local-move same-file-type folder-compare
 archive-editor-faults archive-editor archive-move-faults archive-move
@@ -37,6 +37,7 @@ WRAPS = {
     "archive-editor-faults": ['rename', 'renameat', 'fsync'],
     "archive-local-move-faults": ['rename', 'unlink'],
     "file-operation-faults": ['openat', 'write', 'unlinkat', 'stat', 'close', 'fsync', '_ZN5BNode10RemoveAttrEPKc'],
+    "copy-crash-recovery": ["openat", "renameat", "unlinkat"],
     "message-store-faults": ["mkstemp", "write", "close", "fsync", "renameat"],
     "inspector-document": ['fsync'],
     "bulk-rename": ['renameat', 'fstatat'],

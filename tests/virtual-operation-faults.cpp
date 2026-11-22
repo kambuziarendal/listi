@@ -8,6 +8,29 @@
 #include <iostream>
 #include <map>
 #include <unistd.h>
+// The portable transport fixture has no Haiku BMessage or settings store.
+// Native tests link the real durable inventory; only its storage is mocked here.
+#ifndef __HAIKU__
+#include "RecoveryInventory.h"
+class BMessage {};
+namespace Listi {
+RecoveryRecord::RecoveryRecord(const std::string &kind, const std::string &folder,
+    const std::string &prefix, const std::string &, const std::string &,
+    const std::string &) {
+  static unsigned sequence = 0;
+  const auto name = folder + "/" + prefix + std::to_string(++sequence);
+  stage = kind == "upload" ? name + ".part" : name;
+  backup = name + ".previous";
+}
+RecoveryRecord::~RecoveryRecord() = default;
+void RecoveryRecord::Advance(RecoveryPhase next, const struct stat *) {
+  if (int(next) != int(phase) + 1)
+    throw std::logic_error("Unexpected journal transition");
+  phase = next;
+}
+void RecoveryRecord::Retire() {}
+}
+#endif
 namespace {
 struct Remote { std::string data; int64_t modified = 1; };
 std::map<std::string, Remote> files;
@@ -150,7 +173,7 @@ int main() {
         "staging rejects actual bytes beyond the declared source size before upload");
   growSourceOnRead = false;
   reset(); truncateUpload = true; r = RunVirtual(job, hooks);
-  check(!r.completed && !done && !r.errors.empty() && files.size() == 1 &&
+  check(!r.completed && !done && !r.errors.empty() && files.size() == 2 && has(".part") && errorHas(r, ".part") &&
         files.at(destination).data == "old contents",
         "acknowledged short upload cannot replace the original");
   reset(); omitStageSize = true; r = RunVirtual(job, hooks);
@@ -158,23 +181,23 @@ int main() {
         files.at(destination).data == "new contents",
         "valid upload with no server size is verified by reading back the stage");
   reset(); omitStageSize = truncateUpload = true; r = RunVirtual(job, hooks);
-  check(!r.completed && !done && !r.errors.empty() && files.size() == 1 &&
+  check(!r.completed && !done && !r.errors.empty() && files.size() == 2 && has(".part") && errorHas(r, ".part") &&
         files.at(destination).data == "old contents",
         "short upload with no server size cannot replace the original");
   for (bool knownSize : {false, true}) {
     reset(); corruptUpload = true; omitStageSize = !knownSize; r = RunVirtual(job, hooks);
-    check(!r.completed && !done && !r.errors.empty() && files.size() == 1 &&
+    check(!r.completed && !done && !r.errors.empty() && files.size() == 2 && has(".part") && errorHas(r, ".part") &&
           files.at(destination).data == "old contents",
           "same-length corruption cannot replace the original");
   }
   reset(); denyReadback = true; r = RunVirtual(job, hooks);
-  check(!r.completed && !done && !r.errors.empty() && files.size() == 1 &&
+  check(!r.completed && !done && !r.errors.empty() && files.size() == 2 && has(".part") && errorHas(r, ".part") &&
         files.at(destination).data == "old contents", "unreadable stage cannot publish");
   denyReadback = false; r = RunVirtual(job, hooks);
   check(r.completed == 1 && done == 1 && files.at(destination).data == "new contents",
         "retry after failed verification succeeds");
   reset(); cancelReadback = true; r = RunVirtual(job, hooks);
-  check(r.cancelled && !r.completed && !done && files.size() == 1 &&
+  check(r.cancelled && !r.completed && !done && files.size() == 2 && has(".part") &&
         files.at(destination).data == "old contents" && r.outcomes.front().upload &&
         !r.outcomes.front().upload->contentVerified &&
         r.outcomes.front().upload->publication == Publication::NotAttempted,

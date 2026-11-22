@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #pragma once
-#include <Message.h>
+#include <memory>
+class BMessage;
 #include <string>
 #include <sys/stat.h>
 
@@ -15,6 +16,7 @@ public:
   RecoveryRecord(const std::string &kind, const std::string &folder,
                  const std::string &prefix, const std::string &source,
                  const std::string &destination, const std::string &inventory = {});
+  ~RecoveryRecord();
   RecoveryRecord(const RecoveryRecord &) = delete;
   const std::string &Stage() const { return stage; }
   const std::string &Backup() const { return backup; }
@@ -23,7 +25,7 @@ public:
 private:
   void Reserve(const std::string &directory);
   void Save();
-  BMessage message;
+  std::unique_ptr<BMessage> message;
   std::string path, stage, backup;
   struct stat identity{}, inventoryIdentity{};
   RecoveryPhase phase = RecoveryPhase::Intent;

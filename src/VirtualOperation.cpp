@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstring>
 #include <exception>
+#include <filesystem>
 #include <fcntl.h>
 #include <limits>
 #include <sys/stat.h>
@@ -17,26 +18,44 @@
 namespace Listi {
 namespace {
 struct TempFile {
+  RecoveryRecord record;
   std::string folder, path;
-  int fd = -1;
-  explicit TempFile(const std::string &name) {
-    char pattern[] = "/tmp/Listi-transfer-XXXXXX";
-    char *p = mkdtemp(pattern);
-    if (!p)
-      throw std::runtime_error(strerror(errno));
-    folder = p;
-    path = ChildLocation(folder, name);
-    fd = open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
-    if (fd < 0) {
-      rmdir(folder.c_str());
-      throw std::runtime_error(strerror(errno));
+  struct stat directory{}, file{};
+  int fd = -1, parent = -1;
+  TempFile(const std::string &name, const std::string &source, const std::string &target)
+      : record("scratch", std::filesystem::canonical("/tmp"), "Listi-transfer-", source, target),
+        folder(record.Stage()), path(ChildLocation(folder, name)) {
+    if (mkdir(folder.c_str(), 0700))
+      throw std::runtime_error("Cannot create private transfer staging.");
+    parent = open(folder.c_str(), O_DIRECTORY | O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    try {
+      if (parent < 0 || fstat(parent, &directory))
+        throw std::runtime_error("Cannot open private transfer staging.");
+      record.Advance(RecoveryPhase::Writing, &directory);
+      fd = openat(parent, name.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+      if (fd < 0 || fstat(fd, &file))
+        throw std::runtime_error("Cannot create transfer staging file.");
+    } catch (...) {
+      Cleanup();
+      throw;
     }
   }
-  ~TempFile() {
+  ~TempFile() { Cleanup(); }
+  void Cleanup() noexcept {
     if (fd >= 0)
       close(fd);
-    unlink(path.c_str());
-    rmdir(folder.c_str());
+    if (parent < 0)
+      return;
+    struct stat current;
+    const auto leaf = std::filesystem::path(path).filename();
+    if (!fstatat(parent, leaf.c_str(), &current, AT_SYMLINK_NOFOLLOW) &&
+        current.st_dev == file.st_dev && current.st_ino == file.st_ino)
+      unlinkat(parent, leaf.c_str(), 0);
+    if (!lstat(folder.c_str(), &current) && current.st_dev == directory.st_dev &&
+        current.st_ino == directory.st_ino && !rmdir(folder.c_str())) {
+      try { record.Retire(); } catch (...) { /* Read-only review still available. */ }
+    }
+    close(parent);
   }
   void Write(const char *p, size_t n) {
     while (n) {
@@ -69,6 +88,11 @@ struct TempFile {
     fd = -1;
   }
 };
+std::string RemoteDigest(const std::string &path, const TransferControl &control) {
+  Sha256 hash;
+  ReadFile(path, [&](const char *data, size_t count) { hash.Update(data, count); }, control);
+  return hash.Finish();
+}
 bool Same(const FileEntry &a, const FileEntry &b) {
   return a.directory == b.directory && a.link == b.link && a.size == b.size &&
          a.sizeKnown == b.sizeKnown && a.modified == b.modified;
@@ -252,7 +276,7 @@ struct Runner {
       struct stat before {};
       if (exists && lstat(dst.c_str(), &before))
         throw std::runtime_error("Destination changed before staging.");
-      TempFile temp(LocationLeaf(dst));
+      TempFile temp(LocationLeaf(dst), src, dst);
       Stage(src, source, temp, control);
       control.Check();
       struct stat after {};
@@ -294,7 +318,7 @@ struct Runner {
           "regular folder to edit them.");
     if (exists && !Replace(dst))
       return;
-    TempFile temp(LocationLeaf(dst));
+    TempFile temp(LocationLeaf(dst), src, dst);
     Sha256 expected;
     const auto stagedBytes = Stage(src, source, temp, Control(src, false), &expected);
     result.outcomes.push_back({src, dst, "unprocessed", "", UploadVerification{}});
@@ -303,12 +327,18 @@ struct Runner {
     RecoveryRecord recovery("upload", ParentLocation(dst), ".listi-", src, dst);
     const auto &staged = recovery.Stage();
     const auto &backup = recovery.Backup();
+    const auto expectedDigest = expected.Finish();
+    std::string originalDigest;
     bool stagedExists = false, backupExists = false, committed = false,
          commitAttempted = false;
     try {
       FileEntry check;
       if (StatFile(staged, check, control) || StatFile(backup, check, control))
         throw std::runtime_error("Temporary transfer name collision");
+      // Record the bytes an acknowledged backup must still contain before
+      // rollback or cleanup. A name, timestamp and size alone are not evidence.
+      if (exists)
+        originalDigest = RemoteDigest(dst, control);
       recovery.Advance(RecoveryPhase::Writing);
       stagedExists = true;
       UploadFile(temp.path, staged, control);
@@ -327,7 +357,7 @@ struct Runner {
         actual.Update(data, n);
         received += n;
       }, Control(src, false));
-      if (received != stagedBytes || actual.Finish() != expected.Finish())
+      if (received != stagedBytes || actual.Finish() != expectedDigest)
         throw std::runtime_error(
             "Uploaded content differs from the source; destination was not replaced.");
       receipt.contentVerified = true;
@@ -354,6 +384,8 @@ struct Runner {
       entry.status = "completed";
       entry.detail = "Upload content verified.";
       if (backupExists) {
+        if (RemoteDigest(backup, control) != originalDigest)
+          throw std::runtime_error("Original backup changed; retained for manual inspection.");
         RemoveFile(backup, false, {});
         backupExists = false;
       }
@@ -364,8 +396,13 @@ struct Runner {
       auto failure = std::current_exception();
       if (stagedExists)
         try {
-          RemoveFile(staged, false, {});
-          stagedExists = false;
+          FileEntry remote;
+          if (!StatFile(staged, remote, {}))
+            stagedExists = false;
+          else if (receipt.contentVerified && RemoteDigest(staged, {}) == expectedDigest) {
+            RemoveFile(staged, false, {});
+            stagedExists = false;
+          }
         } catch (...) {
         }
       if (backupExists)
@@ -373,7 +410,8 @@ struct Runner {
           FileEntry check, saved;
           if (!StatFile(backup, saved, {})) {
             backupExists = false;
-          } else if (Same(target, saved) && !StatFile(dst, check, {})) {
+          } else if (Same(target, saved) && RemoteDigest(backup, {}) == originalDigest &&
+                     !StatFile(dst, check, {})) {
             RenameFile(backup, dst, {});
             backupExists = false;
           }
@@ -398,6 +436,7 @@ struct Runner {
         try {
           std::rethrow_exception(failure);
         } catch (const Cancelled &) {
+          result.cancelled = true;
           message += "Operation was cancelled.";
         } catch (const std::exception &e) {
           message += e.what();
