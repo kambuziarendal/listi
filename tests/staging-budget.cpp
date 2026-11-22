@@ -77,9 +77,9 @@ int main() try {
   if (!written || uint64_t(info.free_blocks) + 1 < containerReserve ||
       finalAttempt >= 0 || errno != ENOSPC)
     throw std::runtime_error("The combined output did not stop at the shared reserve.");
-  close(a);
-  close(b);
 
+  // Keep both stages open: closing them can release preallocated BFS extents
+  // and remove the low-space condition before the child even starts.
   // A separate child owns the next growth. Use the real codec process
   // monitor with a disposable writer and verify that it refuses exhausted
   // scratch, not just the data stream controlled by Listi.
@@ -91,6 +91,8 @@ int main() try {
         {"/bin/dd", "if=/dev/zero", "of=extra", "bs=4096", "count=1024"},
         -1, {});
   } catch (const std::exception &error) { message = error.what(); }
+  close(a);
+  close(b);
   std::ifstream input(old);
   std::string original;
   input >> original;
