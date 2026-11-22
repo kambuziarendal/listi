@@ -152,6 +152,18 @@ void RecoveryRecord::Advance(RecoveryPhase next, const struct stat *bound) {
     throw std::logic_error("Invalid Listi recovery transition.");
   if (bound)
     Identify(*message, *bound);
+  SavePhase(next);
+}
+
+void RecoveryRecord::PrepareCopyPublication() {
+  if (phase != RecoveryPhase::Writing || std::string(message->GetString("kind", "")) != "copy")
+    throw std::logic_error("Invalid Listi copy publication transition.");
+  // No namespace operation separates Ready from Publishing in a local copy.
+  // Until this save succeeds the durable Writing state still excludes rename.
+  SavePhase(RecoveryPhase::Publishing);
+}
+
+void RecoveryRecord::SavePhase(RecoveryPhase next) {
   Field(message->SetInt32("phase", static_cast<int32>(next)));
   Save();
   phase = next;

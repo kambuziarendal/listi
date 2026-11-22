@@ -711,8 +711,7 @@ struct Runner {
           namedParent.st_dev != parentIdentity.st_dev ||
           namedParent.st_ino != parentIdentity.st_ino)
         throw std::runtime_error(parentPath + ": destination folder changed");
-      recovery.Advance(RecoveryPhase::Ready);
-      recovery.Advance(RecoveryPhase::Publishing);
+      recovery.PrepareCopyPublication();
       Guard();
       struct stat currentTarget;
       if (fstatat(parent.n, leaf.c_str(), &currentTarget, AT_SYMLINK_NOFOLLOW) ||
@@ -740,7 +739,8 @@ struct Runner {
             "durability after restart is unknown.");
       }
       try {
-        recovery.Advance(RecoveryPhase::Published);
+        // Publishing permits either namespace outcome. Keep it until checked
+        // retirement succeeds; a crash here must not authorize any cleanup.
         recovery.Retire();
       } catch (const std::exception &error) {
         ++mutations;
