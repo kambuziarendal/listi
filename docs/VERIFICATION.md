@@ -220,11 +220,13 @@ application is renaming entries in the same folder.
 
 ### Moving between volumes
 
-A local Move across filesystem devices must refuse the transfer without
-removing the source. Test a regular file, a directory and an archive member
-against a separately mounted disposable volume. Compare both source and
-destination contents before and after the refused job. Also exercise Copy
-between the same two volumes and Move within one volume.
+A local Move across filesystem devices copies each verified root, then retains
+the original in its source volume's Trash. Unsupported source Trash and
+interrupted transfers must leave the source untouched. Exercise regular files
+and directory trees, and separately test archive-member moves, Copy between the
+same two volumes and same-volume Move. Removable regular-file streaming can
+withdraw from blocked reads, writes and flushes. Filesystem metadata and
+directory enumeration calls do not have the same cancellation guarantee.
 
 The opt-in native test uses a writable volume distinct from `/tmp`:
 

@@ -30,6 +30,7 @@
 #include <stdexcept>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <utility>
 
 namespace Listi {
 Result RunVirtual(const Job &, const Hooks &);
@@ -495,8 +496,7 @@ struct Runner {
       Fail(src);
     struct stat before {};
     bool existed = Exists(dst, &before);
-    if (recoverableMove)
-      CheckSourceDevice(st.st_dev);
+    CheckSourceDevice(st.st_dev);
     if (existed && (deferCompletion || guardedJob->copyForArchiveMove))
       RequireSameMoveVolume(guardedJob->expectedDestination.device, before.st_dev);
     if (existed && guardedJob && guardedJob->action == Action::Duplicate)
@@ -607,7 +607,7 @@ struct Runner {
             !SameEntry(opened, st))
           throw std::runtime_error(src + ": source changed before copying");
         const bool removableSource =
-            recoverableMove && backingDevices.at(st.st_dev).removable;
+            backingDevices.at(st.st_dev).removable;
         if (removableSource || backingDevices.at(stagingIdentity.st_dev).removable) {
           Attributes(src, tmp);
           // No filename is passed to the worker: only this queue thread can
@@ -621,11 +621,6 @@ struct Runner {
             else
               Check();
           };
-          const int input = dup(in.n);
-          if (input < 0)
-            Fail(src);
-          const int stage = out.n;
-          out.n = -1;
           // If cancellation leaves a kernel call pending, suspend the
           // removable endpoint even when devfs still shows it attached.
           const auto &endpoint = backingDevices.at(
@@ -634,11 +629,9 @@ struct Runner {
                                   ? (removableSource ? ParentLocation(guardedSource)
                                                      : guardedJob->destination)
                                   : endpoint.mount;
-          WriteRemovableStagingFile(input, stage, st, checkpoint);
+          WriteRemovableStagingFile(std::exchange(in.n, -1),
+                                    std::exchange(out.n, -1), st, checkpoint);
           interruptedFolder.clear();
-          struct stat after;
-          if (fstat(in.n, &after) || !SameEntry(after, st))
-            throw std::runtime_error(src + ": source changed while copying");
         } else {
           std::vector<char> buf(131072);
           for (;;) {
