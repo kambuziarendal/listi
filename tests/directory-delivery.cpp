@@ -218,7 +218,12 @@ int main() {
  pane->Navigate(folder.c_str());
  window->Unlock();
  bool pausedDone = acquire_sem_etc(held, 1, B_RELATIVE_TIMEOUT, 5000000) == B_OK;
- auto removed = folder + "/file-159", added = folder + "/new-entry";
+ // Pane rows carry canonical paths: on Haiku /tmp is /boot/system/cache/tmp.
+ char watchedPath[PATH_MAX];
+ if (!realpath(folder.c_str(), watchedPath))
+   return 4;
+ auto removed = std::string(watchedPath) + "/file-159";
+ auto added = std::string(watchedPath) + "/new-entry";
  bool mutated = pausedDone && unlink(removed.c_str()) == 0 &&
                 bool(std::ofstream(added) << "new");
  release_sem(resume);
