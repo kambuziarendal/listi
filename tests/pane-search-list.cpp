@@ -36,8 +36,8 @@ int main() {
   BLayoutBuilder::Group<>(w, B_VERTICAL).Add(pane);
   w->Show();
   w->Lock();
-  auto await = [&](auto done) {
-    auto end = system_time() + 10000000;
+  auto await = [&](auto done, bigtime_t timeout = 10000000) {
+    auto end = system_time() + timeout;
     while (!done() && system_time() < end) {
       w->Unlock();
       snooze(25000);
@@ -47,9 +47,9 @@ int main() {
   };
   auto ready = [&] { return !pane->IsScanning() && pane->LocationValid(); };
   auto folder = [&] { return ready() && !pane->IsSearchList() && root == pane->Path(); };
-  auto matches = [&](size_t n) {
+  auto matches = [&](size_t n, bigtime_t timeout = 10000000) {
     return await([&] { return ready() && pane->IsSearchList() &&
-                               pane->MatchPattern("*.live", false) == n; });
+                               pane->MatchPattern("*.live", false) == n; }, timeout);
   };
   pane->Navigate(root.c_str());
   check(await(folder), "physical folder opens");
@@ -57,7 +57,9 @@ int main() {
   SavedSearch saved{"Live documents", {root, "name==\"*.live\"", true}, true};
   saved.WriteTo(open);
   pane->MessageReceived(&open);
-  check(matches(2), "real BFS query populates file pane with same-named originals");
+  // The first volume-wide BFS query can require cold index reads. Live changes
+  // already have a subscription and retain the shorter deadline.
+  check(matches(2, 45000000), "real BFS query populates file pane with same-named originals");
   pane->MatchPattern("*.live", true);
   const auto ids = pane->SelectedLocalIdentities();
   check(ids.count(left) && ids.count(right) && ids.size() == 2,
