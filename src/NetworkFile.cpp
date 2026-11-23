@@ -4,6 +4,7 @@
 #include "VirtualFile.h"
 #include <algorithm>
 #include <cerrno>
+#include <condition_variable>
 #include <cstdio>
 #include <cstring>
 #include <curl/curl.h>
@@ -26,17 +27,68 @@ DynamicLibrary &Curl() {
   static DynamicLibrary lib({"libcurl.so", "libcurl.so.4"});
   return lib;
 }
-// SMB contexts own their own handles, but the library also has process-wide
-// state. Let independent contexts take turns without overlapping API calls.
-std::timed_mutex smbMutex;
-std::unique_lock<std::timed_mutex> LockSMB(const TransferControl &control) {
-  std::unique_lock<std::timed_mutex> lock(smbMutex, std::defer_lock);
-  do {
-    control.Check();
-  } while (!lock.try_lock_for(std::chrono::milliseconds(10)));
-  control.Check();
-  return lock;
-}
+// Contexts own their handles, but Samba also has process-wide state. Serialize
+// API calls in arrival order so a streaming reader cannot starve browsing.
+class SMBPermit {
+public:
+  explicit SMBPermit(const TransferControl *control = nullptr) {
+    if (control)
+      control->Check();
+    std::unique_lock<std::mutex> lock(mutex);
+    previous = last;
+    if (last)
+      last->next = this;
+    else
+      first = this;
+    last = this;
+    try {
+      while (active || first != this) {
+        if (control) {
+          ready.wait_for(lock, std::chrono::milliseconds(10));
+          lock.unlock();
+          control->Check();
+          lock.lock();
+        } else {
+          ready.wait(lock);
+        }
+      }
+    } catch (...) {
+      if (!lock.owns_lock())
+        lock.lock();
+      Unlink();
+      ready.notify_all();
+      throw;
+    }
+    Unlink();
+    active = true;
+  }
+  SMBPermit(const SMBPermit &) = delete;
+  SMBPermit &operator=(const SMBPermit &) = delete;
+  ~SMBPermit() {
+    std::lock_guard<std::mutex> lock(mutex);
+    active = false;
+    ready.notify_all();
+  }
+
+private:
+  // The waiters own their queue nodes, so closing a native handle does not
+  // allocate even when it needs to wait for another context.
+  void Unlink() {
+    if (previous)
+      previous->next = next;
+    else
+      first = next;
+    if (next)
+      next->previous = previous;
+    else
+      last = previous;
+  }
+  SMBPermit *previous = nullptr, *next = nullptr;
+  static inline SMBPermit *first = nullptr, *last = nullptr;
+  static inline std::mutex mutex;
+  static inline std::condition_variable ready;
+  static inline bool active = false;
+};
 [[noreturn]] void Error(const std::string &s) {
   throw std::runtime_error(s + ": " + strerror(errno));
 }
@@ -60,7 +112,7 @@ struct SMBSession {
     if (!lib.Available())
       throw std::runtime_error(
           "Install samba4 from HaikuDepot to connect to SMB shares");
-    auto lock = LockSMB(control);
+    SMBPermit permit(&control);
     ctx = LIBCALL(lib, smbc_new_context)();
     if (!ctx)
       Error("SMB context");
@@ -84,9 +136,11 @@ struct SMBSession {
       throw;
     }
   }
+  SMBSession(const SMBSession &) = delete;
+  SMBSession &operator=(const SMBSession &) = delete;
   ~SMBSession() {
     if (ctx) {
-      std::lock_guard<std::timed_mutex> lock(smbMutex);
+      SMBPermit permit;
       LIBCALL(lib, smbc_free_context)(ctx, 1);
     }
   }
@@ -107,7 +161,7 @@ struct SMBSession {
   }
   bool Stat(const Location &l, FileEntry &e) {
     struct stat st;
-    auto lock = LockSMB(control);
+    SMBPermit permit(&control);
     if (LIBCALL(lib, smbc_getFunctionStat)(ctx)(ctx, URL(l).c_str(), &st)) {
       if (errno == ENOENT)
         return false;
@@ -123,7 +177,7 @@ struct SMBHandle {
   bool directory;
   SMBHandle(SMBSession &s, const Location &l, bool dir, int flags = 0)
       : session(s), directory(dir) {
-    auto lock = LockSMB(s.control);
+    SMBPermit permit(&s.control);
     auto url = s.URL(l);
     if (dir)
       file = LIBCALL(s.lib, smbc_getFunctionOpendir)(s.ctx)(s.ctx, url.c_str());
@@ -134,9 +188,11 @@ struct SMBHandle {
       Error(dir ? "SMB open folder" : flags == O_RDONLY ? "SMB open file"
                                                        : "SMB create staged file");
   }
+  SMBHandle(const SMBHandle &) = delete;
+  SMBHandle &operator=(const SMBHandle &) = delete;
   ~SMBHandle() {
     if (file) {
-      std::lock_guard<std::timed_mutex> lock(smbMutex);
+      SMBPermit permit;
       CloseLocked();
     }
   }
@@ -149,7 +205,7 @@ struct SMBHandle {
     return r;
   }
   void Close() {
-    auto lock = LockSMB(session.control);
+    SMBPermit permit(&session.control);
     if (CloseLocked())
       Error("SMB close");
   }
@@ -452,7 +508,7 @@ std::vector<FileEntry> ListNetwork(const Location &l,
       std::string name;
       unsigned type;
       {
-        auto lock = LockSMB(c);
+        SMBPermit permit(&c);
         errno = 0;
         auto *de =
             LIBCALL(s.lib, smbc_getFunctionReaddir)(s.ctx)(s.ctx, dir.file);
@@ -588,7 +644,7 @@ void ReadNetwork(const Location &l, const DataSink &sink,
     for (;;) {
       ssize_t n;
       {
-        auto lock = LockSMB(c);
+        SMBPermit permit(&c);
         n = LIBCALL(s.lib, smbc_getFunctionRead)(s.ctx)(s.ctx, f.file, buf,
                                                        sizeof(buf));
         if (n < 0)
@@ -636,7 +692,7 @@ void UploadNetwork(const std::string &local, const Location &l,
       while (at < n) {
         ssize_t wrote;
         {
-          auto lock = LockSMB(c);
+          SMBPermit permit(&c);
           wrote = LIBCALL(s.lib, smbc_getFunctionWrite)(s.ctx)(
               s.ctx, f.file, buf + at, n - at);
           if (wrote <= 0)
@@ -666,7 +722,7 @@ void ChangeNetwork(const Location &l, const char *action,
   std::string a = action;
   if (l.scheme == "smb") {
     SMBSession s(l, c);
-    auto lock = LockSMB(c);
+    SMBPermit permit(&c);
     int r;
     if (a == "mkdir")
       r = LIBCALL(s.lib, smbc_getFunctionMkdir)(s.ctx)(s.ctx, s.URL(l).c_str(),
