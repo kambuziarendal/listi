@@ -7,6 +7,7 @@
 #include "ShelfWindow.h"
 #include "WorkspaceActions.h"
 #include "WorkspaceEditor.h"
+#include "WindowOverview.h"
 #include <MenuItem.h>
 
 namespace {
@@ -23,6 +24,15 @@ MainWindowMenu::MainWindowMenu() : BMenuBar("menu") {
   AddSelectMenu();
   AddViewMenu();
   AddListiMenu();
+  auto *windows = new BMenu("Window");
+  AddCommand(windows, "Name window…", Listi::kNameWindow);
+  AddCommand(windows, "Use folder name", Listi::kUseFolderName);
+  windows->AddSeparatorItem();
+  AddCommand(windows, "Open windows…", Listi::kOpenWindowOverview);
+  AddItem(windows);
+  auto *help = new BMenu("Help");
+  AddCommand(help, "Layout introduction…", Listi::kShowLayoutGuide);
+  AddItem(help);
 }
 
 void MainWindowMenu::AddFilesMenu() {

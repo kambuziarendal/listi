@@ -3,6 +3,7 @@
 #include "StagingSpace.h"
 #include "AdaptiveScrollView.h"
 #include "ImagePreview.h"
+#include "WindowOverview.h"
 #include "ViewVisibility.h"
 #include "BitmapMailbox.h"
 #include "Common.h"
@@ -374,8 +375,9 @@ BBitmap *LoadPreviewBitmap(const std::string &source,
   }
 }
 void ImagePreview::OpenWindow(const std::string &path) {
-  auto window = new BWindow(BRect(120, 100, 900, 650), path.c_str(),
-                            B_TITLED_WINDOW, B_AUTO_UPDATE_SIZE_LIMITS);
+  auto window = new Listi::WorkingWindow(BRect(120, 100, 900, 650), path.c_str(),
+                                         "Preview", B_AUTO_UPDATE_SIZE_LIMITS);
+  window->Describe(path, path);
   auto inspector = new ImagePreview(true);
   inspector->ShowFile(path);
   BLayoutBuilder::Group<>(window, B_VERTICAL, 0).Add(inspector);

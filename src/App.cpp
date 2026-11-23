@@ -8,6 +8,7 @@
 #include "FileOperation.h"
 #include "InspectorEditor.h"
 #include "MainWindow.h"
+#include "WindowOverview.h"
 #include "MessageStore.h"
 #include "OpenWith.h"
 #include "PropertiesWindow.h"
@@ -66,6 +67,11 @@ public:
                                     placesError.empty(), searches, searchesError.empty());
     mainWindow = BMessenger(window);
     window->Show();
+    if (settingsError.empty() && settings.what == 'none') {
+      BMessage guide(Listi::kShowLayoutGuide);
+      guide.AddBool("firstRun", true);
+      window->PostMessage(&guide);
+    }
     if (!settingsError.empty()) {
       settingsError =
           "Could not load preferences. Changes apply only to this session; the original settings file is preserved: " +

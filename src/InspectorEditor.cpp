@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "AdaptiveScrollView.h"
 #include "InspectorEditor.h"
+#include "WindowOverview.h"
 #include "ExplicitSubmit.h"
 #include "InspectorDocument.h"
 #include "InspectorTextView.h"
@@ -137,8 +138,8 @@ class InspectorEditor : public BGroupView {
     dirty = Changed();
     if (IsEmbedded())
       location->SetText((path + (dirty ? " *" : "")).c_str());
-    else if (Window())
-      Window()->SetTitle(("Listi: " + leaf + (dirty ? " *" : "")).c_str());
+    else if (auto *host = dynamic_cast<Listi::WorkingWindow *>(Window()))
+      host->Describe("Listi: " + leaf, path, dirty);
     saveButton->SetEnabled(dirty);
     saveItem->SetEnabled(dirty);
   }
@@ -648,10 +649,10 @@ filter_result BeforeEditorDispatch::Filter(BMessage *message, BHandler **) {
   return B_DISPATCH_MESSAGE;
 }
 
-class EditorWindow : public BWindow {
+class EditorWindow : public Listi::WorkingWindow {
 public:
   EditorWindow(BWindow *owner)
-      : BWindow(BRect(110, 110, 870, 620), "Listi: Editor", B_TITLED_WINDOW,
+      : Listi::WorkingWindow(BRect(110, 110, 870, 620), "Listi: Editor", "Editor",
                 B_AUTO_UPDATE_SIZE_LIMITS) {
     SetLayout(new BGroupLayout(B_VERTICAL));
     if (owner)
@@ -667,7 +668,7 @@ public:
   bool QuitRequested() override { return editor->AllowClose(); }
 
   void MessageReceived(BMessage *message) override {
-    if (!editor->HandleMessage(message))
+    if (!HandleWindowAction(message) && !editor->HandleMessage(message))
       BWindow::MessageReceived(message);
   }
 

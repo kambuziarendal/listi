@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 #include <stdexcept>
 #include "MainWindow.h"
+#include "WindowOverview.h"
+#include "LayoutIntroduction.h"
 #include "RecoveryReviewWindow.h"
 #include "FlatView.h"
 #include "MainWindowMenu.h"
@@ -51,7 +53,9 @@ void PostMainWindowNotice(const char *text) {
 }
 
 namespace {
-class MainWindow : public BWindow {
+class MainWindow : public Listi::WorkingWindow {
+  BMessenger overview, guide;
+  std::string titleLocation;
   Preferences prefs;
   BMessenger service;
   BMessenger searchWindow;
@@ -105,6 +109,20 @@ class MainWindow : public BWindow {
   }
   void UpdateTransferTarget() {
     const int source = split->Source();
+    const char *current = panes[source]->Path();
+    if (titleLocation != current) {
+      titleLocation = current;
+      const auto last = titleLocation.find_last_not_of('/');
+      std::string leaf = "/";
+      if (titleLocation == "@disks")
+        leaf = "Disks";
+      else if (last != std::string::npos) {
+        auto slash = titleLocation.rfind('/', last);
+        size_t start = slash == std::string::npos ? 0 : slash + 1;
+        leaf = titleLocation.substr(start, last - start + 1);
+      }
+      Describe(leaf + " · Listi", titleLocation);
+    }
     const auto &target = *panes[1 - source];
     const bool available = !prefs.SinglePane() && split->AllowsCommand(kCopy);
     const bool folder = target.LocationValid() && strcmp(target.Path(), "@disks") != 0;
@@ -296,7 +314,7 @@ public:
   MainWindow(const Preferences &p, BMessenger svc,
              const Listi::SavedPlaces &saved, bool writable,
              const Listi::SavedSearches &queries, bool queriesWritable)
-      : BWindow(BRect(70, 70, 1170, 710), "Listi 0.38.0", B_TITLED_WINDOW,
+      : Listi::WorkingWindow(BRect(70, 70, 1170, 710), "Listi", "File manager",
                 B_AUTO_UPDATE_SIZE_LIMITS),
         prefs(p), service(svc),
         savedNavigation(svc, saved, writable, queries, queriesWritable) {
@@ -390,6 +408,25 @@ public:
     return true;
   }
   void MessageReceived(BMessage *m) override {
+    if (HandleWindowAction(m))
+      return;
+    if (m->what == Listi::kOpenWindowOverview) {
+      overview = Listi::OpenWindowOverview(*this, overview);
+      return;
+    }
+    if (m->what == Listi::kShowLayoutGuide) {
+      guide = Listi::OpenLayoutIntroduction(*this, guide, prefs.workspace,
+                                           m->GetBool("firstRun", false));
+      return;
+    }
+    if (m->what == Listi::kGuideChoice) {
+      const int32 value = m->GetInt32("workspace", -1);
+      if (value >= 0 && value <= 3 && prefs.workspace != Workspace(value))
+        SetWorkspace(Workspace(value));
+      else if (m->GetBool("firstRun", false))
+        Save();
+      return;
+    }
     if (m->what == Listi::kFlatContext) {
       const int pane = m->GetInt32("pane", -1);
       if (pane >= 0 && pane < 2 && split->Panel(pane).Current() == PanelPage::Flat &&

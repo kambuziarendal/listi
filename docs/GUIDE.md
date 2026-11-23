@@ -2,6 +2,26 @@
 
 This guide describes the development source. The [0.38.0-12 packaged alpha](../README.md#install) includes the latest transfer and recovery changes. New to Listi? Start with the [feature tour](FEATURES.md). Try file operations on disposable copies and keep independent backups.
 
+## Window names and layouts
+
+The file window title follows the active folder. Use **Window > Name window…**
+for a role such as “Invoices”; the name stays put while you navigate. **Use
+folder name** restores the automatic title. Neither choice changes the source
+or destination of a file operation.
+
+**Window > Open windows…** lists the file manager, detached Listi CLIs, editors
+and standalone previews. Select a row to see its full location, rename it or
+activate it. Equal names are allowed; the number identifies that open window.
+A CLI shows where its shell started, not the shell’s current directory. Docking
+a CLI removes its floating window from the list without stopping the shell.
+Names last for the life of the window; they do not save a working set.
+
+On a fresh installation, the optional layout introduction describes **Einn**,
+**Askr**, **Tvískipt** and **Smiðja**. Selecting an option previews its
+description; only **Use this layout** switches the file window. **Skip** or
+**Cancel** keeps the current layout. Reopen it through **Help > Layout
+introduction…**. Existing preferences are not reset on upgrade.
+
 ## Small features at a glance
 
 Available actions depend on whether the location is local, in an archive or on
