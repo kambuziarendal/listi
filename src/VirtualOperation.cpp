@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "FileOperation.h"
+#include "DirectoryFinalization.h"
+#include "RemovableCopy.h"
 #include "StagingSpace.h"
 #include "Sha256.h"
 #include "RecoveryInventory.h"
@@ -51,10 +53,18 @@ struct TempFile {
     if (!fstatat(parent, leaf.c_str(), &current, AT_SYMLINK_NOFOLLOW) &&
         current.st_dev == file.st_dev && current.st_ino == file.st_ino)
       unlinkat(parent, leaf.c_str(), 0);
-    if (!lstat(folder.c_str(), &current) && current.st_dev == directory.st_dev &&
-        current.st_ino == directory.st_ino && !rmdir(folder.c_str())) {
-      try { record.Retire(); } catch (...) { /* Read-only review still available. */ }
-    }
+    try {
+      const auto base = ParentLocation(folder);
+      if (!stat(base.c_str(), &current)) {
+        PinnedDirectory namespaceParent(base, current.st_dev, current.st_ino);
+        if (!lstat(folder.c_str(), &current) && current.st_dev == directory.st_dev &&
+            current.st_ino == directory.st_ino &&
+            !unlinkat(namespaceParent.Descriptor(), LocationLeaf(folder).c_str(), AT_REMOVEDIR)) {
+          namespaceParent.FlushAfterCleanup();
+          record.Retire();
+        }
+      }
+    } catch (...) { /* Read-only review still available. */ }
     close(parent);
   }
   void Write(const char *p, size_t n) {
@@ -236,7 +246,7 @@ struct Runner {
             directories.count(dst) != 0};
     auto control = Control(src);
     control.Check();
-    RememberDirectory(ParentLocation(dst));
+    RememberDirectory(parent);
     FileEntry source, target;
     if (!StatFile(src, source, control))
       throw std::runtime_error("Source no longer exists");
@@ -255,23 +265,41 @@ struct Runner {
     if (source.directory) {
       if (exists && !target.directory)
         throw std::runtime_error("Destination is not a folder");
-      if (!exists)
+      std::optional<PinnedDirectory> localParent, directory;
+      if (!IsVirtual(dst)) {
+        const auto &identity = directories.at(parent);
+        localParent.emplace(parent, identity.device, identity.inode, true);
+      }
+      if (localParent) {
+        localParent->Verify();
+        const auto leaf = LocationLeaf(dst);
+        if (!exists && mkdirat(localParent->Descriptor(), leaf.c_str(), 0755))
+          throw std::runtime_error(dst + ": " + strerror(errno));
+        struct stat named;
+        if (fstatat(localParent->Descriptor(), leaf.c_str(), &named,
+                    AT_SYMLINK_NOFOLLOW) || !S_ISDIR(named.st_mode))
+          throw std::runtime_error(dst + ": destination directory changed.");
+        directories.emplace(dst, NodeIdentity{int32_t(named.st_dev), int64_t(named.st_ino)});
+        Guard();
+        directory.emplace(dst, named.st_dev, named.st_ino);
+      } else if (!exists) {
         MakeFolder(dst, control);
-      if (!IsVirtual(dst))
-        RememberDirectory(dst);
+      }
       int skippedBefore = result.skipped;
       for (auto &e : ListFiles(src, control))
         Copy(e.path, ChildLocation(dst, e.name), depth + 1);
       control.Check();
       if (!exists && !IsVirtual(dst)) {
-        if (chmod(dst.c_str(), source.permissions & 0777))
+        if (fchmod(directory->Descriptor(), source.permissions & 0777))
           throw std::runtime_error(strerror(errno));
         if (source.modifiedKnown || source.modified > 0) {
           struct timespec times[2] = {{0, UTIME_OMIT}, {source.modified, 0}};
-          if (utimensat(AT_FDCWD, dst.c_str(), times, AT_SYMLINK_NOFOLLOW))
+          if (futimens(directory->Descriptor(), times))
             throw std::runtime_error(strerror(errno));
         }
       }
+      if (directory)
+        FinalizeDirectory(*directory, *localParent, [&] { control.Check(); });
       if (result.skipped == skippedBefore && hooks.fileDone)
         hooks.fileDone(src, dst);
       return;
@@ -310,6 +338,10 @@ struct Runner {
       Job publish{Action::Copy, {temp.path}, ParentLocation(dst)};
       publish.expectedDestination = directories.at(publish.destination);
       auto done = Run(publish, local);
+      if (!done.interruptedCopyFolder.empty())
+        throw RemovableCopyInterrupted(done.errors.empty() ?
+            "Removable destination flush interrupted." : done.errors.front(),
+            done.interruptedCopyFolder);
       if (done.cancelled)
         throw Cancelled();
       if (!done.errors.empty())
@@ -566,6 +598,12 @@ Result RunVirtual(const Job &job, const Hooks &hooks) {
         }
         if (runner.result.skipped == skippedBefore)
           ++runner.result.completed;
+      } catch (const RemovableCopyInterrupted &e) {
+        runner.result.interruptedCopyFolder = e.folder.empty() ? job.destination : e.folder;
+        runner.result.errors.push_back(source + ": " + e.what());
+        if (hooks.fileFailed)
+          hooks.fileFailed(source, e.what());
+        break;
       } catch (const Cancelled &) {
         throw;
       } catch (const std::exception &e) {

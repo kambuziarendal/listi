@@ -95,30 +95,9 @@ int Stream(const Descriptors &fd, const struct stat &before, Transfer &state,
   }
   return ECANCELED;
 }
-} // namespace
-
-void WriteRemovableStagingFile(int source, int staging, const struct stat &before,
-                               const std::function<void(size_t)> &checkpoint,
-                               bool privateStaging) {
-  // Allocate ownership before starting the thread. Even a spawn failure closes
-  // both descriptors. A blocked close belongs to the I/O worker too.
-  Descriptors owned{source, staging};
-  auto state = std::make_shared<Transfer>();
-  std::thread io([source, staging, before, state, privateStaging] {
-    int error;
-    {
-      Descriptors fd{source, staging};
-      error = Stream(fd, before, *state, privateStaging);
-      if (close(fd.staging) && !error)
-        error = errno;
-      fd.staging = -1;
-    }
-    std::lock_guard<std::mutex> lock(state->mutex);
-    state->error = error;
-    state->finished = true;
-    state->changed.notify_one();
-  });
-  owned.source = owned.staging = -1;
+void AwaitIO(std::thread &io, const std::shared_ptr<Transfer> &state,
+             const std::function<void(size_t)> &checkpoint,
+             const char *pendingMessage) {
   try {
     for (;;) {
       std::unique_lock<std::mutex> lock(state->mutex);
@@ -148,15 +127,41 @@ void WriteRemovableStagingFile(int source, int staging, const struct stat &befor
     lock.unlock();
     if (!drained) {
       io.detach();
-      throw RemovableCopyInterrupted(
-          "Transfer stopped; disk I/O is still pending. No final file was "
-          "published for this entry. Check the disk for a temporary copy "
-          "after reconnecting.");
+      throw RemovableCopyInterrupted(pendingMessage);
     }
     io.join();
     throw;
   }
   io.join();
+}
+} // namespace
+
+void WriteRemovableStagingFile(int source, int staging, const struct stat &before,
+                               const std::function<void(size_t)> &checkpoint,
+                               bool privateStaging) {
+  // Allocate ownership before starting the thread. Even a spawn failure closes
+  // both descriptors. A blocked close belongs to the I/O worker too.
+  Descriptors owned{source, staging};
+  auto state = std::make_shared<Transfer>();
+  std::thread io([source, staging, before, state, privateStaging] {
+    int error;
+    {
+      Descriptors fd{source, staging};
+      error = Stream(fd, before, *state, privateStaging);
+      if (close(fd.staging) && !error)
+        error = errno;
+      fd.staging = -1;
+    }
+    std::lock_guard<std::mutex> lock(state->mutex);
+    state->error = error;
+    state->finished = true;
+    state->changed.notify_one();
+  });
+  owned.source = owned.staging = -1;
+  AwaitIO(io, state, checkpoint,
+          "Transfer stopped; disk I/O is still pending. No final file was "
+          "published for this entry. Check the disk for a temporary copy "
+          "after reconnecting.");
   // The driver can fail the descriptor before its devfs node disappears.
   // Suspend the suspected endpoint even if the last devfs checkpoint passed.
   if (state->error == EIO || state->error == ENODEV || state->error == ENXIO)
@@ -166,5 +171,23 @@ void WriteRemovableStagingFile(int source, int staging, const struct stat &befor
   if (state->error)
     throw std::runtime_error(std::string("Transfer involving removable disk: ") +
                              strerror(state->error));
+}
+int FlushRemovableDirectory(int descriptor, const std::function<void()> &checkpoint) {
+  Descriptors owned{-1, descriptor};
+  const std::function<void(size_t)> poll = [&](size_t) { checkpoint(); };
+  auto state = std::make_shared<Transfer>();
+  std::thread io([descriptor, state] {
+    const int syncError = fsync(descriptor) ? errno : 0;
+    const int closeError = close(descriptor) ? errno : 0;
+    std::lock_guard<std::mutex> lock(state->mutex);
+    state->error = syncError ? syncError : closeError;
+    state->finished = true;
+    state->changed.notify_one();
+  });
+  owned.staging = -1;
+  AwaitIO(io, state, poll,
+          "Directory flush interrupted; disk I/O is still pending. "
+          "Durability after restart is unknown. Check both locations after reconnecting.");
+  return state->error;
 }
 } // namespace Listi

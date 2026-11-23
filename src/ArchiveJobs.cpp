@@ -2,6 +2,8 @@
 #include "ArchiveJobs.h"
 #include "ArchiveJobChecks.h"
 #include "DataIsoVerification.h"
+#include "DirectoryFinalization.h"
+#include "RemovableCopy.h"
 #include "ArchiveBackend.h"
 #include "ArchiveVolumes.h"
 #include "ArchiveWriting.h"
@@ -45,12 +47,18 @@ struct Stage {
   node_ref identity;
   Result &result;
   std::optional<RecoveryRecord> recovery;
+  std::optional<PinnedDirectory> namespaceParent;
   bool published = false;
   bool retainRecovery = false;
-  Stage(const Job &job, Result &result)
+  Stage(const Job &job, Result &result, const Hooks &hooks)
       : parent(job.destinationFolder.c_str()), result(result) {
     Require(parent.InitCheck() == B_OK, "Cannot open destination folder.");
-    recovery.emplace("archive", PathOf(parent), ".Listi-archive-stage-",
+    const auto parentPath = PathOf(parent);
+    node_ref parentIdentity;
+    Require(parent.GetNodeRef(&parentIdentity) == B_OK,
+            "Cannot identify the publication directory.");
+    namespaceParent.emplace(parentPath, parentIdentity.device, parentIdentity.node);
+    recovery.emplace("archive", parentPath, ".Listi-archive-stage-",
                      job.sources.empty() ? job.destination : job.sources.front(), job.destination);
     path = recovery->Stage();
     Require(mkdir(path.c_str(), 0700) == 0, "Cannot create archive staging folder.");
@@ -61,17 +69,37 @@ struct Stage {
     path = PathOf(dir);
     try {
       struct stat identity;
-      Require(dir.GetStat(&identity) == B_OK && parent.Sync() == B_OK,
-              "Cannot flush the newly created archive staging directory.");
+      Require(dir.GetStat(&identity) == B_OK, "Cannot identify archive staging directory.");
+      namespaceParent->Flush([&] {
+        if (hooks.proceed && !hooks.proceed())
+          throw Cancelled();
+      });
       recovery->Advance(RecoveryPhase::Writing, &identity);
       RegisterArchiveStage(path, identity.st_dev, identity.st_ino);
+    } catch (const RemovableCopyInterrupted &) {
+      throw; // Do not reenter the suspect mount while a flush is still pending.
     } catch (...) {
       node_ref named;
       if (created.GetNodeRef(&named) == B_OK &&
-          named.device == identity.device && named.node == identity.node)
-        created.Remove(); // Empty; cannot contain packed or extracted files yet.
+          named.device == identity.device && named.node == identity.node &&
+          created.Remove() == B_OK) {
+        try {
+          namespaceParent->FlushAfterCleanup();
+          recovery->Retire();
+        } catch (const std::exception &) {
+          // Keep the durable recovery record if the removal is uncertain.
+        }
+      }
       throw;
     }
+  }
+  void CheckInterrupted(const Result &copy) {
+    if (copy.interruptedCopyFolder.empty())
+      return;
+    retainRecovery = true;
+    throw RemovableCopyInterrupted(copy.errors.empty()
+        ? "Archive transfer interrupted on a removable disk." : copy.errors.front(),
+        copy.interruptedCopyFolder);
   }
   ~Stage() {
     try {
@@ -88,7 +116,8 @@ struct Stage {
           RemoveStageContents(dir, identity.device) &&
           entry.GetNodeRef(&named) == B_OK &&
           named.device == identity.device && named.node == identity.node &&
-          entry.Remove() == B_OK && parent.Sync() == B_OK) {
+          entry.Remove() == B_OK) {
+        namespaceParent->FlushAfterCleanup();
         recovery->Retire();
         return;
       }
@@ -96,6 +125,9 @@ struct Stage {
                               path + " (show hidden files).");
     } catch (const std::exception &error) {
       try {
+        if (auto interrupted = dynamic_cast<const RemovableCopyInterrupted *>(&error))
+          result.interruptedCopyFolder = interrupted->folder.empty()
+              ? ParentLocation(path) : interrupted->folder;
         result.errors.push_back(error.what());
       } catch (...) {
         // Do not let diagnostic allocation failures mask the original error.
@@ -193,7 +225,7 @@ Result RunArchiveEdit(const Job &job, const Hooks &hooks,
     const auto originalSet = FindArchiveVolumes(job.destination);
     ArchiveEditProtection protection(originalSet.files.front().identity,
                                      originalSet.Fingerprint());
-    Stage stage(job, result);
+    Stage stage(job, result, hooks);
     const auto work = Join(PathOf(stage.dir), "contents");
     Require(!mkdir(work.c_str(), 0700),
             "Cannot create archive edit staging folder.");
@@ -238,6 +270,7 @@ Result RunArchiveEdit(const Job &job, const Hooks &hooks,
       auto extraction = internal;
       extraction.conflict = {};
       auto copied = Run(extract, extraction);
+      stage.CheckInterrupted(copied);
       if (copied.cancelled)
         throw Cancelled();
       Require(copied.errors.empty(), copied.errors.empty()
@@ -426,6 +459,9 @@ Result RunArchiveEdit(const Job &job, const Hooks &hooks,
     result.completedRoots.push_back({job.destination, job.destination});
     if (hooks.fileDone)
       hooks.fileDone(job.destination, job.destination);
+  } catch (const RemovableCopyInterrupted &error) {
+    result.interruptedCopyFolder = error.folder.empty() ? job.destinationFolder : error.folder;
+    result.errors.push_back(error.what());
   } catch (const Cancelled &) {
     result.cancelled = true;
   } catch (const std::exception &e) {
@@ -511,11 +547,12 @@ Result RunArchiveLocalMove(const Job &job, const Hooks &hooks) {
     if (source.Local())
       localSource = std::make_unique<LocalMoveTree>(
           job.sources, internal, true, job.expectedDestination.device);
-    Stage stage(job, result);
+    Stage stage(job, result, hooks);
     const auto snapshot = PathOf(stage.dir);
     Job extract{Action::Copy, job.sources, snapshot};
     FreezeLocalJob(extract, snapshot);
     auto extracted = Run(extract, internal);
+    stage.CheckInterrupted(extracted);
     if (extracted.cancelled)
       throw Cancelled();
     Require(extracted.errors.empty() && !extracted.skipped &&
@@ -537,6 +574,7 @@ Result RunArchiveLocalMove(const Job &job, const Hooks &hooks) {
       auto add =
           PrepareArchiveEditJob(target.archive, additions, {}, target.path);
       auto written = RunArchiveEdit(add, internal);
+      stage.CheckInterrupted(written);
       if (written.cancelled)
         throw Cancelled();
       Require(written.errors.empty() && written.completed == 1,
@@ -552,6 +590,7 @@ Result RunArchiveLocalMove(const Job &job, const Hooks &hooks) {
       FreezeLocalJob(copy, job.destination);
       copied = true;
       auto written = Run(copy, internal);
+      stage.CheckInterrupted(written);
       if (written.cancelled)
         throw Cancelled();
       Require(written.errors.empty() && !written.skipped &&
@@ -561,7 +600,9 @@ Result RunArchiveLocalMove(const Job &job, const Hooks &hooks) {
                   : written.errors.front());
       localDestination = std::make_unique<LocalMoveTree>(
           destinations, internal, false, job.expectedDestination.device);
-      localDestination->Flush();
+      // The local copy already flushed files and finalized the directory
+      // tree in post-order before reporting success. This snapshot guards
+      // the verified bytes through source cleanup.
     }
     auto destinationGuard = [&] {
       if (hooks.proceed && !hooks.proceed())
@@ -616,6 +657,7 @@ Result RunArchiveLocalMove(const Job &job, const Hooks &hooks) {
         Guards(job);
         VerifyArchiveSets(job);
       });
+      stage.CheckInterrupted(removed);
       if (removed.cancelled)
         throw Cancelled();
       Require(removed.errors.empty() && removed.completed == 1,
@@ -630,6 +672,9 @@ Result RunArchiveLocalMove(const Job &job, const Hooks &hooks) {
           hooks.fileDone(path, destination);
       }
     }
+  } catch (const RemovableCopyInterrupted &error) {
+    result.interruptedCopyFolder = error.folder.empty() ? job.destinationFolder : error.folder;
+    result.errors.push_back(error.what());
   } catch (const Cancelled &) {
     result.cancelled = true;
   } catch (const std::exception &e) {
@@ -678,11 +723,12 @@ Result RunArchiveMove(const Job &job, const Hooks &hooks) {
           Job{Action::Move, job.sources, job.destination});
       result = RunArchiveEdit(rename, internal);
     } else {
-      Stage stage(job, result);
+      Stage stage(job, result, hooks);
       const auto snapshot = PathOf(stage.dir);
       Job extract{Action::Copy, job.sources, snapshot};
       FreezeLocalJob(extract, snapshot);
       auto extracted = Run(extract, internal);
+      stage.CheckInterrupted(extracted);
       if (extracted.cancelled)
         throw Cancelled();
       Require(
@@ -697,6 +743,7 @@ Result RunArchiveMove(const Job &job, const Hooks &hooks) {
       auto add =
           PrepareArchiveEditJob(target.archive, additions, {}, target.path);
       auto written = RunArchiveEdit(add, internal);
+      stage.CheckInterrupted(written);
       if (written.cancelled)
         throw Cancelled();
       Require(written.errors.empty() && written.completed == 1,
@@ -726,6 +773,8 @@ Result RunArchiveMove(const Job &job, const Hooks &hooks) {
       // Rebuild the source only while the verified destination identity and
       // contents remain frozen, including the final pre-rename guard.
       result = RunArchiveEdit(sourceGuard, internal);
+      if (!result.interruptedCopyFolder.empty())
+        stage.retainRecovery = true;
     }
     if (!result.cancelled && result.errors.empty() && result.completed == 1) {
       result.completedRoots.clear();
@@ -744,6 +793,9 @@ Result RunArchiveMove(const Job &job, const Hooks &hooks) {
         result.errors.push_back(
             "Destination copy was saved, but source cleanup did not complete. Check both archives before retrying.");
     }
+  } catch (const RemovableCopyInterrupted &error) {
+    result.interruptedCopyFolder = error.folder.empty() ? job.destinationFolder : error.folder;
+    result.errors.push_back(error.what());
   } catch (const Cancelled &) {
     result.cancelled = true;
     if (copied)
@@ -809,7 +861,7 @@ Result RunArchiveJob(const Job &job, const Hooks &hooks) {
         Require(b != a && b.compare(0, a.size() + 1, a + "/") != 0,
                 "Choose a destination outside the selected folder.");
       }
-    Stage stage(job, result);
+    Stage stage(job, result, hooks);
     Guards(job);
     auto check = [&] {
       if (hooks.proceed && !hooks.proceed())
@@ -818,6 +870,7 @@ Result RunArchiveJob(const Job &job, const Hooks &hooks) {
     };
     check();
     BEntry publish;
+    node_ref publishIdentity;
     if (job.action == Action::CreateArchive) {
       auto path = Join(PathOf(stage.dir), "archive");
       FD output(
@@ -835,7 +888,8 @@ Result RunArchiveJob(const Job &job, const Hooks &hooks) {
       if (job.archiveFormat == "iso")
         SealDataIso(output.n, tracked);
       Require(!fsync(output.n), "Cannot flush archive to disk.");
-      Require(publish.SetTo(&stage.dir, "archive", false) == B_OK,
+      Require(publish.SetTo(&stage.dir, "archive", false) == B_OK &&
+                  publish.GetNodeRef(&publishIdentity) == B_OK,
               "Archive output disappeared.");
     } else {
       std::vector<std::pair<std::string, struct stat>> original;
@@ -873,6 +927,7 @@ Result RunArchiveJob(const Job &job, const Hooks &hooks) {
         return true;
       };
       auto copied = Run(copy, guarded);
+      stage.CheckInterrupted(copied);
       if (copied.cancelled)
         throw Cancelled();
       Require(copied.errors.empty(),
@@ -885,14 +940,32 @@ Result RunArchiveJob(const Job &job, const Hooks &hooks) {
         Require(!lstat(item.first.c_str(), &s) && Unchanged(item.second, s),
                 "Archive changed during extraction.");
       }
+      // Member directories were finalized by Run before reporting success.
+      // Cover the staging root itself, including a completely empty archive.
+      PinnedDirectory directory(stage.path, stage.identity.device,
+                                stage.identity.node);
+      try {
+        directory.Flush(check);
+      } catch (const RemovableCopyInterrupted &) {
+        stage.retainRecovery = true;
+        throw;
+      }
       Require(stage.dir.GetEntry(&publish) == B_OK,
               "Extraction staging folder disappeared.");
+      publishIdentity = stage.identity;
     }
     check();
     stage.recovery->Advance(RecoveryPhase::Ready);
     stage.recovery->Advance(RecoveryPhase::Publishing);
     Guards(job);
     VerifyArchiveSets(job);
+    stage.namespaceParent->Verify();
+    auto verifyOutput = [&] {
+      node_ref current;
+      Require(publish.GetNodeRef(&current) == B_OK && current == publishIdentity,
+              "Archive job output was replaced.");
+    };
+    verifyOutput();
     // Native no-clobber publication. A new target appearing while the job runs
     // must never be overwritten, including an empty directory or a symlink.
     Require(
@@ -901,7 +974,18 @@ Result RunArchiveJob(const Job &job, const Hooks &hooks) {
     if (job.action == Action::ExtractArchive)
       stage.published = true;
     stage.retainRecovery = true;
-    Require(stage.parent.Sync() == B_OK, "Result published, but its directory flush failed.");
+    try {
+      stage.namespaceParent->Flush(check);
+      verifyOutput();
+    } catch (const Cancelled &) {
+      result.errors.push_back("Result published, but directory durability after restart is unknown.");
+      throw;
+    } catch (const RemovableCopyInterrupted &error) {
+      throw RemovableCopyInterrupted(std::string("Result published: ") + error.what(),
+                                     error.folder);
+    } catch (const std::runtime_error &error) {
+      throw std::runtime_error(std::string("Result published: ") + error.what());
+    }
     stage.recovery->Advance(RecoveryPhase::Published);
     stage.retainRecovery = false;
     result.completed = 1;
@@ -909,6 +993,9 @@ Result RunArchiveJob(const Job &job, const Hooks &hooks) {
     for (const auto &source : completedPaths)
       if (hooks.fileDone)
         hooks.fileDone(source, job.destination);
+  } catch (const RemovableCopyInterrupted &error) {
+    result.interruptedCopyFolder = error.folder.empty() ? job.destinationFolder : error.folder;
+    result.errors.push_back(error.what());
   } catch (const Cancelled &) {
     result.cancelled = true;
   } catch (const std::exception &e) {

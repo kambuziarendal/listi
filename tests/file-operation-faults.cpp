@@ -210,7 +210,8 @@ int main() {
   };
   result = Run({Action::Copy, {source.string()}, out.string()}, disconnect);
   deviceGone = false;
-  Check(!result.completed && result.errors.size() == 1 &&
+  Check(!result.completed && result.errors.size() == 2 &&
+            result.errors.front().find("Staging recovery record retained") != std::string::npos &&
             Has(result, source, target, "failed", "device disconnected") &&
             Read(source) == payload && Read(target) == "original" &&
             std::distance(fs::directory_iterator(out), fs::directory_iterator()) == 1,

@@ -140,17 +140,6 @@ void LocalMoveTree::Verify() const {
       Portable(entry.first, now);
   }
 }
-void LocalMoveTree::Flush() const {
-  Verify();
-  for (auto it = entries.rbegin(); it != entries.rend(); ++it)
-    FlushPath(it->first);
-  std::set<std::string> changedParents;
-  for (const auto &alias : aliases)
-    changedParents.insert(ParentLocation(alias.second));
-  for (const auto &parent : changedParents)
-    FlushPath(parent);
-  Verify();
-}
 void LocalMoveTree::Remove(const std::string &selected, const Hooks &hooks) {
   const auto &root = aliases.at(selected);
   // Verify all roots before the caller starts cleanup. During cleanup, parent

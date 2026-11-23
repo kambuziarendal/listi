@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "FileOperation.h"
 #include "BulkRename.h"
+#include "DirectoryFinalization.h"
 #include "ArchiveVolumes.h"
 #include "ArchiveJobs.h"
 #include "ImageConvert.h"
@@ -138,6 +139,22 @@ struct Runner {
   }
   void CheckDestinationDevice(dev_t volume) {
     CheckDevice(volume, guardedJob->destination);
+  }
+  void FlushDestination(const PinnedDirectory &directory, dev_t volume,
+                        bool cleanup = false) {
+    const auto &backing = backingDevices.at(volume);
+    const auto previous = interruptedFolder;
+    if (backing.removable)
+      interruptedFolder = backing.mount.empty() ? guardedJob->destination
+                                                 : backing.mount;
+    if (cleanup)
+      directory.FlushAfterCleanup([&] { CheckDestinationDevice(volume); });
+    else
+      directory.Flush([&] {
+        CheckDestinationDevice(volume);
+        Check();
+      });
+    interruptedFolder = previous;
   }
   void CheckSourceDevice(dev_t volume) {
     CheckDevice(volume, ParentLocation(guardedSource));
@@ -485,7 +502,7 @@ struct Runner {
       return complete;
     } catch (const Cancelled &) {
       auto &row = Outcome(src);
-      if (before != mutations)
+      if (before != mutations && row.status == "unprocessed")
         row.status = "partial";
       if (row.status == "unprocessed")
         row.detail = "Cancelled before commit.";
@@ -522,14 +539,23 @@ struct Runner {
       if (existed && !S_ISDIR(before.st_mode))
         throw std::runtime_error(
             dst + ": destination is not a directory; not replaced");
+      const auto parentPath = ParentLocation(dst);
+      struct stat parentIdentity;
+      if (stat(parentPath.c_str(), &parentIdentity))
+        Fail(parentPath);
+      PinnedDirectory parent(parentPath, parentIdentity.st_dev,
+                             parentIdentity.st_ino, true);
       // Merge directories, but never traverse destination symbolic links.
       if (!existed) {
-        if (mkdir(dst.c_str(), 0700) != 0)
+        if (mkdirat(parent.Descriptor(), Leaf(dst).c_str(), 0700))
           Fail(dst);
         ++mutations;
-        if (lstat(dst.c_str(), &before) || !S_ISDIR(before.st_mode))
+        if (fstatat(parent.Descriptor(), Leaf(dst).c_str(), &before,
+                    AT_SYMLINK_NOFOLLOW) || !S_ISDIR(before.st_mode))
           throw std::runtime_error(dst + ": new destination folder changed");
       }
+      parent.Verify();
+      PinnedDirectory directory(dst, before.st_dev, before.st_ino);
       CheckDestinationDevice(before.st_dev);
       copyDirectories.emplace_back(dst, before);
       struct DirectoryScope {
@@ -553,10 +579,10 @@ struct Runner {
       Guard();
       if (!existed) {
         Attributes(src, dst);
-        if (chmod(dst.c_str(), st.st_mode & 07777))
+        if (fchmod(directory.Descriptor(), st.st_mode & 07777))
           Fail(dst);
         struct timespec times[2] = {st.st_atim, st.st_mtim};
-        if (utimensat(AT_FDCWD, dst.c_str(), times, 0))
+        if (futimens(directory.Descriptor(), times))
           Fail(dst);
       }
       struct stat expected;
@@ -564,6 +590,22 @@ struct Runner {
         Fail(dst);
       Tick(src);
       Guard();
+      parent.Verify();
+      try {
+        FlushDestination(directory, expected.st_dev);
+        CheckDestinationDevice(parentIdentity.st_dev);
+        FlushDestination(parent, parentIdentity.st_dev);
+        directory.Verify();
+        Guard();
+      } catch (const Cancelled &) {
+        auto &row = Outcome(src, dst);
+        row.status = "published-flush-failed";
+        row.detail = "Cancelled during directory finalization; durability after restart is unknown.";
+        throw;
+      } catch (const std::runtime_error &) {
+        Outcome(src, dst).status = "published-flush-failed";
+        throw;
+      }
       if (complete) {
         struct stat current;
         if (lstat(src.c_str(), &current) || !SameEntry(st, current))
@@ -581,13 +623,15 @@ struct Runner {
       return false;
     Guard();
     const auto parentPath = ParentLocation(dst);
-    FD parent(open(parentPath.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW));
     struct stat parentIdentity;
-    if (parent.n < 0 || fstat(parent.n, &parentIdentity))
+    if (lstat(parentPath.c_str(), &parentIdentity))
       Fail(parentPath);
+    PinnedDirectory parentDirectory(parentPath, parentIdentity.st_dev,
+                                    parentIdentity.st_ino);
+    const int parent = parentDirectory.Descriptor();
     // Keep staging on the target volume without extending a possibly
     // maximum-length destination leaf.
-    if (!StagingSpaceAvailable(parent.n, 0))
+    if (!StagingSpaceAvailable(parent, 0))
       Fail(parentPath);
     RecoveryRecord recovery("copy", parentPath, ".listi-copy-", src, dst);
     const auto &tmp = recovery.Stage();
@@ -602,11 +646,11 @@ struct Runner {
         if (n < 0 || size_t(n) == sizeof(link))
           Fail(src);
         link[n] = 0;
-        if (symlinkat(link, parent.n, leaf.c_str()) ||
-            fstatat(parent.n, leaf.c_str(), &stagingIdentity, AT_SYMLINK_NOFOLLOW))
+        if (symlinkat(link, parent, leaf.c_str()) ||
+            fstatat(parent, leaf.c_str(), &stagingIdentity, AT_SYMLINK_NOFOLLOW))
           Fail(tmp);
       } else {
-        out.n = openat(parent.n, leaf.c_str(),
+        out.n = openat(parent, leaf.c_str(),
                        O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
         if (out.n < 0 || fstat(out.n, &stagingIdentity))
           Fail(tmp);
@@ -714,29 +758,38 @@ struct Runner {
       recovery.PrepareCopyPublication();
       Guard();
       struct stat currentTarget;
-      if (fstatat(parent.n, leaf.c_str(), &currentTarget, AT_SYMLINK_NOFOLLOW) ||
+      if (fstatat(parent, leaf.c_str(), &currentTarget, AT_SYMLINK_NOFOLLOW) ||
           currentTarget.st_dev != stagingIdentity.st_dev ||
           currentTarget.st_ino != stagingIdentity.st_ino)
         throw std::runtime_error(tmp + ": staging identity changed before publication");
       if (existed) {
         const auto target = Leaf(dst);
-        if (fstatat(parent.n, target.c_str(), &currentTarget, AT_SYMLINK_NOFOLLOW) ||
+        if (fstatat(parent, target.c_str(), &currentTarget, AT_SYMLINK_NOFOLLOW) ||
             !SameEntry(before, currentTarget))
           throw std::runtime_error(dst + ": destination changed during operation; left untouched");
-        if (renameat(parent.n, leaf.c_str(), parent.n, target.c_str()))
+        if (renameat(parent, leaf.c_str(), parent, target.c_str()))
           Fail(dst);
       } else {
         Commit(tmp, dst, false, before);
       }
       published = true;
-      // Removable media have their own interruptible file flush. A directory
-      // flush on the queue thread would reintroduce a hang on unplug.
-      if (!backingDevices.at(stagingIdentity.st_dev).removable && fsync(parent.n)) {
+      try {
+        FlushDestination(parentDirectory, stagingIdentity.st_dev);
+      } catch (const RemovableCopyInterrupted &) {
         ++mutations;
         Outcome(src, dst).status = "published-flush-failed";
-        throw std::runtime_error(dst +
-            ": published, but its directory could not be flushed. Source retained; "
-            "durability after restart is unknown.");
+        throw;
+      } catch (const Cancelled &) {
+        ++mutations;
+        auto &row = Outcome(src, dst);
+        row.status = "published-flush-failed";
+        row.detail = "Published before cancellation; durability after restart is unknown.";
+        throw;
+      } catch (const std::runtime_error &error) {
+        ++mutations;
+        Outcome(src, dst).status = "published-flush-failed";
+        throw std::runtime_error(dst + ": published, but its parent directory "
+                                 "was not flushed. " + error.what());
       }
       try {
         // Publishing permits either namespace outcome. Keep it until checked
@@ -762,15 +815,29 @@ struct Runner {
         CheckDestinationDevice(stagingIdentity.st_dev);
       struct stat current;
       if (!published) {
-        if (!fstatat(parent.n, leaf.c_str(), &current, AT_SYMLINK_NOFOLLOW)) {
-          if (bound && current.st_dev == stagingIdentity.st_dev &&
-              current.st_ino == stagingIdentity.st_ino &&
-              !unlinkat(parent.n, leaf.c_str(), 0))
+        bool absent = false;
+        if (!fstatat(parent, leaf.c_str(), &current, AT_SYMLINK_NOFOLLOW)) {
+          absent = bound && current.st_dev == stagingIdentity.st_dev &&
+                   current.st_ino == stagingIdentity.st_ino &&
+                   !unlinkat(parent, leaf.c_str(), 0);
+        } else {
+          absent = errno == ENOENT;
+        }
+        if (absent) {
+          try {
+            CheckDestinationDevice(parentIdentity.st_dev);
+            FlushDestination(parentDirectory, parentIdentity.st_dev, true);
             recovery.Retire();
-          else
-            result.errors.push_back(tmp + ": temporary name retained for manual inspection.");
-        } else if (errno == ENOENT) {
-          recovery.Retire();
+          } catch (const RemovableCopyInterrupted &error) {
+            result.errors.push_back(tmp + ": " + error.what() +
+                                    " Staging recovery record retained.");
+            throw;
+          } catch (const std::exception &error) {
+            result.errors.push_back(tmp + ": " + error.what() +
+                                    " Staging recovery record retained.");
+          }
+        } else {
+          result.errors.push_back(tmp + ": temporary name retained for manual inspection.");
         }
       }
       throw;
@@ -977,7 +1044,7 @@ struct Runner {
               h.fileDone(entry.first, entry.second.destination);
         }
       } catch (const RemovableCopyInterrupted &e) {
-        result.interruptedCopyFolder = interruptedFolder;
+        result.interruptedCopyFolder = e.folder.empty() ? interruptedFolder : e.folder;
         Problem(source, e.what());
         if (h.fileFailed)
           h.fileFailed(source, e.what());

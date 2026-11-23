@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Compile on POSIX: c++ -std=c++17 -Isrc tests/virtual-operation-faults.cpp
-// src/VirtualOperation.cpp src/VirtualFile.cpp src/VirtualLocation.cpp src/Sha256.cpp -o /tmp/listi-faults
+// src/DirectoryFinalization.cpp src/VirtualOperation.cpp src/VirtualFile.cpp
+// src/VirtualLocation.cpp src/Sha256.cpp -o /tmp/listi-faults
 // Real staging/dispatch code, deterministic fake network commit failures.
 #include "FileOperation.h"
 #include "VirtualFile.h"

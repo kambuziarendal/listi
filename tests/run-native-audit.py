@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 OUTPUT = ROOT / "build/native-audit-tests"
 REQUIRED = """
-file-operation-faults copy-crash-recovery worker-lifecycle virtual-operation-faults archive-read-scope
+file-operation-faults directory-finalization copy-crash-recovery worker-lifecycle virtual-operation-faults archive-read-scope
 operation-queue removable-copy archive-move-scaling directory-delivery search-filters
 archive-local-move-faults archive-local-move same-file-type folder-compare
 archive-editor-faults archive-editor archive-move-faults archive-move
@@ -33,6 +33,7 @@ audit-io theme-text connection-defaults ssh-key-format
 
 WRAPS = {
     "removable-copy": ["fsync", "write", "read"],
+    "directory-finalization": ["fsync", "fs_stat_dev"],
     "archive-move-faults": ['renameat'],
     "archive-editor-faults": ['rename', 'renameat', 'fsync', 'fs_stat_dev'],
     "archive-local-move-faults": ['renameat', 'unlink'],
@@ -115,7 +116,8 @@ def run():
         print("TEST", name, flush=True)
         inputs = objects
         if name == "virtual-operation-faults":
-            inputs = [SRC / "VirtualOperation.cpp", SRC / "VirtualFile.cpp",
+            inputs = [SRC / "DirectoryFinalization.cpp", SRC / "RemovableCopy.cpp",
+                      SRC / "VirtualOperation.cpp", SRC / "VirtualFile.cpp",
                       SRC / "VirtualLocation.cpp", SRC / "Sha256.cpp",
                       SRC / "RecoveryInventory.cpp", SRC / "MessageStore.cpp"]
         binary = OUTPUT / name
