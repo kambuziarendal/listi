@@ -15,6 +15,7 @@ public:
   explicit FolderTree(BHandler *navigationTarget);
   ~FolderTree();
   void AttachedToWindow() override;
+  void DetachedFromWindow() override;
   void Pulse() override;
   void MessageReceived(BMessage *) override;
   void ShowPath(const std::string &);
@@ -31,6 +32,7 @@ private:
   std::shared_ptr<std::atomic<int64>> generation;
   std::map<std::string, TreeItem *> items;
   std::string root, desired;
+  int64 requestID = 0;
   void Clear();
   void Follow();
 };

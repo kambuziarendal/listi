@@ -15,7 +15,7 @@ SRC = ROOT / "src"
 OUTPUT = ROOT / "build/native-audit-tests"
 REQUIRED = """
 file-operation-faults directory-finalization copy-crash-recovery worker-lifecycle virtual-operation-faults archive-read-scope
-operation-queue removable-copy archive-move-scaling directory-delivery search-filters
+operation-queue removable-copy archive-move-scaling directory-delivery terminal-delivery search-filters
 archive-local-move-faults archive-local-move same-file-type folder-compare
 archive-editor-faults archive-editor archive-move-faults archive-move
 archive-folder-operations transfer-races archive-ambiguity archive-metadata archive-volumes
@@ -45,6 +45,8 @@ WRAPS = {
     "bulk-rename": ['renameat', 'fstatat'],
     "clipboard-text-file": ['write'],
     "archive-move-scaling": ['lstat'],
+    "terminal-delivery": ["_ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl",
+                          "_ZN5BView10DrawBitmapEPK7BBitmap5BRectS3_"],
     "directory-delivery": ['opendir', '_ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl'],
     "operation-queue": ['_ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl', 'opendir'],
     "flat-view": ['_ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl', 'opendir'],

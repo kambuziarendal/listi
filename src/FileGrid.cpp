@@ -67,6 +67,7 @@ class GridView : public FileGrid {
   std::shared_ptr<std::atomic<int64>> generation;
   std::map<std::string, std::unique_ptr<BBitmap>> thumbnails;
   std::set<std::string> pending;
+  bool retrySubmission = false;
   RubberBand *band;
   Listi::TypeToSelect typeSelect;
   std::set<std::string> paintedSelection;
@@ -177,6 +178,7 @@ public:
     ++*generation;
     Listi::RetireReadWorker(loader);
     pending.clear();
+    terminal->Take();
     replies->Clear();
     BView::DetachedFromWindow();
   }
@@ -189,6 +191,7 @@ public:
     pressedIndex = -1;
     dragging = deferredPick = false;
     ++*generation;
+    terminal->Take();
     replies->Clear();
     pending.clear();
     thumbnails.clear();
@@ -388,6 +391,10 @@ public:
     BView::KeyDown(bytes, length);
   }
   void Pulse() override {
+    if (retrySubmission) {
+      retrySubmission = false;
+      Invalidate();
+    }
     for (auto &reply : terminal->Take())
       MessageReceived(&reply);
   }
@@ -454,6 +461,8 @@ public:
             job.AddInt64("serial", generation->load());
             if (loader->PostMessage(&job) == B_OK)
               pending.insert(row->path);
+            else
+              retrySubmission = true;
           }
         }
       }

@@ -314,6 +314,8 @@ public:
 
 private:
   void Send(BMessage &message, std::unique_ptr<BBitmap> image) {
+    if (message.GetInt64("serial", -1) != generation->load())
+      return;
     int64 reply = image ? replies->Put(image.release()) : -1;
     message.AddInt64("bitmap", reply);
     if (message.what == kReady) {
@@ -456,6 +458,7 @@ void ImagePreview::DetachedFromWindow() {
   // that posts completed reads to the token from the previous layout.
   ++*generation;
   Listi::RetireReadWorker(loader);
+  terminal->Take();
   replies->Clear();
   BView::DetachedFromWindow();
 }
@@ -498,6 +501,7 @@ bool ImagePreview::BeginEditing(const std::string &p) {
   path = p;
   pendingFile.reset();
   ++*generation;
+  terminal->Take();
   replies->Clear();
   Listi::SetViewVisible(textScroll, false);
   delete bitmap;
@@ -530,7 +534,13 @@ void ImagePreview::Request(int requestedPage, bool playback) {
   ready = false;
   submissionFailed = false;
   int64 serial = ++*generation;
+  terminal->Take();
   replies->Clear();
+  if (!loader && Window() && !path.empty()) {
+    loader = new Loader(BMessenger(this), generation, replies, terminal);
+    Listi::StartReadWorker(loader);
+    submissionFailed = !loader;
+  }
   if (kind == Inspector::Kind::Unknown) {
     delete bitmap;
     bitmap = nullptr;
