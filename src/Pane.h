@@ -3,7 +3,7 @@
 #include "Common.h"
 #include "IconCache.h"
 #include "PaneModel.h"
-#include "NavigationHistory.h"
+#include "PaneNavigationState.h"
 #include "SavedPlaces.h"
 #include "FileSearch.h"
 #include <Button.h>
@@ -12,6 +12,7 @@
 #include <TextControl.h>
 #include <View.h>
 #include <functional>
+#include <optional>
 class FileDetails;
 class FileGrid;
 class ImagePreview;
@@ -42,6 +43,9 @@ public:
                           const std::string &selection = {},
                           bool invoke = false, bool context = false,
                           BPoint at = {}, const PaneEntry *clicked = nullptr);
+  Listi::PaneNavigationState CaptureNavigation();
+  void RestoreNavigation(const Listi::PaneNavigationState &);
+  bool IsSearchList() const { return queries.count(path.String()) != 0; }
   void Reload();
   void SetPlaces(const Listi::SavedPlaces &, bool writable);
   void SetSource(bool);
@@ -126,6 +130,18 @@ private:
   BTextControl *edit;
   BButton *back, *forward;
   Listi::NavigationHistory history;
+  std::map<std::string, Listi::SavedSearch> queries;
+  std::optional<Listi::PaneNavigationState> restoring;
+  int restoredView = -1;
+  std::string LocationLabel() const;
+  Listi::ReadWorker *queryWorker = nullptr;
+  std::shared_ptr<std::atomic<int64>> queryFailure = std::make_shared<std::atomic<int64>>(-1);
+  std::vector<std::unique_ptr<PaneEntry>> queryRows;
+  void OpenSearchList(const Listi::SavedSearch &);
+  bool HandleQueryReply(BMessage &);
+  BPoint ScrollPosition();
+  void RestoreScroll(BPoint);
+
   void StartNavigation(const std::string &, int target = -1,
                        bool trash = false);
   void UpdateNavigation();
