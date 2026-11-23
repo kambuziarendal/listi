@@ -239,6 +239,13 @@ struct CurlSession {
   }
   CURLcode Perform(bool missingOK = false) {
     control.Check();
+    if (control.cleanup) {
+      // NOSIGNAL with a synchronous DNS resolver cannot bound a lookup.
+      const auto *info = LIBCALL(lib, curl_version_info)(CURLVERSION_NOW);
+      if (!info || !(info->features & CURL_VERSION_ASYNCHDNS))
+        throw std::runtime_error("Remote cleanup deferred: resolver has no deadline.");
+      Set(CURLOPT_TIMEOUT_MS, control.cleanup->TimeoutMs());
+    }
     auto r = LIBCALL(lib, curl_easy_perform)(curl);
     if (failure)
       std::rethrow_exception(failure);
@@ -397,6 +404,8 @@ std::vector<FileEntry> ListNetwork(const Location &l,
     if (mlsd)
       s.Set(CURLOPT_CUSTOMREQUEST, "MLSD");
     s.sink = [&](const char *p, size_t n) {
+      if (c.cleanup)
+        c.cleanup->Consume(n);
       if (listing.size() + n > 64 * 1024 * 1024)
         throw std::runtime_error("Server listing is too large");
       listing.append(p, n);

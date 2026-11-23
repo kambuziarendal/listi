@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #pragma once
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <stdexcept>
@@ -9,12 +10,36 @@
 
 namespace Listi {
 struct Cancelled : std::exception {};
+// Shared by all remote calls made to reconcile one failed upload. Never used
+// to limit the original transfer or to authorize an unverified mutation.
+struct NetworkCleanupBudget {
+  using Clock = std::chrono::steady_clock;
+  Clock::time_point deadline = Clock::now() + std::chrono::seconds(2);
+  uint64_t remaining = 1024 * 1024;
+
+  long TimeoutMs() const {
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()).count();
+    if (ms <= 0 || !remaining)
+      throw std::runtime_error("Remote cleanup budget exhausted.");
+    return static_cast<long>(ms);
+  }
+  void Consume(size_t n) {
+    if (n > remaining) {
+      remaining = 0;
+      throw std::runtime_error("Remote cleanup byte budget exceeded.");
+    }
+    remaining -= n;
+  }
+};
 struct TransferControl {
   std::function<bool()> proceed;
   std::function<void(uint64_t)> progress;
+  NetworkCleanupBudget *cleanup = nullptr;
   void Check() const {
     if (proceed && !proceed())
       throw Cancelled();
+    if (cleanup)
+      cleanup->TimeoutMs();
   }
   void Tick(uint64_t n) const {
     Check();

@@ -90,7 +90,13 @@ struct TempFile {
 };
 std::string RemoteDigest(const std::string &path, const TransferControl &control) {
   Sha256 hash;
-  ReadFile(path, [&](const char *data, size_t count) { hash.Update(data, count); }, control);
+  ReadFile(path, [&](const char *data, size_t count) {
+    if (control.cleanup) {
+      control.Check();
+      control.cleanup->Consume(count);
+    }
+    hash.Update(data, count);
+  }, control);
   return hash.Finish();
 }
 bool Same(const FileEntry &a, const FileEntry &b) {
@@ -387,7 +393,7 @@ struct Runner {
       if (backupExists) {
         if (RemoteDigest(backup, control) != originalDigest)
           throw std::runtime_error("Original backup changed; retained for manual inspection.");
-        RemoveFile(backup, false, {});
+        RemoveFile(backup, false, control);
         backupExists = false;
       }
       recovery.Retire();
@@ -395,27 +401,53 @@ struct Runner {
         hooks.fileDone(src, dst);
     } catch (...) {
       auto failure = std::current_exception();
-      if (stagedExists)
+      try {
+        std::rethrow_exception(failure);
+      } catch (const Cancelled &) {
+        result.cancelled = true;
+      } catch (...) {
+      }
+      NetworkCleanupBudget budget;
+      TransferControl cleanup{[&] {
+        if (hooks.proceed && !hooks.proceed())
+          result.cancelled = true;
+        return !result.cancelled;
+      }, {}, &budget};
+      // No network work after explicit cancellation. SMB's synchronous library
+      // and session lock have no total deadline; defer its recovery on error.
+      const bool reconcile = !result.cancelled && ParseLocation(dst).scheme != "smb";
+      auto matches = [&](const std::string &path, const FileEntry &file,
+                         const std::string &digest) {
+        return !file.directory && !file.link && file.sizeKnown && file.size >= 0 &&
+               uint64_t(file.size) <= budget.remaining &&
+               RemoteDigest(path, cleanup) == digest;
+      };
+      // Prefer restoring the original if either check would consume the budget.
+      if (reconcile && backupExists)
         try {
-          FileEntry remote;
-          if (!StatFile(staged, remote, {}))
-            stagedExists = false;
-          else if (receipt.contentVerified && RemoteDigest(staged, {}) == expectedDigest) {
-            RemoveFile(staged, false, {});
-            stagedExists = false;
+          FileEntry current, saved;
+          if (!StatFile(backup, saved, cleanup)) {
+            backupExists = false;
+          } else if (Same(target, saved) && matches(backup, saved, originalDigest) &&
+                     !StatFile(dst, current, cleanup)) {
+            RenameFile(backup, dst, cleanup);
+            backupExists = false;
           }
+        } catch (const Cancelled &) {
+          result.cancelled = true;
         } catch (...) {
         }
-      if (backupExists)
+      if (reconcile && stagedExists)
         try {
-          FileEntry check, saved;
-          if (!StatFile(backup, saved, {})) {
-            backupExists = false;
-          } else if (Same(target, saved) && RemoteDigest(backup, {}) == originalDigest &&
-                     !StatFile(dst, check, {})) {
-            RenameFile(backup, dst, {});
-            backupExists = false;
+          FileEntry remote;
+          if (!StatFile(staged, remote, cleanup))
+            stagedExists = false;
+          else if (receipt.contentVerified && matches(staged, remote, expectedDigest)) {
+            RemoveFile(staged, false, cleanup);
+            stagedExists = false;
           }
+        } catch (const Cancelled &) {
+          result.cancelled = true;
         } catch (...) {
         }
       entry.status = committed ? "partial" : commitAttempted ? "outcome unknown" : "source-retained";
@@ -437,7 +469,6 @@ struct Runner {
         try {
           std::rethrow_exception(failure);
         } catch (const Cancelled &) {
-          result.cancelled = true;
           message += "Operation was cancelled.";
         } catch (const std::exception &e) {
           message += e.what();
@@ -541,6 +572,8 @@ Result RunVirtual(const Job &job, const Hooks &hooks) {
         runner.result.errors.push_back(source + ": " + e.what());
         if (hooks.fileFailed)
           hooks.fileFailed(source, e.what());
+        if (runner.result.cancelled)
+          break;
       }
     }
   } catch (const Cancelled &) {

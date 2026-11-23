@@ -252,6 +252,14 @@ not mean an in-flight write has stopped, and it does not undo completed work.
 See the [virtual USB result](VERIFICATION.md#0361-3-package-results) and the
 [physical USB test, not yet run](VERIFICATION.md#physical-usb-disconnect-during-copy).
 
+In the development version, cancelling an upload does not start another
+download to verify or remove temporary files. If the old destination has
+already been renamed, its contents may be at the reported backup path rather
+than the original name. Keep the local source and check the destination and
+reported recovery paths before restoring, deleting, or retrying. A failed
+SMB upload also leaves any uncertain files for manual recovery: Listi cannot
+set an overall time limit on the SMB rollback calls.
+
 If Listi stops unexpectedly during a local copy or move, compare the source
 and destination before retrying. A hidden `.listi-copy-*` sibling in the
 destination folder can be an unfinished file, not a backup. Other entries

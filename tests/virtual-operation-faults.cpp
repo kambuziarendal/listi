@@ -36,6 +36,10 @@ namespace {
 struct Remote { std::string data; int64_t modified = 1; };
 std::map<std::string, Remote> files;
 bool corruptUpload = false, denyReadback = false, cancelReadback = false;
+bool cancelAtReadyCheck = false;
+unsigned postCancelReadCalls = 0;
+bool commitFailed = false, expireDuringCleanup = false;
+size_t cleanupReadBytes = 0;
 bool truncateUpload = false, omitStageSize = false, growSourceOnRead = false;
 bool failCommit = false, failRollback = false, failPartCleanup = false,
      failBackupCleanup = false, cancelAfterBackup = false, cancelled = false,
@@ -56,6 +60,11 @@ void ReadArchive(const Location &, const DataSink &, const TransferControl &) {
   throw std::runtime_error("Unexpected archive dispatch");
 }
 bool StatNetwork(const Location &l, FileEntry &entry, const TransferControl &c) {
+  if (expireDuringCleanup && c.cleanup)
+    c.cleanup->deadline = NetworkCleanupBudget::Clock::now();
+  // The target is statted before staging, then again after Ready.
+  if (cancelAtReadyCheck && l.URL() == destination && files.size() == 2)
+    cancelled = true;
   c.Check();
   auto it = files.find(l.URL());
   if (it == files.end()) return false;
@@ -76,6 +85,8 @@ std::vector<FileEntry> ListNetwork(const Location &l, const TransferControl &c) 
   return out;
 }
 void ReadNetwork(const Location &l, const DataSink &sink, const TransferControl &c) {
+  if (cancelled)
+    ++postCancelReadCalls;
   c.Check();
   if (cancelReadback && suffix(l.URL(), ".part")) {
     cancelled = true;
@@ -83,6 +94,8 @@ void ReadNetwork(const Location &l, const DataSink &sink, const TransferControl 
   }
   if (denyReadback && suffix(l.URL(), ".part")) throw std::runtime_error("readback denied");
   auto &data = files.at(l.URL()).data;
+  if (commitFailed)
+    cleanupReadBytes += data.size();
   if (growSourceOnRead && l.URL() == "sftp://fixture/in/input") {
     std::string grown = data + "more data";
     sink(grown.data(), grown.size());
@@ -111,8 +124,11 @@ void ChangeNetwork(const Location &l, const char *action,
   }
   if (std::string(action) != "rename")
     throw std::runtime_error("Unexpected operation");
-  if ((suffix(source, ".part") && failCommit) ||
-      (suffix(source, ".previous") && failRollback))
+  if (suffix(source, ".part") && failCommit) {
+    commitFailed = true;
+    throw std::runtime_error("injected commit failure");
+  }
+  if (suffix(source, ".previous") && failRollback)
     throw std::runtime_error("injected rename failure");
   if (!files.count(source) || files.count(target))
     throw std::runtime_error("rename precondition");
@@ -137,6 +153,10 @@ int main() {
     std::cout << (ok ? "PASS " : "FAIL ") << label << '\n';
   };
   auto reset = [&] {
+    postCancelReadCalls = 0;
+    commitFailed = expireDuringCleanup = false;
+    cleanupReadBytes = 0;
+    cancelAtReadyCheck = false;
     cancelReadback = corruptUpload = denyReadback = truncateUpload = omitStageSize = false;
     files = {{destination, {"old contents", 1}}}; done = 0;
     failCommit = failRollback = failPartCleanup = failBackupCleanup = false;
@@ -148,6 +168,16 @@ int main() {
   };
   auto errorHas = [](const Result &r, const char *text) {
     for (auto &error : r.errors) if (error.find(text) != std::string::npos) return true;
+    return false;
+  };
+  auto reportedCopy = [&](const Result &r, const char *suffixText, const std::string &bytes) {
+    if (r.outcomes.size() != 1 || !r.outcomes.front().upload)
+      return false;
+    for (const auto &path : r.outcomes.front().upload->recoveryPaths) {
+      const auto found = files.find(path);
+      if (suffix(path, suffixText) && found != files.end() && found->second.data == bytes)
+        return true;
+    }
     return false;
   };
   Hooks hooks;
@@ -218,10 +248,44 @@ int main() {
   check(r.completed == 0 && !r.errors.empty() && done == 0 && files.size() == 1 &&
         files.at(destination).data == "old contents",
         "failed commit restores original and removes staged upload");
-  reset(); cancelAfterBackup = true; r = RunVirtual(job, hooks);
-  check(r.cancelled && r.completed == 0 && done == 0 && files.size() == 1 &&
-        files.at(destination).data == "old contents",
-        "cancellation between backup and commit rolls back without cancellation blocking recovery");
+  reset();
+  const std::string largeOriginal(2 * 1024 * 1024, 'o');
+  files.at(destination).data = largeOriginal;
+  failCommit = true;
+  r = RunVirtual(job, hooks);
+  check(commitFailed && !r.cancelled && !r.completed && !done && !files.count(destination) &&
+            cleanupReadBytes <= 1024 * 1024 && reportedCopy(r, ".previous", largeOriginal) &&
+            errorHas(r, ".previous"),
+        "failed publication leaves oversized original at reported backup without a full reread");
+  reset();
+  failCommit = expireDuringCleanup = true;
+  r = RunVirtual(job, hooks);
+  check(commitFailed && !r.cancelled && !r.completed && !done && !files.count(destination) &&
+            cleanupReadBytes == 0 && reportedCopy(r, ".previous", "old contents") &&
+            reportedCopy(r, ".part", "new contents"),
+        "expired cleanup deadline retains both recovery paths without further reads");
+  for (bool afterBackup : {false, true}) {
+    reset();
+    cancelAtReadyCheck = !afterBackup;
+    cancelAfterBackup = afterBackup;
+    r = RunVirtual(job, hooks);
+    check(r.cancelled && !r.completed && !done && postCancelReadCalls == 0,
+          afterBackup ? "cancel after backup starts no further remote reads"
+                      : "cancel after Ready starts no further remote reads");
+    std::ifstream input(source);
+    std::string retained(std::istreambuf_iterator<char>(input), {});
+    const bool verifiedButUnpublished = r.outcomes.size() == 1 && r.outcomes.front().upload &&
+        r.outcomes.front().upload->contentVerified &&
+        r.outcomes.front().upload->publication == Publication::NotAttempted;
+    const auto target = files.find(destination);
+    const bool targetIntact = target != files.end() && target->second.data == "old contents";
+    check(verifiedButUnpublished && retained == "new contents" && files.size() == 2 &&
+              reportedCopy(r, ".part", retained) &&
+              (afterBackup ? target == files.end() && reportedCopy(r, ".previous", "old contents")
+                           : targetIntact),
+          afterBackup ? "cancel after backup retains source and reports both recovery files"
+                      : "cancel after Ready retains source and old target and reports staged bytes");
+  }
   reset(); failCommit = failRollback = true; r = RunVirtual(job, hooks);
   check(r.completed == 0 && done == 0 && !files.count(destination) &&
         has(".previous") && !has(".part") && errorHas(r, ".previous"),
