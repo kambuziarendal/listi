@@ -375,33 +375,33 @@ Result RunArchiveEdit(const Job &job, const Hooks &hooks,
         VerifyMovedEntry(child, ChildLocation(root, Leaf(child)), verify, true);
       check();
     }
-    // Full external tree guards belong at the destructive publication boundary,
-    // not in every decoder progress callback. No callback or I/O that changes
-    // the destination is allowed between this guard and the archive rename.
     stage.recovery->Advance(RecoveryPhase::Ready);
     stage.recovery->Advance(RecoveryPhase::Publishing);
     if (beforePublish)
       beforePublish();
-    struct stat original, named;
-    FD originalFd(
-        open(job.destination.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK));
-    Require(
-        originalFd.n >= 0 && !fstat(originalFd.n, &original) &&
-            !lstat(job.destination.c_str(), &named) &&
-            Unchanged(original, named),
-        "The archive was replaced while it was being edited. Nothing was changed.");
-    struct stat namedOutput;
-    Require(!lstat(outputPath.c_str(), &namedOutput) &&
-                Unchanged(verifiedOutput, namedOutput),
-            "The verified output changed. Original archive was retained.");
+    // Journal writes and callbacks can take time. Never adopt a fresh baseline
+    // here: the output was built from the revision captured before extraction.
+    check();
+    originalSet.Verify();
     FD parent(stage.parent.Dup()), stageDir(stage.dir.Dup());
-    const auto targetLeaf = Leaf(job.destination);
-    Require(parent.n >= 0 && stageDir.n >= 0 &&
-            !fstatat(parent.n, targetLeaf.c_str(), &named, AT_SYMLINK_NOFOLLOW) &&
-            Unchanged(original, named) &&
-            !fstatat(stageDir.n, "updated", &named, AT_SYMLINK_NOFOLLOW) &&
-            Unchanged(verifiedOutput, named),
+    Require(parent.n >= 0 && stageDir.n >= 0,
             "Cannot open the archive directory before publishing. Original archive was retained.");
+    const auto targetLeaf = Leaf(job.destination);
+    FD originalFd(openat(parent.n, targetLeaf.c_str(),
+                         O_RDONLY | O_NOFOLLOW | O_NONBLOCK));
+    struct stat original, named;
+    Require(originalFd.n >= 0 && !fstat(originalFd.n, &original) &&
+                S_ISREG(original.st_mode) &&
+                ArchivePasswordIdentity(original) == originalSet.files.front().identity,
+            "The archive changed while it was being edited. Nothing was changed.");
+    Require(!fstatat(stageDir.n, "updated", &named, AT_SYMLINK_NOFOLLOW) &&
+                Unchanged(verifiedOutput, named),
+            "The verified output changed. Original archive was retained.");
+    // Haiku has no revision-conditional rename. Check the target name against
+    // the validated descriptor immediately before replacing it in that parent.
+    Require(!fstatat(parent.n, targetLeaf.c_str(), &named, AT_SYMLINK_NOFOLLOW) &&
+                Unchanged(original, named),
+            "The archive changed while it was being edited. Nothing was changed.");
     Require(
         !renameat(stageDir.n, "updated", parent.n, targetLeaf.c_str()),
         "Could not publish the updated archive. The original was left in place.");
