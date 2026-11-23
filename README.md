@@ -12,12 +12,12 @@ We want you to be able to browse another folder or cancel a copy while hundreds 
 
 ## Install
 
-The latest packaged build is older than the development source on this page. To try the changes described above, [build from source](#build-from-source); there is no published 0.38.0 HPKG.
+Revision 0.38.0-12 includes the folder refresh and transfer recovery changes described above.
 
-Download the **[0.37.1-2 alpha test candidate for Haiku x86_64](https://github.com/kambuziarendal/listi/releases/tag/v0.37.1-2)**. Open the HPKG in HaikuDepot, or install it from the download folder:
+Download the **[0.38.0-12 alpha test candidate for Haiku x86_64](https://github.com/kambuziarendal/listi/releases/tag/v0.38.0-12)**. Open the HPKG in HaikuDepot, or install it from the download folder:
 
 ```sh
-pkgman install ./Listi-0.37.1-2-x86_64.hpkg
+pkgman install ./Listi-0.38.0-12-x86_64.hpkg
 ```
 
 This is alpha software. See the release notes for what was tested, and try it on copies of your files. To transfer files between disks, use **Copy**, remount the destination and check the copy before removing the original. In 0.36.1-3 a virtual USB disconnect could leave a regular-file copy waiting after **Cancel**. Newer candidates isolate staged data writes and flushes on USB destinations so a stalled request cannot later publish the file. The [physical USB test](docs/VERIFICATION.md#physical-usb-disconnect-during-copy) has not been run.

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased: 0.38.0 development source
+## [0.38.0-12 alpha test candidate](https://github.com/kambuziarendal/listi/releases/tag/v0.38.0-12)
 
 - An open destination folder now shows newly copied files in batches. Finishing or cancelling a job still refreshes the final listing.
 - Recording recoverable file operations costs less during small-file copies. The journal is still written; this is not a fast mode that skips safety checks.

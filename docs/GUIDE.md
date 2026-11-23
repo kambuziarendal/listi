@@ -1,6 +1,6 @@
 # Workflow guide
 
-This guide describes the development source. The [packaged alpha](../README.md#install) predates the latest transfer and recovery changes. New to Listi? Start with the [feature tour](FEATURES.md). Try file operations on disposable copies and keep independent backups.
+This guide describes the development source. The [0.38.0-12 packaged alpha](../README.md#install) includes the latest transfer and recovery changes. New to Listi? Start with the [feature tour](FEATURES.md). Try file operations on disposable copies and keep independent backups.
 
 ## Small features at a glance
 
