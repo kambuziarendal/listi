@@ -107,7 +107,8 @@ std::vector<FileEntry> ListFiles(const std::string &p,
   closedir(dir);
   return out;
 }
-bool StatFile(const std::string &p, FileEntry &e, const TransferControl &c) {
+bool StatFile(const std::string &p, FileEntry &e, const TransferControl &c,
+              const FileEntry *discovered) {
   c.Check();
   auto l = ParseLocation(p);
   if (l.Archive()) {
@@ -120,7 +121,7 @@ bool StatFile(const std::string &p, FileEntry &e, const TransferControl &c) {
     return StatArchive(l, e, c);
   }
   if (!l.Local())
-    return StatNetwork(l, e, c);
+    return StatNetwork(l, e, c, discovered);
   struct stat st;
   if (lstat(p.c_str(), &st)) {
     if (errno == ENOENT)

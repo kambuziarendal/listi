@@ -60,7 +60,8 @@ bool StatArchive(const Location &, FileEntry &, const TransferControl &) { throw
 void ReadArchive(const Location &, const DataSink &, const TransferControl &) {
   throw std::runtime_error("Unexpected archive dispatch");
 }
-bool StatNetwork(const Location &l, FileEntry &entry, const TransferControl &c) {
+bool StatNetwork(const Location &l, FileEntry &entry, const TransferControl &c,
+                 const FileEntry *) {
   if (expireDuringCleanup && c.cleanup)
     c.cleanup->deadline = NetworkCleanupBudget::Clock::now();
   // The target is statted before staging, then again after Ready.

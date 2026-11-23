@@ -229,7 +229,8 @@ struct Runner {
     }
     return true;
   }
-  void Copy(const std::string &src, const std::string &dst, int depth = 0) {
+  void Copy(const std::string &src, const std::string &dst, int depth = 0,
+            const FileEntry *discovered = nullptr) {
     if (depth > 128 || ++visited > 200000)
       throw std::runtime_error("Folder tree exceeds the transfer limit");
     const auto parent = ParentLocation(dst);
@@ -249,7 +250,7 @@ struct Runner {
     control.Check();
     RememberDirectory(parent);
     FileEntry source, target;
-    if (!StatFile(src, source, control))
+    if (!StatFile(src, source, control, discovered))
       throw std::runtime_error("Source no longer exists");
     if (hooks.fileSize && !source.directory && !source.link &&
         source.sizeKnown && source.size >= 0)
@@ -287,8 +288,8 @@ struct Runner {
         MakeFolder(dst, control);
       }
       int skippedBefore = result.skipped;
-      for (auto &e : ListFiles(src, control))
-        Copy(e.path, ChildLocation(dst, e.name), depth + 1);
+      for (const auto &e : ListFiles(src, control))
+        Copy(e.path, ChildLocation(dst, e.name), depth + 1, &e);
       control.Check();
       if (!exists && !IsVirtual(dst)) {
         if (fchmod(directory->Descriptor(), source.permissions & 0777))

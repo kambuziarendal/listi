@@ -140,6 +140,18 @@ class MetadataSFTP(paramiko.SFTPServerInterface):
             handle.readfile = self.resolve(path).open("rb")
             # curl may use FSTAT for size on the open handle.
             handle.stat = lambda: self.stat(path)
+            if path == "/recursive/changed":
+                def read(offset, length):
+                    handle.readfile.seek(offset)
+                    data = handle.readfile.read(length)
+                    local = self.resolve(path)
+                    if data and local.stat().st_mtime == MODIFIED:
+                        with local.open("r+b") as file:
+                            file.seek(-1, os.SEEK_END)
+                            file.write(b"x")
+                        os.utime(local, (MODIFIED + 1, MODIFIED + 1))
+                    return data
+                handle.read = read
             return handle
         except OSError as error:
             return paramiko.SFTPServer.convert_errno(error.errno)
@@ -160,6 +172,10 @@ def main():
     changed = ftp_root / "changed"
     changed.write_bytes(b"d" * (2 * 1024 * 1024))
     os.utime(changed, (MODIFIED, MODIFIED))
+    (ftp_root / "recursive").mkdir()
+    recursive_ftp = ftp_root / "recursive" / "changed"
+    recursive_ftp.write_bytes(changed.read_bytes())
+    os.utime(recursive_ftp, (MODIFIED, MODIFIED))
 
     sftp_root = staging / "sftp"
     (sftp_root / "compare").mkdir(parents=True)
@@ -167,6 +183,10 @@ def main():
         file = sftp_root / name
         file.write_bytes(b"fixture contents\n")
         os.utime(file, (MODIFIED, MODIFIED))
+    (sftp_root / "recursive").mkdir()
+    recursive_sftp = sftp_root / "recursive" / "changed"
+    recursive_sftp.write_bytes(changed.read_bytes())
+    os.utime(recursive_sftp, (MODIFIED, MODIFIED))
     key = paramiko.RSAKey.generate(2048)
     (staging / "known_hosts").write_text(f"[{ADDRESS}]:2227 {key.get_name()} {key.get_base64()}\n")
 

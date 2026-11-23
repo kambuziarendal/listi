@@ -96,7 +96,10 @@ void SetConnection(const std::string &url, const Connection &);
 Connection GetConnection(const std::string &url);
 std::vector<FileEntry> ListFiles(const std::string &,
                                  const TransferControl & = {});
-bool StatFile(const std::string &, FileEntry &, const TransferControl & = {});
+// Only a copy's initial FTP/SFTP lookup may reuse an entry from its traversal.
+// Leave discovered unset when checking the current revision.
+bool StatFile(const std::string &, FileEntry &, const TransferControl & = {},
+              const FileEntry *discovered = nullptr);
 using DataSink = std::function<void(const char *, size_t)>;
 void ReadFile(const std::string &, const DataSink &,
               const TransferControl & = {});
@@ -115,7 +118,8 @@ void ReadArchive(const Location &, const DataSink &, const TransferControl &);
 bool ArchiveAvailable();
 bool NetworkAvailable(const std::string &scheme);
 std::vector<FileEntry> ListNetwork(const Location &, const TransferControl &);
-bool StatNetwork(const Location &, FileEntry &, const TransferControl &);
+bool StatNetwork(const Location &, FileEntry &, const TransferControl &,
+                 const FileEntry *discovered = nullptr);
 void ReadNetwork(const Location &, const DataSink &, const TransferControl &);
 void UploadNetwork(const std::string &, const Location &,
                    const TransferControl &);

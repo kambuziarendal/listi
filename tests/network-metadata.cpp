@@ -132,6 +132,25 @@ int main() {
         {local + "/compare", ChildLocation(sftp, "compare"), true});
     Expect(compare.complete && compare.different == 0 && compare.verified == 1,
            "SFTP folder comparison verifies content with before/after STAT");
+
+    std::filesystem::create_directory(local + "/recursive");
+    const auto destination = local + "/recursive/changed";
+    for (const auto &server : {ftp, sftp}) {
+      std::ofstream(destination) << "original destination";
+      const auto folder = ChildLocation(server, "recursive");
+      const auto beforeChild = Stat(folder, "changed");
+      const auto result = copy(server, "recursive");
+      const auto afterChild = Stat(folder, "changed");
+      Expect(beforeChild.modifiedKnown && afterChild.modifiedKnown &&
+                 beforeChild.size == afterChild.size &&
+                 !beforeChild.SameModification(afterChild) &&
+                 !result.errors.empty() &&
+                 result.errors.front().find("Source changed") !=
+                     std::string::npos &&
+                 completed == 3 && notified == 3 &&
+                 Read(destination) == "original destination",
+             server + " recursive copy uses fresh post-read metadata");
+    }
   } catch (const std::exception &error) {
     std::cerr << "FAIL " << error.what() << std::endl;
     status = 1;
