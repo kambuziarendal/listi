@@ -8,7 +8,7 @@ required = runpy.run_path(str(ROOT / "tests/run-native-audit.py"))["REQUIRED"]
 # a second volume. Some are run in the extended or portable tiers instead.
 other = set("""
 app-icon archive-backends archive-extraction archive-job-fixtures archive-module-retry
-cross-volume-move folder-compare-network native-preview network-disconnect network-interruptions network-metadata
+cross-volume-move directory-scaling folder-compare-network native-preview network-disconnect network-interruptions network-metadata
 open-with open-with-receiver parsing-fuzz staging-budget theme
 """.split())
 sources = {p.stem for p in (ROOT / "tests").glob("*.cpp")}
