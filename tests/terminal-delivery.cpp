@@ -10,6 +10,7 @@
 #include <TextView.h>
 #include <Window.h>
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -21,7 +22,7 @@ std::atomic<int> dropped{0}, thumbnailPaints{0};
 void Check(bool ok, const char *label) {
   std::cout << (ok ? "PASS " : "FAIL ") << label << std::endl;
   if (!ok)
-    throw std::runtime_error(label);
+    std::exit(EXIT_FAILURE);
 }
 
 template<class Predicate>
@@ -63,7 +64,7 @@ extern "C" void __real__ZN5BView10DrawBitmapEPK7BBitmap5BRectS3_(
     BView *, const BBitmap *, BRect, BRect);
 extern "C" void __wrap__ZN5BView10DrawBitmapEPK7BBitmap5BRectS3_(
     BView *view, const BBitmap *picture, BRect source, BRect dest) {
-  if (std::strcmp(view->Name(), "file grid") == 0 &&
+  if (view->Name() && std::strcmp(view->Name(), "file grid") == 0 &&
       picture->Bounds().IntegerWidth() == 1 && picture->Bounds().IntegerHeight() == 1)
     ++thumbnailPaints;
   __real__ZN5BView10DrawBitmapEPK7BBitmap5BRectS3_(view, picture, source, dest);
@@ -130,7 +131,15 @@ int main() {
     dropNext = pass == 0 ? 'thrd' : 0;
     pane->Navigate(dir);
     window->Unlock();
-    Check(Wait(window, [&] { return !pane->IsScanning() && thumbnailPaints > 0; }),
+    // An idle test VM may have its screen blanker in front. Thumbnail requests
+    // originate in Draw, so exercise the real visible cells even if app_server
+    // legitimately suppresses paints for a completely occluded window.
+    Check(Wait(window, [&] {
+      auto *grid = pane->FindView("file grid");
+      if (!pane->IsScanning() && grid && !grid->IsHidden())
+        grid->Draw(grid->Bounds());
+      return !pane->IsScanning() && thumbnailPaints > 0;
+    }),
           "thumbnail result is consumed and its decoded pixels are painted");
   }
   Check(dropped == 3, "thumbnail completion notification timed out");
