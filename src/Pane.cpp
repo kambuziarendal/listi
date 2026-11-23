@@ -206,6 +206,7 @@ Pane::~Pane() {
   scanTimer.reset();
   stop_watching(this);
   Listi::RetireReadWorker(scanner);
+  Listi::RetireReadWorker(iconReader);
 }
 void Pane::AttachedToWindow() {
   display->Menu()->SetTargetForItems(this);
@@ -355,7 +356,7 @@ void Pane::SetDisplayMode(int32 value) {
                                                            : 1);
   columns->SetEnabled(mode == MillerMode);
   if (mode == 0)
-    list->SyncSelection();
+    list->Refresh();
   else if (mode == MillerMode) {
     columns->SetLocation(path.String());
     columns->Refresh();
@@ -407,6 +408,7 @@ void Pane::FocusFilter() {
 void Pane::ClearRows() {
   SetFilterEmptyState(false);
   ++selectionRevision;
+  pendingIcons.clear();
   entries.Clear();
   icons.Clear();
   list->Refresh();
@@ -557,8 +559,9 @@ void Pane::StartNavigation(const std::string &request, int target, bool trash) {
     clearFilter->SetEnabled(false);
   }
   path = request.c_str();
-  SetDisplayMode(LocationMode());
   edit->SetText(path);
+  if (!pendingIcons.empty())
+    Listi::RetireReadWorker(iconReader);
   if (scanning)
     Listi::RetireReadWorker(scanner);
   if (!scanner)
@@ -573,12 +576,14 @@ void Pane::StartNavigation(const std::string &request, int target, bool trash) {
   generation->store(serial);
   directoryWatch->Begin(serial, sameDirectory, BMessenger(this));
   ClearRows();
+  SetDisplayMode(LocationMode());
   navigationFailed = false;
   SetStatus("Reading directory...");
   BMessage m(kScan);
   m.AddString("path", path);
   m.AddInt64("serial", serial);
-  m.AddBool("icons", prefs.icons || (mode > 0 && mode < MillerMode));
+  m.AddBool("icons", false);
+  m.AddBool("firstScreen", true);
   m.AddInt32("iconSize", mode == 0 || mode == MillerMode ? 16 : 96);
   m.AddBool("trash", trash);
   if (mode == 0)
@@ -611,6 +616,28 @@ void Pane::ScheduleDirectoryRefresh() {
       directoryRefreshPending = false;
       Reload();
     }
+  }
+}
+void Pane::RequestVisibleIcon(PaneEntry &row) {
+  if (row.iconRequested || pendingIcons.size() >= 64 ||
+      ((mode == 0 || mode == MillerMode) && !prefs.icons))
+    return;
+  if (!iconReader) {
+    iconReader = CreateDirectoryScanner(BMessenger(this), generation);
+    if (!Listi::StartReadWorker(iconReader))
+      return;
+  }
+  BMessage request(kReadVisibleIcon);
+  request.AddInt64("serial", serial);
+  request.AddString("path", row.path.c_str());
+  request.AddString("name", row.name.c_str());
+  request.AddBool("directory", row.directory);
+  request.AddInt64("device", row.device);
+  request.AddInt64("node", row.node);
+  request.AddInt32("iconSize", mode == 0 || mode == MillerMode ? 16 : 96);
+  if (iconReader->PostMessage(&request) == B_OK) {
+    row.iconRequested = true;
+    pendingIcons[row.path] = &row;
   }
 }
 void Pane::Reload() {
@@ -1071,6 +1098,25 @@ void Pane::MessageReceived(BMessage *m) {
     }
     break;
   }
+  case kVisibleIconReady: {
+    if (m->GetInt64("serial", -1) != serial)
+      break;
+    auto item = pendingIcons.find(m->GetString("path", ""));
+    if (item == pendingIcons.end())
+      break;
+    const void *bits;
+    ssize_t length;
+    if (m->FindData("icon", B_RAW_TYPE, &bits, &length) == B_OK)
+      item->second->icon = icons.Get(bits, length, m->GetInt32("iconSize", 0));
+    pendingIcons.erase(item);
+    if (mode == 0)
+      list->Redraw();
+    else if (mode == MillerMode)
+      columns->RedrawRows();
+    else
+      grid->Invalidate();
+    break;
+  }
   case kCheckScanDelivery: {
     if (scanning && m->GetInt64("serial", -1) == serial &&
         scanDelivery->failedSerial.load() == serial) {
@@ -1087,7 +1133,7 @@ void Pane::MessageReceived(BMessage *m) {
     if (!scanning || m->GetInt64("serial", -1) != serial)
       break;
     BMessage e;
-    std::vector<std::string> restore;
+    const size_t first = entries.Visible().size();
     for (int i = 0; m->FindMessage("entry", i, &e) == B_OK; i++) {
       auto row = std::make_unique<PaneEntry>();
       row->name = e.GetString("name", "");
@@ -1106,9 +1152,8 @@ void Pane::MessageReceived(BMessage *m) {
       // Virtual listings have no local node identity; retain their path-based
       // behavior. A replacement local entry must not inherit selection.
       auto saved = savedSelection.find(row->path);
-      if (saved != savedSelection.end() &&
-          saved->second == std::make_pair(row->device, row->node))
-        restore.push_back(row->path);
+      bool restore = saved != savedSelection.end() &&
+                     saved->second == std::make_pair(row->device, row->node);
       row->size = e.GetInt64("size", 0);
       row->sizeKnown = e.GetBool("sizeKnown", true);
       row->modified = e.GetInt64("date", 0);
@@ -1125,13 +1170,14 @@ void Pane::MessageReceived(BMessage *m) {
           length == pixels * pixels * 4) {
         row->icon = icons.Get(bits, length, pixels);
       }
-      entries.Add(std::move(row));
+      entries.AddScanned(std::move(row), einn ? "" : filter->Text(), restore);
     }
-    entries.Filter(einn ? "" : filter->Text());
-    entries.RestoreSelection(restore);
-    list->Refresh();
-    grid->Update();
-    columns->Refresh();
+    if (mode == 0)
+      list->Append(first);
+    else if (mode == MillerMode)
+      columns->Refresh();
+    else
+      grid->Update();
     break;
   }
   case kScanDone: {
@@ -1142,6 +1188,8 @@ void Pane::MessageReceived(BMessage *m) {
     scanTimer.reset();
     path = m->GetString("path", path);
     locationValid = !m->HasString("error");
+    if (locationValid && mode != 0)
+      entries.Sort(entries.Sorting());
     history.Complete(serial, path.String(), locationValid);
     UpdateNavigation();
     SetDisplayMode(LocationMode());

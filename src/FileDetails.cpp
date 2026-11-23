@@ -95,8 +95,9 @@ class NameColumn : public BStringColumn {
 public:
   Preferences prefs;
   BView *batchTarget = nullptr;
-  NameColumn(const Preferences &p)
-      : BStringColumn("Name", 260, 80, 1200, B_TRUNCATE_MIDDLE), prefs(p) {}
+  Pane *pane;
+  NameColumn(Pane *owner, const Preferences &p)
+      : BStringColumn("Name", 260, 80, 1200, B_TRUNCATE_MIDDLE), prefs(p), pane(owner) {}
   void DrawField(BField *f, BRect r, BView *v) override {
     v->SetFont(&prefs.font);
     auto n = static_cast<NameField *>(f);
@@ -108,6 +109,7 @@ public:
                                   : n->entry->kind == 2 ? prefs.links
                                                         : prefs.files));
     if (prefs.icons) {
+      pane->RequestVisibleIcon(*n->entry);
       if (n->entry->icon) {
         v->SetDrawingMode(B_OP_ALPHA);
         float top = r.top + (r.Height() - 16) / 2;
@@ -246,7 +248,7 @@ public:
       : AdaptiveColumnList("files", B_WILL_DRAW | B_NAVIGABLE | B_DRAW_ON_CHILDREN,
                         B_FANCY_BORDER),
         pane(p), model(state) {
-    name = new NameColumn(prefs);
+    name = new NameColumn(p, prefs);
     name->batchTarget = ScrollView();
     AddColumn(name, 0);
     size = new SizeColumn(prefs.font);
@@ -452,7 +454,7 @@ public:
   }
   bool CancelSelectionGesture() override { return list->band->Escape(); }
   void MakeFocus(bool focus = true) override { list->MakeFocus(focus); }
-  void Redraw() override { list->Invalidate(); }
+  void Redraw() override { list->ScrollView()->Invalidate(); }
   void RedrawEntry(const std::string &path) override {
     auto found = rows.find(path);
     if (found != rows.end())
@@ -503,6 +505,20 @@ public:
   }
   void Refresh() override {
     list->syncing = true;
+    if (model->Visible().empty() && !rows.empty()) {
+      // Remove one row through the normal API to release the native focus
+      // and hover bookkeeping; Clear owns and destroys the remaining rows.
+      auto *first = list->FocusRow();
+      if (!first)
+        first = list->RowAt(0);
+      list->RemoveRow(first);
+      delete first;
+      list->Clear();
+      rows.clear();
+      list->syncing = false;
+      list->UpdateScrollBars();
+      return;
+    }
     std::set<std::string> visible;
     for (auto entry : model->Visible())
       visible.insert(entry->path);
@@ -514,7 +530,16 @@ public:
       } else
         ++it;
     }
-    for (auto entry : model->Visible()) {
+    Append(0);
+    SyncSelection();
+  }
+  void Append(size_t first) override {
+    list->syncing = true;
+    const auto &visible = model->Visible();
+    BList added;
+    std::vector<BRow *> selected;
+    for (size_t i = first; i < visible.size(); ++i) {
+      auto entry = visible[i];
       if (rows.count(entry->path))
         continue;
       auto row = new FileRow(entry, std::max(22.f, prefs.font.Size() + 9));
@@ -531,11 +556,15 @@ public:
                                             : AttributeCellPreview{}),
                       3 + i);
       rows.emplace(entry->path, row);
-      list->AddRow(row);
+      added.AddItem(row);
+      if (model->IsSelected(entry->path))
+        selected.push_back(row);
     }
+    list->AddRows(&added, -1);
+    for (auto *row : selected)
+      list->AddToSelection(row);
     list->syncing = false;
     list->UpdateScrollBars();
-    SyncSelection();
   }
   void SyncSelection() override {
     if (list->syncing)

@@ -78,6 +78,7 @@ public:
   void SendSelection(bool gesture = false);
   void ContextMenu(const std::string &entry, BPoint screen);
   void ShowStatus(const char *text) { SetStatus(text); }
+  void RequestVisibleIcon(PaneEntry &);
   PaneSort Sorting();
   void Sort(PaneSort);
   int32 CurrentView() const { return mode; }
@@ -103,6 +104,8 @@ private:
   std::vector<std::string> attributeColumns;
   bool attributeDetails = false;
   IconCache icons;
+  Listi::ReadWorker *iconReader = nullptr;
+  std::map<std::string, PaneEntry *> pendingIcons;
   FileDetails *list;
   FileGrid *grid;
   MillerColumns *columns;

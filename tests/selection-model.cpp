@@ -10,6 +10,17 @@ static void check(bool ok, const char* label) {
   printf("PASS %s\n", label);
 }
 int main() {
+  PaneModel scan;
+  for (const auto *name : {"match-b", "other", "match-a"}) {
+    auto row = std::make_unique<PaneEntry>();
+    row->path = row->name = name;
+    scan.AddScanned(std::move(row), "match", true);
+  }
+  check(scan.Visible().size() == 2 && scan.Visible()[0]->name == "match-b" &&
+        scan.HiddenCount() == 1, "incoming rows filter without sorting the previous batch");
+  scan.Sort(scan.Sorting());
+  check(scan.Selected() == std::vector<std::string>{"match-a", "match-b"},
+        "scan completion sorts visible rows and keeps restored selections");
   PaneModel model;
   std::vector<std::string> paths;
   for (int i = 0; i < 10000; ++i) {

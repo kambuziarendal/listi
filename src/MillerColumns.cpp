@@ -147,6 +147,8 @@ public:
       const float baseline =
           top + std::floor((height + font.ascent - font.descent) / 2);
       float left = 8;
+      if (Current())
+        pane->RequestVisibleIcon(*row);
       if (row->icon) {
         const float y = top + (height - 16) / 2;
         SetDrawingMode(B_OP_ALPHA);

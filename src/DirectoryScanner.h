@@ -9,6 +9,8 @@
 #include <memory>
 // Out-of-band terminal failure: even a failed completion message must release
 // the pane from its reading state. The owning pane polls this while scanning.
+inline constexpr uint32 kReadVisibleIcon = 'rvic';
+inline constexpr uint32 kVisibleIconReady = 'ivir';
 struct DirectoryScanDelivery {
   std::atomic<int64> failedSerial{0};
 };

@@ -70,6 +70,15 @@ void PaneModel::Clear() {
 void PaneModel::Add(std::unique_ptr<PaneEntry> entry) {
   entries.push_back(std::move(entry));
 }
+void PaneModel::AddScanned(std::unique_ptr<PaneEntry> entry, const char *query,
+                           bool restoreSelection) {
+  if (Listi::MatchesNameFilter(entry->name.c_str(), query, entry->parent)) {
+    visible.push_back(entry.get());
+    if (restoreSelection && !entry->parent)
+      selection.insert(entry->path);
+  }
+  entries.push_back(std::move(entry));
+}
 void PaneModel::Filter(const std::string &query) {
   visible.clear();
   for (auto &entry : entries) {
@@ -237,6 +246,8 @@ void PaneModel::SetSelection(const std::vector<std::string> &paths,
   anchor = focus;
 }
 PaneEntry *PaneModel::Focused() const {
+  if (focused.empty() && selection.empty())
+    return nullptr;
   for (auto entry : visible)
     if (entry->path == focused)
       return entry;

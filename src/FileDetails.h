@@ -14,6 +14,7 @@ public:
   virtual bool CancelSelectionGesture() = 0;
   virtual void Apply(const Preferences &) = 0;
   virtual void SetAttributes(const std::vector<std::string> &) = 0;
+  virtual void Append(size_t first) = 0;
   virtual void Refresh() = 0;
   virtual void SyncSelection() = 0;
   virtual void Redraw() = 0;

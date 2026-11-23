@@ -431,6 +431,7 @@ public:
       else
         SetHighColor(ViewColor());
       FillRoundRect(cell, 4, 4);
+      pane->RequestVisibleIcon(*row);
       BBitmap *picture = row->icon.get();
       if (mode == 3 && !row->directory && !row->parent) {
         auto found = thumbnails.find(row->path);

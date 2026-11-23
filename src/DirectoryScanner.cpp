@@ -18,6 +18,25 @@
 #include <dirent.h>
 #include <sys/stat.h>
 namespace {
+void ReadLocalIcon(const entry_ref &ref, int32 pixels, BMessage &row) {
+  BBitmap bitmap(BRect(0, 0, pixels - 1, pixels - 1), B_RGBA32);
+  if (bitmap.InitCheck() == B_OK &&
+      BNodeInfo::GetTrackerIcon(&ref, &bitmap, static_cast<icon_size>(pixels)) == B_OK)
+    row.AddData("icon", B_RAW_TYPE, bitmap.Bits(), bitmap.BitsLength());
+}
+
+void ReadVirtualIcon(const std::string &name, bool directory, int32 pixels,
+                     BMessage &row) {
+  BMimeType mime(directory ? "application/x-vnd.Be-directory" : "application/octet-stream");
+  BMimeType guessed;
+  if (!directory && BMimeType::GuessMimeType(name.c_str(), &guessed) == B_OK)
+    mime.SetTo(guessed.Type());
+  BBitmap bitmap(BRect(0, 0, pixels - 1, pixels - 1), B_RGBA32);
+  if (bitmap.InitCheck() == B_OK &&
+      mime.GetIcon(&bitmap, static_cast<icon_size>(pixels)) == B_OK)
+    row.AddData("icon", B_RAW_TYPE, bitmap.Bits(), bitmap.BitsLength());
+}
+
 class Scanner : public Listi::ReadWorker {
   BMessenger target;
   std::shared_ptr<std::atomic<int64>> generation;
@@ -48,6 +67,36 @@ public:
           std::shared_ptr<DirectoryScanDelivery> d, std::shared_ptr<DirectoryWatch> w)
       : ReadWorker("directory reader"), target(t), generation(g), delivery(d), watch(w) {}
   void MessageReceived(BMessage *m) override {
+    if (m->what == kReadVisibleIcon) {
+      const int64 serial = m->GetInt64("serial", -1);
+      if (generation->load() != serial)
+        return;
+      const char *path = m->GetString("path", "");
+      const int32 pixels = m->GetInt32("iconSize", 16);
+      BMessage reply(kVisibleIconReady);
+      reply.AddInt64("serial", serial);
+      reply.AddString("path", path);
+      reply.AddInt32("iconSize", pixels);
+      if (pixels == 16 || pixels == 96) {
+        if (Listi::IsVirtual(path)) {
+          ReadVirtualIcon(m->GetString("name", ""), m->GetBool("directory", false), pixels, reply);
+        } else {
+          struct stat st, resolved;
+          entry_ref ref;
+          if (lstat(path, &st) == 0 && st.st_dev == m->GetInt64("device", -1) &&
+              st.st_ino == m->GetInt64("node", -1) && stat(path, &resolved) == 0 &&
+              (S_ISDIR(resolved.st_mode) || S_ISREG(resolved.st_mode)) &&
+              get_ref_for_path(path, &ref) == B_OK)
+            ReadLocalIcon(ref, pixels, reply);
+        }
+      }
+      while (generation->load() == serial) {
+        const auto status = target.SendMessage(&reply, (BHandler *)nullptr, 50000);
+        if (status != B_TIMED_OUT && status != B_WOULD_BLOCK && status != B_INTERRUPTED)
+          break;
+      }
+      return;
+    }
     if (m->what != kScan) {
       BLooper::MessageReceived(m);
       return;
@@ -75,7 +124,7 @@ public:
     int count = 0;
     // A small first batch lets the pane draw before another screenful of
     // Tracker icons is decoded. Keep later batches large to limit UI work.
-    int batchLimit = icons ? 8 : 80;
+    int batchLimit = (icons || m->GetBool("firstScreen", false)) ? 8 : 80;
     bool deliveryFailed = false;
     auto send = [&]() {
       if (!Send(batch, serial)) {
@@ -145,11 +194,7 @@ public:
         // Tracker icon lookup may open the node. Never open a device, FIFO,
         // or a link to one just to display a directory listing.
         if (icons && (S_ISREG(targetMode) || S_ISDIR(targetMode))) {
-          BBitmap bitmap(BRect(0, 0, iconPixels - 1, iconPixels - 1), B_RGBA32);
-          if (BNodeInfo::GetTrackerIcon(
-                  &ref, &bitmap, static_cast<icon_size>(iconPixels)) == B_OK)
-            item.AddData("icon", B_RAW_TYPE, bitmap.Bits(),
-                         bitmap.BitsLength());
+          ReadLocalIcon(ref, iconPixels, item);
         }
       }
       batch.AddMessage("entry", &item);
@@ -173,19 +218,8 @@ public:
         item.AddInt64("size", entry.size);
         item.AddBool("sizeKnown", entry.sizeKnown);
         item.AddInt64("date", entry.modified);
-        if (icons) {
-          BMimeType mime(entry.directory ? "application/x-vnd.Be-directory"
-                                         : "application/octet-stream");
-          if (!entry.directory) {
-            BMimeType guessed;
-            if (BMimeType::GuessMimeType(entry.name.c_str(), &guessed) == B_OK)
-              mime.SetTo(guessed.Type());
-          }
-          BBitmap bitmap(BRect(0, 0, iconPixels - 1, iconPixels - 1), B_RGBA32);
-          if (mime.GetIcon(&bitmap, static_cast<icon_size>(iconPixels)) == B_OK)
-            item.AddData("icon", B_RAW_TYPE, bitmap.Bits(),
-                         bitmap.BitsLength());
-        }
+        if (icons)
+          ReadVirtualIcon(entry.name, entry.directory, iconPixels, item);
         batch.AddMessage("entry", &item);
         if (++count == batchLimit)
           send();
