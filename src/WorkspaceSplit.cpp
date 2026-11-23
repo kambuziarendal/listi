@@ -410,7 +410,13 @@ bool WorkspaceSplit::HandlePanelCommand(BMessage *m) {
   case kSame:
     if (prefs.SinglePane())
       break;
-    Panel(1 - source).Files().Navigate(Panel(source).Files().Path());
+    if (Panel(source).Files().IsSearchList()) {
+      const auto state = Panel(source).Files().CaptureNavigation();
+      BMessage open(kOpenSearchList);
+      state.queries.at(state.location).WriteTo(open);
+      Panel(1 - source).Files().MessageReceived(&open);
+    } else
+      Panel(1 - source).Files().Navigate(Panel(source).Files().Path());
     break;
   case kRefresh:
     if (auto &active = Panel(source); active.Current() == PanelPage::Flat) {

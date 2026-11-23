@@ -121,11 +121,12 @@ class MainWindow : public Listi::WorkingWindow {
         size_t start = slash == std::string::npos ? 0 : slash + 1;
         leaf = titleLocation.substr(start, last - start + 1);
       }
+      if (panes[source]->IsSearchList()) leaf = panes[source]->LocationLabel();
       Describe(leaf + " · Listi", titleLocation);
     }
     const auto &target = *panes[1 - source];
     const bool available = !prefs.SinglePane() && split->AllowsCommand(kCopy);
-    const bool folder = target.LocationValid() && strcmp(target.Path(), "@disks") != 0;
+    const bool folder = !target.IsSearchList() && target.LocationValid() && strcmp(target.Path(), "@disks") != 0;
     toolbar.SetTransferTarget(source, available, folder ? target.Path() : nullptr);
   }
   void ApplyWorkspace() {
@@ -202,8 +203,9 @@ class MainWindow : public Listi::WorkingWindow {
         searchWindow.SendMessage(kSearch);
       else
         searchWindow = OpenFileSearch(BMessenger(this), source,
-                                      panes[source]->Path(), savedNavigation.SearchStore());
+                                      panes[source]->SearchRoot(), savedNavigation.SearchStore());
       break;
+    case Listi::kOpenSearchList:
     case kRevealSearch: {
       int32 which = m->GetInt32("pane", -1);
       if (which < 0 || which > 1)
@@ -383,6 +385,8 @@ public:
         !actionArea->Pending() && Listi::CanSaveClipboardIn(path);
     const bool canUndoBulkRename =
         !actionArea->Pending() && queue.CanUndoBulkRename();
+    if (auto *paste = menu->FindItem(kClipboardPaste))
+      paste->SetEnabled(!pane.IsSearchList());
     menu->SetFileActions(pane.CurrentView(), flat, split->CanOpenFlat(),
                          canSaveClipboard, canUndoBulkRename);
   }
@@ -452,6 +456,16 @@ public:
     const bool writesHere = m->what == kClipboardPaste || m->what == kClipboardSaveText ||
                            m->what == kClipboardSaveImage || m->what == kMkdir;
     const Pane &destination = *panes[panelTransfer ? 1 - source : source];
+    const bool needsOtherFolder = panelTransfer || m->what == kCreateLink ||
+        m->what == kCreateArchive || m->what == kExtractArchive || m->what == kCompareFolders;
+    const bool needsCurrentFolder = writesHere || m->what == kBulkRename ||
+        m->what == kRename || m->what == kCompareFolders ||
+        m->what == kCommand || m->what == Listi::kTerminalWindow;
+    if ((needsOtherFolder && panes[1-source]->IsSearchList()) ||
+        (needsCurrentFolder && panes[source]->IsSearchList())) {
+      queue.ErrorInfo("Choose a real folder for this action, not a search list.");
+      return;
+    }
     if ((panelTransfer || writesHere) && !destination.LocationValid() &&
         !destination.IsScanning()) {
       queue.ErrorInfo("Choose an available destination folder, or reconnect the disk and reload.");
@@ -614,6 +628,10 @@ public:
                          : m->GetInt32("terminal lister", source);
       if (lister < 0 || lister > 1)
         break;
+      if (panes[lister]->IsSearchList()) {
+        PostMainWindowNotice("Open a local folder before starting a terminal.");
+        break;
+      }
       if (auto prompt = terminalDock->Open(*m, lister, panes[lister]->Path()))
         AskInline(prompt->text.String(), "Start new CLI", prompt->accepted);
       break;

@@ -416,6 +416,10 @@ public:
     return true;
   }
   void MessageDropped(BMessage *message, BPoint) override {
+    if (pane->IsSearchList()) {
+      pane->ShowStatus("A search list is not a destination folder.");
+      return;
+    }
     BMessage drop(*message);
     drop.what = kDrop;
     drop.RemoveName("destination");
@@ -454,6 +458,8 @@ public:
   }
   bool CancelSelectionGesture() override { return list->band->Escape(); }
   void MakeFocus(bool focus = true) override { list->MakeFocus(focus); }
+  BPoint ScrollPosition() override { return list->ScrollView()->Bounds().LeftTop(); }
+  void RestoreScroll(BPoint p) override { list->ScrollView()->ScrollTo(p); }
   void Redraw() override { list->ScrollView()->Invalidate(); }
   void RedrawEntry(const std::string &path) override {
     auto found = rows.find(path);

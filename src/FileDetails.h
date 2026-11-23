@@ -17,6 +17,8 @@ public:
   virtual void Append(size_t first) = 0;
   virtual void Refresh() = 0;
   virtual void SyncSelection() = 0;
+  virtual BPoint ScrollPosition() = 0;
+  virtual void RestoreScroll(BPoint) = 0;
   virtual void Redraw() = 0;
   virtual void RedrawEntry(const std::string &) = 0;
 };

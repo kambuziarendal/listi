@@ -46,6 +46,11 @@ public:
   Listi::PaneNavigationState CaptureNavigation();
   void RestoreNavigation(const Listi::PaneNavigationState &);
   bool IsSearchList() const { return queries.count(path.String()) != 0; }
+  std::string LocationLabel() const;
+  const char *SearchRoot() const {
+    auto query = queries.find(path.String());
+    return query == queries.end() ? path.String() : query->second.request.root.c_str();
+  }
   void Reload();
   void SetPlaces(const Listi::SavedPlaces &, bool writable);
   void SetSource(bool);
@@ -133,7 +138,6 @@ private:
   std::map<std::string, Listi::SavedSearch> queries;
   std::optional<Listi::PaneNavigationState> restoring;
   int restoredView = -1;
-  std::string LocationLabel() const;
   Listi::ReadWorker *queryWorker = nullptr;
   std::shared_ptr<std::atomic<int64>> queryFailure = std::make_shared<std::atomic<int64>>(-1);
   std::vector<std::unique_ptr<PaneEntry>> queryRows;
@@ -143,7 +147,7 @@ private:
   void RestoreScroll(BPoint);
 
   void StartNavigation(const std::string &, int target = -1,
-                       bool trash = false);
+                       bool trash = false, bool restore = false);
   void UpdateNavigation();
   BTextControl *filter;
   BButton *clearFilter, *clearEmptyFilter;

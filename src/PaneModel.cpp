@@ -60,6 +60,17 @@ size_t PaneModel::MatchPattern(const char *pattern, bool apply) {
   }
   return matches;
 }
+bool PaneModel::MatchesSnapshot(const std::vector<std::unique_ptr<PaneEntry>> &rows) const {
+  if (entries.size() != rows.size()) return false;
+  for (size_t i = 0; i < rows.size(); ++i) {
+    const auto &a = *entries[i], &b = *rows[i];
+    if (a.path != b.path || a.device != b.device || a.node != b.node ||
+        a.kind != b.kind || a.directory != b.directory || a.size != b.size ||
+        a.modified != b.modified)
+      return false;
+  }
+  return true;
+}
 void PaneModel::Clear() {
   visible.clear();
   entries.clear();

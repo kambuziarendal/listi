@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "ReadWorker.h"
+#include "PaneNavigationState.h"
 #include "SearchWindow.h"
 #include "Common.h"
 #include "ExplicitSubmit.h"
@@ -52,7 +53,7 @@ class SearchView : public BGroupView {
   std::vector<SearchHit> pending;
   BCheckBox *predicate, *trash, *live;
   BStringView *status, *selected, *scope, *hint;
-  BButton *start, *stop, *show;
+  BButton *start, *stop, *show, *openList;
   SearchResultsView *results;
   Listi::ReadWorker *worker = nullptr;
   std::shared_ptr<std::atomic<int64>> generation;
@@ -245,6 +246,7 @@ public:
     selected = Line("search selected",
                     "Select a result to see its full original path.");
     start = new BButton("start search", "Search", new BMessage(kStart));
+    openList = new BButton("open search list", "Open as file list", new BMessage(kOpenSearchList));
     stop = new BButton("stop search", "Stop", new BMessage(kStop));
     show = new BButton("show original",
                        compact ? "Show original" : "Show original in panel",
@@ -310,7 +312,8 @@ public:
           .Add(selected)
           .AddGroup(B_HORIZONTAL, 8)
           .Add(status)
-          .Add(show)
+          .Add(openList)
+        .Add(show)
           .End();
     }
     Store(store);
@@ -340,6 +343,7 @@ public:
         .Add(start)
         .Add(stop)
         .AddGlue()
+        .Add(openList)
         .Add(show)
         .End()
         .Add(results)
@@ -396,7 +400,7 @@ public:
     // Controls and asynchronous updates belong to this search, not the host
     // window (which may contain a second independent search).
     for (BControl *control : std::initializer_list<BControl *>{
-             root, expression, name, predicate, start, stop, show, save, forget,
+             root, expression, name, predicate, start, stop, show, openList, save, forget,
              clearFilters})
       control->SetTarget(this);
     savedMenu->SetTargetForItems(this);
@@ -661,6 +665,18 @@ public:
       selected->SetText(hit ? hit->path.c_str() : "");
       selected->SetToolTip(hit ? hit->path.c_str() : "");
       show->SetEnabled(hit != nullptr);
+      break;
+    }
+    case kOpenSearchList: {
+      auto criteria = Criteria();
+      if (!ValidateFilters(criteria))
+        break;
+      SavedSearch query{name->Text(), criteria,
+                        criteria.predicate && live->Value() == B_CONTROL_ON};
+      BMessage request(kOpenSearchList);
+      query.WriteTo(request);
+      request.AddInt32("pane", pane);
+      owner.SendMessage(&request);
       break;
     }
     case kShowSearchResult: {

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "Pane.h"
+#include "SearchWorker.h"
 #include "AdaptiveScrollView.h"
 #include "FlatView.h"
 #include "PanelAppearance.h"
@@ -201,6 +202,7 @@ Pane::Pane(int32 number, const Preferences &p,
 }
 Pane::~Pane() {
   generation->store(-1);
+  Listi::RetireReadWorker(queryWorker);
   if (directoryWatch)
     directoryWatch->Begin(-1, false, BMessenger(this));
   scanTimer.reset();
@@ -338,10 +340,12 @@ void Pane::Sort(PaneSort value) {
   SendSelection();
 }
 int32 Pane::LocationMode() const {
+  if (IsSearchList())
+    return 0;
   if (attributeDetails && path[0] == '/' && !Listi::IsVirtual(path.String()))
     return 0;
   auto remembered = prefs.folderModes.find(path.String());
-  return remembered == prefs.folderModes.end() ? prefs.PaneMode(id)
+  return remembered == prefs.folderModes.end() ? (restoredView >= 0 ? restoredView : prefs.PaneMode(id))
                                                : remembered->second;
 }
 void Pane::SetDisplayMode(int32 value) {
@@ -490,10 +494,16 @@ void Pane::Navigate(const char *p) {
   if (!Window())
     return;
   std::string request = p;
+  if (IsSearchList() && request == LocationLabel())
+    request = path.String();
   if (request.empty())
     return;
   try {
-    if (request[0] != '/' && request != "@disks" && !Listi::IsVirtual(request))
+    if (!queries.count(request) && IsSearchList() && request[0] != '/' && request != "@disks" && !Listi::IsVirtual(request)) {
+      SetStatus("Enter an absolute folder path.");
+      return;
+    }
+    if (!queries.count(request) && request[0] != '/' && request != "@disks" && !Listi::IsVirtual(request))
       request = Listi::IsVirtual(path.String())
                     ? Listi::ChildLocation(path.String(), request)
                     : Listi::Join(path.String(), request);
@@ -541,7 +551,11 @@ void Pane::UpdateNavigation() {
   back->SetEnabled(history.Back() >= 0);
   forward->SetEnabled(history.Forward() >= 0);
 }
-void Pane::StartNavigation(const std::string &request, int target, bool trash) {
+void Pane::StartNavigation(const std::string &request, int target, bool trash, bool restore) {
+  if (!restore) restoring.reset();
+  const bool wasQuery = IsSearchList();
+  Listi::RetireReadWorker(queryWorker);
+  queryRows.clear();
   const bool sameDirectory = !trash && path == request.c_str();
   directoryRefreshPending = false;
   mediaReadSuspended = false;
@@ -559,12 +573,16 @@ void Pane::StartNavigation(const std::string &request, int target, bool trash) {
     clearFilter->SetEnabled(false);
   }
   path = request.c_str();
-  edit->SetText(path);
+  if (restoring) {
+    filter->SetText(restoring->filter.c_str());
+    savedSelection = restoring->selection;
+  }
+  edit->SetText(LocationLabel().c_str());
   if (!pendingIcons.empty())
     Listi::RetireReadWorker(iconReader);
   if (scanning)
     Listi::RetireReadWorker(scanner);
-  if (!scanner)
+  if (!scanner && !IsSearchList())
     StartDirectoryReader();
   scanning = true;
   locationValid = false;
@@ -576,6 +594,8 @@ void Pane::StartNavigation(const std::string &request, int target, bool trash) {
   generation->store(serial);
   directoryWatch->Begin(serial, sameDirectory, BMessenger(this));
   ClearRows();
+  if (IsSearchList() || wasQuery)
+    list->SetAttributes(IsSearchList() ? std::vector<std::string>{"Original folder"} : attributeColumns);
   SetDisplayMode(LocationMode());
   navigationFailed = false;
   SetStatus("Reading directory...");
@@ -592,8 +612,21 @@ void Pane::StartNavigation(const std::string &request, int target, bool trash) {
   BMessage check(kCheckScanDelivery);
   check.AddInt64("serial", serial);
   scanTimer.reset(new BMessageRunner(BMessenger(this), &check, 250000));
-  if (scanTimer->InitCheck() != B_OK || !scanner ||
-      scanner->PostMessage(&m) != B_OK) {
+  bool started = false;
+  if (scanTimer->InitCheck() == B_OK) {
+    if (IsSearchList()) {
+      SetStatus("Reading search results...");
+      queryWorker = Listi::NewSearchWorker(BMessenger(this), generation, queryFailure);
+      BMessage search(Listi::kSearchStart);
+      queries.at(request).WriteTo(search);
+      search.AddInt64("serial", serial);
+      search.AddBool("paneRows", true);
+      started = Listi::StartReadWorker(queryWorker) && queryWorker->PostMessage(&search) == B_OK;
+    } else {
+      started = scanner && scanner->PostMessage(&m) == B_OK;
+    }
+  }
+  if (!started) {
     BMessage failed(kScanDone);
     failed.AddInt64("serial", serial);
     failed.AddString("error",
@@ -728,7 +761,8 @@ void Pane::SendSelection(bool gesture) {
     if (noMatches)
       s = "No names match the filter";
     else if (!summary.visible)
-      s = "This folder is empty";
+      s = IsSearchList() ? "No search results" : "This folder is empty";
+    if (IsSearchList()) s << " · " << LocationLabel().c_str();
   }
   SetStatus(s);
   if (!navigationFailed && summary.selected) {
@@ -761,7 +795,16 @@ void Pane::SendSelection(bool gesture) {
   }
 }
 void Pane::MessageReceived(BMessage *m) {
+  if (HandleQueryReply(*m))
+    return;
   switch (m->what) {
+  case Listi::kOpenSearchList:
+    try {
+      OpenSearchList(Listi::SavedSearch::FromMessage(*m));
+    } catch (const std::exception &error) {
+      SetStatus(error.what());
+    }
+    break;
   case kActivityFrame: {
     if (m->GetInt64("serial", -1) != activitySerial || !activityTimer)
       break;
@@ -930,6 +973,11 @@ void Pane::MessageReceived(BMessage *m) {
       Window()->PostMessage(Listi::kFlatView);
       break;
     }
+    if (IsSearchList()) {
+      SetStatus("Search results use Details to show original folders.");
+      break;
+    }
+    restoredView = -1;
     attributeDetails = false;
     prefs.SetPaneMode(id, requestedMode);
     const bool remembered = prefs.folderModes.count(path.String());
@@ -946,6 +994,7 @@ void Pane::MessageReceived(BMessage *m) {
     break;
   }
   case kRememberView:
+    if (IsSearchList()) break;
     if (prefs.folderModes.size() >= 4096 &&
         !prefs.folderModes.count(path.String())) {
       SetStatus("Folder view limit reached");
@@ -1047,6 +1096,10 @@ void Pane::MessageReceived(BMessage *m) {
     break;
   }
   case kParent: {
+    if (IsSearchList()) {
+      Navigate(queries.at(path.String()).request.root.c_str());
+      break;
+    }
     try {
       Navigate(Listi::ParentLocation(path == "@disks" ? "/" : path.String())
                    .c_str());
@@ -1065,7 +1118,7 @@ void Pane::MessageReceived(BMessage *m) {
     Navigate("/boot/home/Desktop");
     break;
   case kTrashFolder: {
-    if (path == "@disks" || Listi::IsVirtual(path.String())) {
+    if (IsSearchList() || path == "@disks" || Listi::IsVirtual(path.String())) {
       SetStatus("Trash requires a local supported volume.");
       break;
     }
@@ -1118,7 +1171,14 @@ void Pane::MessageReceived(BMessage *m) {
     break;
   }
   case kCheckScanDelivery: {
-    if (scanning && m->GetInt64("serial", -1) == serial &&
+    if (IsSearchList() && m->GetInt64("serial", -1) == serial &&
+        queryFailure->load() == serial) {
+      queryFailure->store(-1);
+      BMessage failure(Listi::kSearchDone);
+      failure.AddString("error", "Search update was not delivered. Reload to try again.");
+      failure.AddInt64("serial", serial);
+      HandleQueryReply(failure);
+    } else if (scanning && m->GetInt64("serial", -1) == serial &&
         scanDelivery->failedSerial.load() == serial) {
       BMessage failed(kScanDone);
       failed.AddInt64("serial", serial);
@@ -1193,7 +1253,7 @@ void Pane::MessageReceived(BMessage *m) {
     history.Complete(serial, path.String(), locationValid);
     UpdateNavigation();
     SetDisplayMode(LocationMode());
-    edit->SetText(path);
+    edit->SetText(LocationLabel().c_str());
     sidebar->UpdateLocation();
     const char *error;
     if (m->FindString("error", &error) == B_OK) {
@@ -1247,6 +1307,21 @@ void Pane::MessageReceived(BMessage *m) {
         invoke.AddString("column", path);
         Window()->PostMessage(&invoke, this);
       }
+    }
+    if (restoring) {
+      if (locationValid) {
+        std::string focus;
+        for (auto *row : entries.Visible())
+          if (row->path == restoring->focused &&
+              std::make_pair(row->device, row->node) == restoring->focusIdentity) {
+            focus = row->path;
+            break;
+          }
+        entries.SetSelection(entries.Selected(), focus);
+        Sort(restoring->sorting);
+        RestoreScroll(restoring->scroll);
+      }
+      restoring.reset();
     }
     if (refreshPending)
       Reload();

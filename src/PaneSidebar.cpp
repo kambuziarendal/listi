@@ -248,7 +248,7 @@ void PaneSidebar::ToggleFocus() {
 
 void PaneSidebar::ShowTreePath() {
   if (SidebarHasTree(visibleSidebar))
-    tree->ShowPath(pane.Path());
+    tree->ShowPath(pane.SearchRoot());
 }
 
 void PaneSidebar::ResetTree() { tree->Reset(); }
@@ -452,7 +452,7 @@ void PaneSidebar::UpdatePlaces() {
       current = i;
   }
   placesMenu->ItemAt(0)->SetEnabled(placesWritable && current < 0 &&
-      pane.LocationValid() && places.Items().size() < Listi::SavedPlaces::Limit);
+      !pane.IsSearchList() && pane.LocationValid() && places.Items().size() < Listi::SavedPlaces::Limit);
   placesMenu->ItemAt(1)->SetEnabled(placesWritable && current >= 0);
   placesMenu->ItemAt(2)->SetEnabled(placesWritable && current >= 0);
   if (current >= 0)
@@ -557,7 +557,7 @@ bool PaneSidebar::HandleCommand(const BMessage &message) {
     if (!placesWritable)
       break;
     int32 action = message.GetInt32("action", 0);
-    if ((action == 0 && (!pane.LocationValid() || places.Find(pane.Path()))) ||
+    if ((action == 0 && (pane.IsSearchList() || !pane.LocationValid() || places.Find(pane.Path()))) ||
         (action != 0 && !places.Find(pane.Path())))
       break;
     BMessage request(message);

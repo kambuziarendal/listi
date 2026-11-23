@@ -20,6 +20,7 @@ class SearchWorker : public Listi::ReadWorker {
   SearchHit root;
   int64 serial = -1, revision = 0, events = 0;
   bigtime_t lastScan = 0;
+  bool paneRows = false;
   bool Alive() const { return generation->load() == serial; }
   void Stop() {
     debounce.reset();
@@ -67,6 +68,17 @@ class SearchWorker : public Listi::ReadWorker {
           request, [&] { return Alive(); },
           [&](const SearchHit &hit) {
             BMessage item;
+            if (paneRows) {
+              struct stat st;
+              if (lstat(hit.path.c_str(), &st) || st.st_dev != hit.device || st.st_ino != hit.node)
+                return true;
+              item.AddInt64("size", st.st_size);
+              item.AddInt64("date", st.st_mtime);
+              item.AddInt32("kind", S_ISLNK(st.st_mode) ? 2 : S_ISDIR(st.st_mode) ? 1 : 0);
+              struct stat target;
+              item.AddBool("directory", S_ISDIR(st.st_mode) ||
+                  (S_ISLNK(st.st_mode) && stat(hit.path.c_str(), &target) == 0 && S_ISDIR(target.st_mode)));
+            }
             item.AddString("path", hit.path.c_str());
             item.AddInt64("device", hit.device);
             item.AddInt64("node", hit.node);
@@ -106,6 +118,7 @@ public:
     case kSearchStart: {
       Stop();
       serial = m->GetInt64("serial", -1);
+      paneRows = m->GetBool("paneRows", false);
       revision = 0;
       events = 0;
       if (!Alive())

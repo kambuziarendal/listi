@@ -108,7 +108,7 @@ bool PanelTools::OpenSearch(const BMessage &store) {
   if (!CanLeaveCurrent())
     return false;
   Open(PanelPage::Search,
-       CreatePanelSearch(BMessenger(Window()), pane, files.Path(), store));
+       CreatePanelSearch(BMessenger(Window()), pane, files.SearchRoot(), store));
   return true;
 }
 

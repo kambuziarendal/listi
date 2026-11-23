@@ -48,7 +48,7 @@ public:
     }
     detached = false;
     // The volume overview is navigable but is not itself a folder.
-    if (resolved != "@disks" &&
+    if (resolved != "@disks" && resolved.rfind("@query:", 0) != 0 &&
         (recentFolders.empty() || recentFolders.front() != resolved)) {
       auto previous = std::find(recentFolders.begin(), recentFolders.end(), resolved);
       if (previous != recentFolders.end())

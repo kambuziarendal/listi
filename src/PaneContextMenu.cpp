@@ -25,7 +25,7 @@ PaneContextMenuResult RunPaneContextMenu(
   const bool background = request.GetBool("folderContext", false);
   if (!background && selected.empty())
     return {};
-  const bool folderLocal = folder != "@disks" && !Listi::IsVirtual(folder);
+  const bool folderLocal = !pane.IsSearchList() && folder != "@disks" && !Listi::IsVirtual(folder);
   bool local = true;
   for (const auto &path : selected)
     local &= !Listi::IsVirtual(path);
@@ -67,7 +67,7 @@ PaneContextMenuResult RunPaneContextMenu(
   options.selected = selected.size();
   options.directory = request.GetBool("directory", false);
   options.local = local;
-  options.dual = dual;
+  options.dual = dual && !other.IsSearchList();
   options.folderLocal = folderLocal;
   const auto folderLocation = Listi::ParseLocation(folder);
   options.folderArchive = folderLocation.Archive();
