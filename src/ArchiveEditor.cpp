@@ -4,12 +4,14 @@
 #include "ArchiveVolumes.h"
 #include "JobSnapshot.h"
 #include "MessageStore.h"
+#include "StagingSpace.h"
 #include "VirtualFile.h"
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <dirent.h>
 #include <fcntl.h>
+#include <limits>
 #include <set>
 #include <stdexcept>
 #include <unistd.h>
@@ -62,12 +64,12 @@ struct stat Regular(const std::string &path) {
 }
 void Write(int fd, const char *bytes, size_t size) {
   while (size) {
-    auto n = write(fd, bytes, size);
+    auto n = WriteStaging(fd, bytes, size);
     if (n < 0 && errno == EINTR)
       continue;
-    Require(
-        n > 0,
-        "Cannot write archive editing snapshot. Working copy was retained.");
+    if (n < 0 && errno == ENOSPC)
+      throw std::runtime_error("Not enough free space for the archive editing copy.");
+    Require(n > 0, "Cannot write archive editing copy.");
     bytes += n;
     size -= n;
   }
@@ -92,6 +94,8 @@ void Snapshot(const std::string &from, const std::string &to,
     Require(n >= 0, "Cannot read working copy.");
     if (!n)
       break;
+    Require(n <= before.st_size - total,
+            "Editor changed the working copy while it was being saved. Try again.");
     Write(output.n, bytes.data(), n);
     total += n;
   }
@@ -298,6 +302,9 @@ ArchiveEditSession::Create(const std::string &member, const std::string &root,
   FileEntry entry;
   Require(StatFile(member, entry, control) && !entry.directory && !entry.link,
           "Only ordinary archive files can be edited.");
+  Require(!entry.sizeKnown || entry.size >= 0, "Archive member has an invalid size.");
+  const uint64_t limit = entry.sizeKnown ? uint64_t(entry.size)
+                                         : std::numeric_limits<uint64_t>::max();
   s->permissions = entry.permissions & 0777;
   std::string pattern = Join(root, "edit-XXXXXX");
   std::vector<char> name(pattern.begin(), pattern.end());
@@ -320,8 +327,14 @@ ArchiveEditSession::Create(const std::string &member, const std::string &root,
     FD output(openat(workFolder.n, leaf.c_str(),
                      O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600));
     Require(output.n >= 0, "Cannot create editor working file.");
-    ReadFile(member, [&](const char *b, size_t n) { Write(output.n, b, n); },
-             control);
+    uint64_t extracted = 0;
+    ReadFile(member, [&](const char *b, size_t n) {
+      Require(n <= limit - extracted, "Archive member exceeded its declared size.");
+      Write(output.n, b, n);
+      extracted += n;
+    }, control);
+    Require(!entry.sizeKnown || extracted == limit,
+            "Archive member did not match its declared size.");
     Require(!fsync(output.n), "Cannot flush editor working file.");
     s->ValidateArchive();
     Snapshot(s->working, Join(s->directory, "saved"), hooks);

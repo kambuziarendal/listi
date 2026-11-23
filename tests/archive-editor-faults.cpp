@@ -12,6 +12,7 @@
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>
+#include <fs_info.h>
 #include <iostream>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -20,6 +21,29 @@ namespace {
 enum Fault { None, ArchiveRename, Journal, Baseline, DirectorySync } fault = None;
 std::string archivePath, journalPath, baselinePath;
 bool injected = false, published = false;
+enum class ReserveFault { None, Working, Saved, Candidate };
+ReserveFault reserveFault = ReserveFault::None;
+std::filesystem::path sessionsRoot, activeDirectory;
+bool targetCopyExists() {
+  namespace fs = std::filesystem;
+  if (reserveFault == ReserveFault::Candidate) {
+    for (const auto &entry : fs::directory_iterator(activeDirectory)) {
+      if (entry.path().filename().string().find("save-") == 0 &&
+          fs::exists(entry.path() / "item"))
+        return true;
+    }
+  } else {
+    for (const auto &entry : fs::directory_iterator(sessionsRoot)) {
+      if (entry.path() == activeDirectory)
+        continue;
+      const bool saved = fs::exists(entry.path() / "saved");
+      if (fs::exists(entry.path() / "work" / "item") &&
+          saved == (reserveFault == ReserveFault::Saved))
+        return true;
+    }
+  }
+  return false;
+}
 std::string bytes(const std::string &p) {
   std::ifstream f(p, std::ios::binary);
   return {std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>()};
@@ -68,6 +92,15 @@ bool corrupt(const std::string &root) {
   return changed;
 }
 } // namespace
+extern "C" int __real_fs_stat_dev(dev_t, fs_info *);
+extern "C" int __wrap_fs_stat_dev(dev_t dev, fs_info *info) {
+  int result = __real_fs_stat_dev(dev, info);
+  if (!result && reserveFault != ReserveFault::None && targetCopyExists()) {
+    info->free_blocks = 0;
+    injected = true;
+  }
+  return result;
+}
 extern "C" int __real_rename(const char *, const char *);
 extern "C" int __wrap_rename(const char *from, const char *to) {
   if (!injected && ((fault == ArchiveRename && to == archivePath) ||
@@ -160,6 +193,41 @@ int main() {
     baselinePath = Join(session->Directory(), "saved");
     auto original = bytes(archivePath);
     writeFile(session->WorkingFile(), "editor corruption probe");
+    if (!scenario) {
+      sessionsRoot = root + "/sessions";
+      activeDirectory = session->Directory();
+      const auto baseline = bytes(baselinePath), journal = bytes(journalPath);
+      for (auto phase : {ReserveFault::Working, ReserveFault::Saved, ReserveFault::Candidate}) {
+        reserveFault = phase;
+        injected = false;
+        std::string error;
+        try {
+          if (phase == ReserveFault::Candidate)
+            session->Save();
+          else
+            session->StartFresh();
+        } catch (const std::exception &e) {
+          error = e.what();
+        }
+        reserveFault = ReserveFault::None;
+        const std::string label = phase == ReserveFault::Working ? "working copy" :
+                                  phase == ReserveFault::Saved ? "baseline" : "save candidate";
+        check(injected && error.find("Not enough free space") != std::string::npos,
+              label + " stops at the shared reserve");
+        bool clean = true;
+        for (const auto &entry : std::filesystem::directory_iterator(sessionsRoot))
+          clean &= entry.path() == activeDirectory;
+        for (const auto &entry : std::filesystem::directory_iterator(activeDirectory))
+          clean &= entry.path().filename().string().find("save-") != 0;
+        check(clean && bytes(archivePath) == original && bytes(journalPath) == journal &&
+                  bytes(baselinePath) == baseline &&
+                  bytes(session->WorkingFile()) == "editor corruption probe" &&
+                  ArchiveEditSession::Open(ChildLocation(url, "item"), sessionsRoot.string())->Directory()
+                      == session->Directory(),
+              label + " failure removes partial copies and preserves the recoverable edit");
+      }
+      injected = false;
+    }
     Hooks hooks;
     if (scenario == 0)
       hooks.proceed = [&] {
