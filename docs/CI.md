@@ -115,6 +115,24 @@ Data files, shares, configured keys and raw images are not Actions artifacts.
 Use a dedicated host; the legacy fixture has fixed ports. The extended lane
 is **not** a required hosted check and its absence does not qualify it.
 
+## Focused FTP/SFTP metadata regression
+
+Start `python3 tests/network-metadata-fixture.py /path/to/new-fixture-directory`
+on the host with pyftpdlib and Paramiko installed. From a disposable Haiku guest,
+use SSH reverse TCP forwards to host loopback on ports 2127, 2227 and 31270.
+Copy the generated fixture `known_hosts` into the guest, then run:
+
+```sh
+make
+LISTI_METADATA_KNOWN_HOSTS=/path/to/fixture-known-hosts \
+  python3 tests/run-native-audit.py network-metadata
+```
+
+Restart the fixture with a fresh directory for each test run: the FTP transfer
+test changes one fixture file while sending it. This optional case checks
+ordinary FTP transfers and SFTP file STAT, not a transactional snapshot
+guarantee or a full protocol qualification.
+
 ## Enabling public CI without paid services
 
 1. Use a **public** GitHub repository with free standard Linux-hosted runners

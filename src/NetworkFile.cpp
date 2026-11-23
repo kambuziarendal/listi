@@ -237,7 +237,7 @@ struct CurlSession {
       return 1;
     }
   }
-  CURLcode Perform(bool missingOK = false) {
+  CURLcode Perform(bool missingOK = false, bool accessDeniedOK = false) {
     control.Check();
     if (control.cleanup) {
       // NOSIGNAL with a synchronous DNS resolver cannot bound a lookup.
@@ -254,7 +254,8 @@ struct CurlSession {
           "SSH host key is unknown or changed. Verify this server with ssh in "
           "Terminal, or select a trusted known_hosts file in Connect / "
           "Advanced.");
-    if (r != CURLE_OK && !(missingOK && r == CURLE_REMOTE_FILE_NOT_FOUND))
+    if (r != CURLE_OK && !(missingOK && r == CURLE_REMOTE_FILE_NOT_FOUND) &&
+        !(accessDeniedOK && r == CURLE_REMOTE_ACCESS_DENIED))
       throw std::runtime_error(error[0] ? error
                                         : LIBCALL(lib, curl_easy_strerror)(r));
     return r;
@@ -271,6 +272,53 @@ std::string QuoteSFTP(const std::string &s) {
   }
   return out + '"';
 }
+// RFC 3659 uses UTC Gregorian dates, regardless of the client's time zone.
+void ParseModify(const std::string &value, FileEntry &entry) {
+  constexpr size_t dateLength = 14;
+  if (value.size() < dateLength ||
+      value.find_first_not_of("0123456789") < dateLength)
+    return;
+
+  std::string fraction;
+  if (value.size() > dateLength) {
+    if (value[dateLength] != '.' || value.size() == dateLength + 1 ||
+        value.find_first_not_of("0123456789", dateLength + 1) !=
+            std::string::npos)
+      return;
+    auto last = value.find_last_not_of('0');
+    fraction = value.substr(dateLength + 1, last - dateLength);
+  }
+
+  auto number = [&](size_t start, size_t width) {
+    return std::stoi(value.substr(start, width));
+  };
+  int year = number(0, 4);
+  int month = number(4, 2);
+  int day = number(6, 2);
+  int hour = number(8, 2);
+  int minute = number(10, 2);
+  int second = number(12, 2);
+  // POSIX time cannot represent leap seconds distinctly. Leave such a fact
+  // unknown rather than silently assigning it to a different instant.
+  if (year < 1000 || month < 1 || month > 12 || day < 1 || hour > 23 ||
+      minute > 59 || second > 59)
+    return;
+  bool leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+  int monthDays[] = {31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30,
+                     31};
+  if (day > monthDays[month - 1])
+    return;
+  auto daysBeforeYear = [](int year) -> int64_t {
+    int previous = year - 1;
+    return 365LL * previous + previous / 4 - previous / 100 + previous / 400;
+  };
+  int64_t days = daysBeforeYear(year) - daysBeforeYear(1970) + day - 1;
+  for (int i = 0; i < month - 1; ++i)
+    days += monthDays[i];
+  entry.modified = ((days * 24 + hour) * 60 + minute) * 60 + second;
+  entry.modifiedFraction = std::move(fraction);
+  entry.modifiedKnown = true;
+}
 // MLSD preserves spaces in names. Unix LIST is a fallback for SFTP and older
 // FTP.
 FileEntry ParseList(const std::string &line, const Location &l, bool mlsd) {
@@ -284,6 +332,7 @@ FileEntry ParseList(const std::string &line, const Location &l, bool mlsd) {
     e.name = line.substr(at + 1);
     std::string facts = line.substr(0, at);
     size_t i = 0;
+    bool sawModify = false;
     while (i < facts.size()) {
       auto end = facts.find(';', i);
       if (end == std::string::npos)
@@ -306,6 +355,16 @@ FileEntry ParseList(const std::string &line, const Location &l, bool mlsd) {
           throw std::runtime_error("Invalid FTP file size");
         e.size = std::stoll(v);
         e.sizeKnown = true;
+      } else if (key == "modify") {
+        // Duplicate facts are ambiguous, not a reason to trust the last one.
+        if (!sawModify)
+          ParseModify(v, e);
+        else {
+          e.modifiedKnown = false;
+          e.modified = 0;
+          e.modifiedFraction.clear();
+        }
+        sawModify = true;
       } else if (key == "unix.mode") {
         e.permissions = std::stoul(v, nullptr, 8) & 0777;
         hasPermissions = true;
@@ -451,7 +510,28 @@ bool StatNetwork(const Location &l, FileEntry &e, const TransferControl &c) {
   }
   for (auto &item : ListNetwork(ParseLocation(ParentLocation(l.URL())), c))
     if (item.name == LocationLeaf(l.URL())) {
-      e = item;
+      if (l.scheme == "sftp" && !item.directory && !item.link) {
+        // Curl derives this from SFTP STAT; NOBODY avoids transferring the
+        // file. It may still open it for reading, so a denied probe can
+        // leave metadata unknown without invalidating the listing.
+        CurlSession s(l, c);
+        s.Set(CURLOPT_NOBODY, 1L);
+        s.Set(CURLOPT_FILETIME, 1L);
+        auto result = s.Perform(true, true);
+        if (result == CURLE_REMOTE_FILE_NOT_FOUND)
+          return false;
+        curl_off_t modified = -1;
+        // Some curl SSH backends expose an absent SFTP time as zero, like
+        // an explicit epoch. Do not guess which applies.
+        if (result == CURLE_OK &&
+            LIBCALL(s.lib, curl_easy_getinfo)(s.curl, CURLINFO_FILETIME_T,
+                                              &modified) == CURLE_OK &&
+            modified > 0) {
+          item.modified = modified;
+          item.modifiedKnown = true;
+        }
+      }
+      e = std::move(item);
       return true;
     }
   return false;

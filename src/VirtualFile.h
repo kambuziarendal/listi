@@ -62,6 +62,22 @@ struct FileEntry {
   int64_t size = 0, modified = 0;
   unsigned permissions = 0644;
   bool modifiedKnown = false; // Distinguishes an explicit epoch from an absent timestamp.
+  // MLSD decimal digits, without insignificant trailing zeros. Do not round
+  // the source revision to the precision of time_t or of the local filesystem.
+  std::string modifiedFraction;
+
+  bool SameModification(const FileEntry &other) const {
+    return modifiedKnown == other.modifiedKnown && modified == other.modified &&
+           modifiedFraction == other.modifiedFraction;
+  }
+
+  long ModifiedNanoseconds() const {
+    long ns = 0;
+    for (size_t i = 0; i < 9; ++i)
+      ns = ns * 10 +
+           (i < modifiedFraction.size() ? modifiedFraction[i] - '0' : 0);
+    return ns;
+  }
 };
 struct Connection {
   std::string username, password, domain, privateKey, knownHosts, keyPassphrase;

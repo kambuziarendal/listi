@@ -85,7 +85,8 @@ struct TempFile {
     if (fchmod(fd, source.permissions & 0777))
       throw std::runtime_error(strerror(errno));
     if (source.modifiedKnown || source.modified > 0) {
-      struct timespec times[2] = {{0, UTIME_OMIT}, {source.modified, 0}};
+      struct timespec times[2] = {
+          {0, UTIME_OMIT}, {source.modified, source.ModifiedNanoseconds()}};
       if (futimens(fd, times))
         throw std::runtime_error(strerror(errno));
     }
@@ -111,7 +112,7 @@ std::string RemoteDigest(const std::string &path, const TransferControl &control
 }
 bool Same(const FileEntry &a, const FileEntry &b) {
   return a.directory == b.directory && a.link == b.link && a.size == b.size &&
-         a.sizeKnown == b.sizeKnown && a.modified == b.modified;
+         a.sizeKnown == b.sizeKnown && a.SameModification(b);
 }
 std::string TransferIdentity(const std::string &path) {
   auto location = ParseLocation(path);
@@ -293,7 +294,8 @@ struct Runner {
         if (fchmod(directory->Descriptor(), source.permissions & 0777))
           throw std::runtime_error(strerror(errno));
         if (source.modifiedKnown || source.modified > 0) {
-          struct timespec times[2] = {{0, UTIME_OMIT}, {source.modified, 0}};
+          struct timespec times[2] = {
+              {0, UTIME_OMIT}, {source.modified, source.ModifiedNanoseconds()}};
           if (futimens(directory->Descriptor(), times))
             throw std::runtime_error(strerror(errno));
         }
