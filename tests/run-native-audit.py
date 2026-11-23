@@ -20,7 +20,7 @@ archive-local-move-faults archive-local-move same-file-type folder-compare
 archive-editor-faults archive-editor archive-move-faults archive-move
 archive-folder-operations transfer-races archive-ambiguity archive-metadata archive-volumes
 sevenzip-backend archive-passwords archive-jobs ar-writer arj-writer rar-store
-cab-writer lha-writer preferences-state message-store-faults recovery-inventory main-window-routing working-windows application-services settings-window
+cab-writer lha-writer preferences-state message-store-faults recovery-inventory main-window-routing working-windows folder-tabs application-services settings-window
 workspace-layout workspace-editor miller-columns navigation-history selection-model type-to-select
 pane-filter pane-search-list selection-summary selection-sort saved-places saved-searches saved-navigation-controller file-search
 live-search search-results-view flat-view file-clipboard clipboard-text-file file-drop image-convert

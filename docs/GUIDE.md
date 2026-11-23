@@ -584,3 +584,11 @@ Reload retries the same criteria.
 A search is not a physical folder. To paste or drop files, navigate to an
 actual destination folder. Opening a saved search reruns the criteria; no
 files are copied into the saved search.
+
+### Folder tabs
+
+Each file pane has its own folder tabs, separate from the Files, Search and Preview tools in Smiðja. **Window > Folder tabs** opens a new tab in the selected folder (otherwise here), duplicates a tab with its current state, renames or moves it, closes it, or reopens the last tab closed in that pane. A single tab stays hidden unless **Always show folder tabs** is selected. The last file tab cannot be closed on its own; close the window instead.
+
+While browsing files, use **Command+Option+T** for a new tab, **Command+Option+[** and **Command+Option+]** to cycle, and **Command+Option+W** to close a tab. Command+T and Command+Shift+T still open the terminal. The tab strip is for navigation, not a file-drop target: drop onto the file view of a real folder. Switching tabs does not redirect an already queued copy.
+
+**Detach to Einn window** moves the active tab, including its navigation history, filter, view and selection. If you detach the only tab, the original pane opens your home folder. The new window keeps its own queue and uses session-local layout preferences; it does not change the main window’s default workspace or saved places. Closing the original window does not close a detached file window. Folder tabs last for the session and are not saved worksets.
