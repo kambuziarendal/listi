@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "Pane.h"
+#include "ReadWorker.h"
 #include "ImagePreview.h"
 #include "SearchWindow.h"
 #include "SavedSearches.h"
@@ -8,12 +9,14 @@
 #include <Window.h>
 #include <iostream>
 #include <cstring>
+#include <vector>
 
 // Hold a real owned reader inside its looper while the owner closes. This
-// deterministically distinguishes joined shutdown from merely posting Quit.
+// checks that shutdown returns before release, and that the reader subsequently exits.
 struct Hold {
   sem_id entered = create_sem(0, "reader entered"), release = create_sem(0, "release reader");
-  ~Hold() { delete_sem(entered); delete_sem(release); }
+  sem_id closed = create_sem(0, "owner closed");
+  ~Hold() { delete_sem(entered); delete_sem(release); delete_sem(closed); }
 };
 class Delay : public BMessageFilter {
   Hold &hold;
@@ -58,7 +61,13 @@ int main() {
     worker->AddCommonFilter(new Delay(hold));
     worker->PostMessage('hold');worker->Unlock();
     if(acquire_sem_etc(hold.entered,1,B_RELATIVE_TIMEOUT,10000000)!=B_OK)return 4;
-    auto release=spawn_thread([](void *p)->int32 {snooze(250000);release_sem(static_cast<Hold*>(p)->release);return 0;},"reader test release",B_NORMAL_PRIORITY,&hold);
+    auto release=spawn_thread([](void *p)->int32 {
+      auto &hold = *static_cast<Hold *>(p);
+      // Failsafe: an unfixed owner can join without wedging the test.
+      acquire_sem_etc(hold.closed, 1, B_RELATIVE_TIMEOUT, 3000000);
+      release_sem(hold.release);
+      return 0;
+    }, "reader test release", B_NORMAL_PRIORITY, &hold);
     resume_thread(release);
     bigtime_t start=system_time();
     if(!strcmp(name,"file search")) {
@@ -67,17 +76,36 @@ int main() {
       owner->Quit();
     } else {window->Lock();window->Quit();window=nullptr;}
     thread_info info;
-    check(get_thread_info(reader,&info)==B_BAD_THREAD_ID,std::string(name)+" has exited before owner destruction returns");
-    check(system_time()-start<3000000,std::string(name)+" shutdown completes without UI deadlock");
-    status_t result;wait_for_thread(release,&result);
+    check(get_thread_info(reader,&info)==B_OK,std::string(name)+" remains held after owner closes");
+    check(system_time()-start<1000000,std::string(name)+" owner closes within one second");
+    release_sem(hold.closed);
+    status_t result;
+    wait_for_thread(release,&result);
+    status_t waited = wait_for_thread_etc(reader, B_RELATIVE_TIMEOUT, 2000000, &result);
+    check(waited==B_OK || waited==B_BAD_THREAD_ID, std::string(name)+" exits after release");
     if(window){window->Lock();window->Quit();}
     if(strcmp(name,"file search")) {BLooper *owner=nullptr;search.Target(&owner);if(owner&&owner->Lock())owner->Quit();}
-    // Also allow the unfixed negative control to finish its posted quits before
-    // the next case or BApplication teardown; the assertion above stays failed.
-    for(const char *other:{"thumbnail reader","image preview reader","directory reader","folder tree reader","file search"}) {
-      thread_id id=FindReader(other);if(id>=0)wait_for_thread(id,&result);
-    }
+    check(Listi::DrainReadWorkers(2000000), "readers drained before application teardown");
   }
+  std::vector<Listi::ReadWorker *> readers;
+  for (size_t n = 0; n < Listi::kReadWorkerLimit; ++n) {
+    Listi::ReadWorker *worker = new Listi::ReadWorker("capacity probe");
+    if (!Listi::StartReadWorker(worker))
+      break;
+    readers.push_back(worker);
+  }
+  check(readers.size() == Listi::kReadWorkerLimit, "fill all reader slots");
+  Listi::ReadWorker *extra = new Listi::ReadWorker("excess reader");
+  check(!Listi::StartReadWorker(extra) && !extra, "capacity refuses a worker without leaking its looper");
+  if (extra)
+    Listi::RetireReadWorker(extra);
+  for (auto &worker : readers)
+    Listi::RetireReadWorker(worker);
+  check(Listi::DrainReadWorkers(2000000), "all capacity probes exited");
+  extra = new Listi::ReadWorker("replacement reader");
+  check(Listi::StartReadWorker(extra), "exited reader slots can be reused");
+  Listi::RetireReadWorker(extra);
+  check(Listi::DrainReadWorkers(2000000), "replacement joined before teardown");
   std::cout<<checks<<" checks, "<<failures<<" failures"<<std::endl;
   return failures?1:0;
 }

@@ -345,10 +345,10 @@ int main() {
       }),
       "Stop marks a partial snapshot incomplete without waiting for the scanner");
   pauseRoot = false;
-  release_sem(resumeRoot);
   scanning.SendMessage(B_QUIT_REQUESTED);
   Check(Await([&] { return !scanning.IsValid(); }),
-        "closing a cancelled Flat View joins its worker");
+        "cancelled Flat View closes before blocked opendir is released");
+  release_sem(resumeRoot);
   dropCompletion = true;
   auto lost = HostFlatView(shelf, root.c_str());
   Check(Await([&] { return Inspect(lost, [](BWindow &window) {

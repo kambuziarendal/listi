@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+#include "ReadWorker.h"
 #include "SearchWindow.h"
 #include "Common.h"
 #include "ExplicitSubmit.h"
@@ -53,12 +54,11 @@ class SearchView : public BGroupView {
   BStringView *status, *selected, *scope, *hint;
   BButton *start, *stop, *show;
   SearchResultsView *results;
-  BLooper *worker = nullptr;
+  Listi::ReadWorker *worker = nullptr;
   std::shared_ptr<std::atomic<int64>> generation;
   std::shared_ptr<std::atomic<int64>> failedSerial =
       std::make_shared<std::atomic<int64>>(-1);
   std::unique_ptr<BMessageRunner> deliveryTimer;
-  bool workerReady = false;
   int64 serial = 0;
   bool busy = false;
   static BStringView *Line(const char *name, const char *text) {
@@ -187,7 +187,8 @@ class SearchView : public BGroupView {
     request.AddInt64("serial", serial);
     ++serial;
     generation->store(serial);
-    worker->PostMessage(&request);
+    if (worker)
+      worker->PostMessage(&request);
     pending.clear();
     Busy(false);
     Status("Stopped: " + std::to_string(results->CountRows()) +
@@ -409,17 +410,14 @@ public:
         field->TextView()->AddFilter(
             new Listi::ExplicitSubmit(BMessenger(this), BMessage(kStart)));
       worker = NewSearchWorker(BMessenger(this), generation, failedSerial);
-      workerReady = worker->Run() >= 0;
+      Listi::StartReadWorker(worker);
       initialized = true;
     }
   }
 
   ~SearchView() {
     generation->fetch_add(1);
-    // Invalidate in-flight work before joining. A merely posted quit could
-    // destroy the worker's BHandler after BApplication's token space is gone.
-    if (worker && worker->Lock())
-      worker->Quit();
+    Listi::RetireReadWorker(worker);
   }
   void MessageReceived(BMessage *m) override {
     switch (m->what) {
@@ -576,7 +574,11 @@ public:
       Status("Searching... Stop keeps only the results received so far.");
       BMessage check(kDeliveryCheck);
       deliveryTimer = std::make_unique<BMessageRunner>(BMessenger(this), &check, 250000);
-      if (!workerReady || deliveryTimer->InitCheck() != B_OK ||
+      if (!worker) {
+        worker = NewSearchWorker(BMessenger(this), generation, failedSerial);
+        Listi::StartReadWorker(worker);
+      }
+      if (!worker || deliveryTimer->InitCheck() != B_OK ||
           worker->PostMessage(&request) != B_OK) {
         Busy(false);
         Status("Could not start search.");

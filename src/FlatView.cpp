@@ -10,6 +10,7 @@
 #include "MainWindowMenu.h"
 #include "NameFilter.h"
 #include "SearchWorker.h"
+#include "ReadWorker.h"
 #include "Shelf.h"
 #include "ShelfWindow.h"
 #include <Button.h>
@@ -166,8 +167,8 @@ class FlatView : public BGroupView {
   std::shared_ptr<Shelf> shelf;
   std::shared_ptr<std::atomic<int64>> generation =
       std::make_shared<std::atomic<int64>>(1);
-  BLooper *worker = nullptr;
-  std::shared_ptr<std::atomic<int64>> failedSerial = std::make_shared<std::atomic<int64>>(-1);
+  Listi::ReadWorker *worker = nullptr;
+  std::shared_ptr<std::atomic<int64>> failedSerial;
   std::unique_ptr<BMessageRunner> deliveryTimer;
   // Rows refer to these immutable scan hits. Growth must not invalidate them.
   std::deque<File> files;
@@ -222,14 +223,10 @@ class FlatView : public BGroupView {
     shelfStatus->SetToolTip("");
     scanState = "Scanning…";
 
-    if (!worker) {
-      worker = NewSearchWorker(BMessenger(this), generation, failedSerial);
-      if (worker->Run() < 0) {
-        if (worker->Lock())
-          worker->Quit();
-        worker = nullptr;
-      }
-    }
+    RetireReadWorker(worker);
+    failedSerial = std::make_shared<std::atomic<int64>>(-1);
+    worker = NewSearchWorker(BMessenger(this), generation, failedSerial);
+    StartReadWorker(worker);
     BMessage check(kDeliveryCheck);
     deliveryTimer.reset(new BMessageRunner(BMessenger(this), &check, 250000));
     BMessage request(kSearchStart);
@@ -348,8 +345,7 @@ public:
 
   ~FlatView() {
     generation->fetch_add(1);
-    if (worker && worker->Lock())
-      worker->Quit();
+    RetireReadWorker(worker);
     results->Clear();
   }
 

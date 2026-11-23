@@ -9,7 +9,7 @@
 #include <string>
 class BBitmap;
 class BitmapMailbox;
-class BLooper;
+namespace Listi { class ReadWorker; }
 class BButton;
 class BScrollView;
 class ThemeTextView;
@@ -49,7 +49,7 @@ private:
   BPoint lastPointer;
   BBitmap *bitmap = nullptr;
   std::shared_ptr<BitmapMailbox> replies;
-  BLooper *loader = nullptr;
+  Listi::ReadWorker *loader = nullptr;
   std::shared_ptr<std::atomic<int64>> generation;
   ThemeTextView *text;
   BScrollView *textScroll;

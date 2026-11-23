@@ -224,8 +224,9 @@ number to review its result, even after another job has started. **Recent
 activity** is the combined log; a specific job shows its source and destination
 paths where available. Large reports have multiple pages. Job results are for
 this session, not saved to disk. **Clear finished** frees completed reports without cancelling any jobs.
-**Listi → Review interrupted operations…** checks the separate archive staging
-and bulk rename recovery records left after an interruption. It never resumes
+**Listi → Review interrupted operations…** shows recorded paths without touching
+the affected volumes. Choose **Check local paths** for an optional identity
+check. You can close the review while a check is pending. It never resumes
 the job or deletes a file.
 
 **Moving between local volumes:** Listi copies and checks each root before

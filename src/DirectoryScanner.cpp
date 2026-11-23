@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "DirectoryScanner.h"
+#include "ReadWorker.h"
 #include "Common.h"
 #include "FileOperation.h"
 #include "FileProperties.h"
@@ -17,7 +18,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 namespace {
-class Scanner : public BLooper {
+class Scanner : public Listi::ReadWorker {
   BMessenger target;
   std::shared_ptr<std::atomic<int64>> generation;
   std::shared_ptr<DirectoryScanDelivery> delivery;
@@ -43,12 +44,8 @@ class Scanner : public BLooper {
 public:
   Scanner(BMessenger t, std::shared_ptr<std::atomic<int64>> g,
           std::shared_ptr<DirectoryScanDelivery> d)
-      : BLooper("directory reader"), target(t), generation(g), delivery(d) {}
+      : ReadWorker("directory reader"), target(t), generation(g), delivery(d) {}
   void MessageReceived(BMessage *m) override {
-    if (delivery && delivery->retired.load()) {
-      Quit();
-      return;
-    }
     if (m->what != kScan) {
       BLooper::MessageReceived(m);
       return;
@@ -90,10 +87,10 @@ public:
       batchLimit = 80;
     };
     auto row = [&](const char *full, const char *label, bool parent = false) {
-      if (deliveryFailed)
+      if (deliveryFailed || generation->load() != serial)
         return;
       struct stat st;
-      if (lstat(full, &st))
+      if (lstat(full, &st) || generation->load() != serial)
         return;
       BMessage item;
       item.AddInt32("iconSize", iconPixels);
@@ -230,12 +227,14 @@ public:
       if (!realpath(path.String(), resolved)) {
         done.AddString("error", strerror(errno));
       } else {
+        if (generation->load() != serial)
+          return;
         path = resolved;
         DIR *dir = opendir(path.String());
         if (!dir)
           done.AddString("error", strerror(errno));
         else {
-          if (path != "/") {
+          if (generation->load() == serial && path != "/") {
             std::string parent = path.String();
             parent = parent.substr(0, parent.find_last_of('/'));
             if (parent.empty())
@@ -256,6 +255,8 @@ public:
             row(Listi::Join(path.String(), e->d_name).c_str(), e->d_name);
           }
           closedir(dir);
+          if (generation->load() != serial)
+            return;
           BNode node(path.String());
           node_ref ref;
           if (node.GetNodeRef(&ref) == B_OK)
@@ -275,7 +276,7 @@ public:
   }
 };
 }
-BLooper *
+Listi::ReadWorker *
 CreateDirectoryScanner(BMessenger target,
                        std::shared_ptr<std::atomic<int64>> generation,
                        std::shared_ptr<DirectoryScanDelivery> delivery) {

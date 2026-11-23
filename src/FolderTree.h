@@ -6,7 +6,7 @@
 #include <map>
 #include <memory>
 #include <string>
-class BLooper;
+namespace Listi { class ReadWorker; }
 class TreeList;
 class TreeItem;
 class FolderTree : public BView {
@@ -24,7 +24,7 @@ public:
 private:
   BHandler *navigationTarget;
   TreeList *list;
-  BLooper *reader = nullptr;
+  Listi::ReadWorker *reader = nullptr;
   std::shared_ptr<std::atomic<int64>> generation;
   std::map<std::string, TreeItem *> items;
   std::string root, desired;

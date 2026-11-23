@@ -13,6 +13,9 @@
 #include <algorithm>
 #include <atomic>
 #include <fstream>
+#include <dirent.h>
+#include <limits.h>
+#include <cstring>
 #include <iostream>
 #include <set>
 #include <sys/stat.h>
@@ -26,6 +29,26 @@ std::shared_ptr<std::atomic<int64>> generation;
 bool cancelOnFailure=false;
 std::atomic<bool> holdNextRows{false};
 sem_id held, resume, released;
+std::string blockedPath;
+std::atomic<bool> blockOpen{false};
+std::atomic<thread_id> blockedReader{-1};
+sem_id openEntered, allowOpen;
+}
+
+extern "C" DIR *__real_opendir(const char *);
+extern "C" DIR *__wrap_opendir(const char *path) {
+  if (blockOpen.load() && blockedPath == path) {
+    thread_info info;
+    if (get_thread_info(find_thread(nullptr), &info) == B_OK &&
+        strcmp(info.name, "directory reader") == 0 && blockOpen.exchange(false)) {
+      blockedReader = info.thread;
+      release_sem(openEntered);
+      // The timeout releases a broken candidate, so a regression fails
+      // rather than wedging the native suite on the window lock.
+      acquire_sem_etc(allowOpen, 1, B_RELATIVE_TIMEOUT, 6000000);
+    }
+  }
+  return __real_opendir(path);
 }
 extern "C" status_t __real__ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl(const BMessenger*,BMessage*,BHandler*,bigtime_t);
 extern "C" status_t __wrap__ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl(const BMessenger* self,BMessage* message,BHandler* reply,bigtime_t timeout) {
@@ -209,7 +232,61 @@ int main() {
  pane->Select(1);
  check(pane->LocationValid() && !pane->Selected().empty() && pane->Selected().size() < 160,
        "late old rows do not replace the new directory");
+ window->Unlock();
+
+ // No operation or interrupted-copy notification participates in these
+ // two cases: the held call is an ordinary native directory scan.
+ char canonicalFolder[PATH_MAX], canonicalRoot[PATH_MAX];
+ if (!realpath(folder.c_str(), canonicalFolder) || !realpath(root.c_str(), canonicalRoot))
+   return 4;
+ blockedPath = canonicalFolder;
+ openEntered = create_sem(0, "opendir entered");
+ allowOpen = create_sem(0, "release opendir");
+ auto holdScan = [&] {
+   blockedReader = -1;
+   blockOpen = true;
+   window->Lock();
+   pane->Navigate(folder.c_str());
+   window->Unlock();
+   return acquire_sem_etc(openEntered, 1, B_RELATIVE_TIMEOUT, 2000000) == B_OK;
+ };
+ auto drainScan = [&] {
+   release_sem(allowOpen);
+   const auto id = blockedReader.load();
+   if (id < 0)
+     return false;
+   thread_info info;
+   auto deadline = system_time() + 2000000;
+   while (get_thread_info(id, &info) == B_OK && system_time() < deadline)
+     snooze(10000);
+   return get_thread_info(id, &info) == B_BAD_THREAD_ID;
+ };
+ check(holdScan(), "ordinary navigation held inside opendir without a copy job");
+ auto start = system_time();
+ window->Lock();
+ pane->Navigate(root.c_str());
+ window->Unlock();
+ check(ready() && system_time() - start < 2000000,
+       "healthy navigation completes within two seconds of replacing a blocked read");
+ check(drainScan(), "obsolete ordinary reader exits after opendir returns");
+ window->Lock();
+ pane->Select(1);
+ check(pane->LocationValid() && std::string(pane->Path()) == canonicalRoot &&
+           !pane->Selected().empty() && pane->Selected().size() < 160,
+       "late scan cannot replace the current path, validity or rows");
+ window->Unlock();
+
+ check(holdScan(), "ordinary navigation blocked again before closing its window");
+ start = system_time();
+ window->Lock();
  window->Quit();
+ thread_info info;
+ check(system_time() - start < 2000000 &&
+           get_thread_info(blockedReader.load(), &info) == B_OK,
+       "window closes within two seconds while its old read is still blocked");
+ check(drainScan(), "reader safely exits after the window has been destroyed");
+ delete_sem(openEntered);
+ delete_sem(allowOpen);
  delete_sem(held);
  delete_sem(resume);
  delete_sem(released);

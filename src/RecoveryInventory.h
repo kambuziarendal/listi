@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #pragma once
+#include <atomic>
 #include <memory>
 class BMessage;
 #include <string>
@@ -33,5 +34,7 @@ private:
   struct stat identity{}, inventoryIdentity{};
   RecoveryPhase phase = RecoveryPhase::Intent;
 };
-std::string ReviewRecovery(const std::string &inventory = {});
+enum class RecoveryReview { JournalOnly, CheckLocalPaths };
+std::string ReviewRecovery(const std::string &inventory, RecoveryReview mode,
+                           const std::atomic<bool> *closed = nullptr);
 } // namespace Listi

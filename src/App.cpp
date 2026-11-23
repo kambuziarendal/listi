@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+#include "ReadWorker.h"
 #include "ApplicationServices.h"
 #include "ArchiveEditor.h"
 #include "ArchivePasswords.h"
@@ -14,6 +15,7 @@
 #include "SavedSearches.h"
 #include <Application.h>
 #include <Window.h>
+#include <unistd.h>
 #include <cstring>
 #include <exception>
 
@@ -27,6 +29,10 @@ public:
     Listi::StopArchivePasswords();
     if (services && services->Lock())
       services->Quit();
+    // Windows and write-capable services have finished their normal shutdown.
+    // Do not run kit/static destructors underneath a stranded read thread.
+    if (!Listi::DrainReadWorkers(500000))
+      _exit(0);
   }
   void ReadyToRun() override {
     InstallArchivePasswordWindow();

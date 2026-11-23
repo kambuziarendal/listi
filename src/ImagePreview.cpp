@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+#include "ReadWorker.h"
 #include "StagingSpace.h"
 #include "AdaptiveScrollView.h"
 #include "ImagePreview.h"
@@ -200,7 +201,7 @@ BBitmap *DecodeImage(Inspector::Input &input, const Listi::TransferControl &cont
   return image;
 }
 
-class Loader : public BLooper {
+class Loader : public Listi::ReadWorker {
   BMessenger target;
   std::shared_ptr<BitmapMailbox> replies;
   std::shared_ptr<std::atomic<int64>> generation;
@@ -208,7 +209,7 @@ class Loader : public BLooper {
 public:
   Loader(BMessenger t, std::shared_ptr<std::atomic<int64>> g,
          std::shared_ptr<BitmapMailbox> r)
-      : BLooper("image preview reader"), target(t), replies(r), generation(g) {}
+      : ReadWorker("image preview reader"), target(t), replies(r), generation(g) {}
   void MessageReceived(BMessage *m) override {
     if (m->what != kLoad) {
       BLooper::MessageReceived(m);
@@ -421,9 +422,7 @@ ImagePreview::ImagePreview(bool standalone)
 }
 ImagePreview::~ImagePreview() {
   generation->store(-1);
-  // Cancel first, then join; a posted quit can outlive BApplication teardown.
-  if (loader && loader->Lock())
-    loader->Quit();
+  Listi::RetireReadWorker(loader);
   delete bitmap;
 }
 void ImagePreview::AttachedToWindow() {
@@ -440,7 +439,7 @@ void ImagePreview::AttachedToWindow() {
   if (loader)
     return;
   loader = new Loader(BMessenger(this), generation, replies);
-  loader->Run();
+  Listi::StartReadWorker(loader);
   if (!path.empty() && !editor)
     Request(1);
 }
@@ -449,9 +448,7 @@ void ImagePreview::DetachedFromWindow() {
   // A reattached view receives a new handler token. Do not keep a loader
   // that posts completed reads to the token from the previous layout.
   ++*generation;
-  if (loader && loader->Lock())
-    loader->Quit();
-  loader = nullptr;
+  Listi::RetireReadWorker(loader);
   replies->Clear();
   BView::DetachedFromWindow();
 }
@@ -532,7 +529,7 @@ void ImagePreview::Request(int requestedPage, bool playback) {
   }
   caption = path.empty() ? "Select a file to inspect"
                         : playback ? "Playing preview (up to 15 seconds)"
-                                   : "Loading preview…";
+                                   : loader ? "Loading preview…" : "Preview reader unavailable.";
   Listi::SetViewVisible(textScroll, false);
   if (!path.empty() && loader) {
     BMessage m(kLoad);
@@ -541,7 +538,8 @@ void ImagePreview::Request(int requestedPage, bool playback) {
     m.AddInt32("page", requestedPage);
     m.AddBool("play", playback);
     m.AddBool("standalone", standalone);
-    loader->PostMessage(&m);
+    if (loader->PostMessage(&m) != B_OK)
+      caption = "Preview reader busy.";
   }
   UpdateControls();
 }

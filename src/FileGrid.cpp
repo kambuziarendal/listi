@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+#include "ReadWorker.h"
 #include "FileDrop.h"
 #include "FileGrid.h"
 #include "PanelAppearance.h"
@@ -17,7 +18,7 @@
 #include <set>
 namespace {
 constexpr uint32 kThumbnail = 'thum', kThumbnailReady = 'thrd';
-class ThumbnailLoader : public BLooper {
+class ThumbnailLoader : public Listi::ReadWorker {
   BMessenger target;
   std::shared_ptr<BitmapMailbox> replies;
   std::shared_ptr<std::atomic<int64>> generation;
@@ -25,7 +26,7 @@ class ThumbnailLoader : public BLooper {
 public:
   ThumbnailLoader(BMessenger t, std::shared_ptr<std::atomic<int64>> g,
                   std::shared_ptr<BitmapMailbox> r)
-      : BLooper("thumbnail reader"), target(t), replies(r), generation(g) {}
+      : ReadWorker("thumbnail reader"), target(t), replies(r), generation(g) {}
   void MessageReceived(BMessage *m) override {
     if (m->what != kThumbnail) {
       BLooper::MessageReceived(m);
@@ -57,7 +58,7 @@ class GridView : public FileGrid {
   PaneModel *model;
   int mode = 1;
   float cellWidth = 112, cellHeight = 100;
-  BLooper *loader = nullptr;
+  Listi::ReadWorker *loader = nullptr;
   std::shared_ptr<BitmapMailbox> replies = std::make_shared<BitmapMailbox>(64);
   std::shared_ptr<std::atomic<int64>> generation;
   std::map<std::string, std::unique_ptr<BBitmap>> thumbnails;
@@ -161,15 +162,19 @@ public:
   }
   ~GridView() {
     generation->store(-1);
-    // Join before the owning window/application can destroy the token space.
-    // Reader replies are bounded and never require this window's lock.
-    if (loader && loader->Lock())
-      loader->Quit();
+    Listi::RetireReadWorker(loader);
   }
   void AttachedToWindow() override {
     loader = new ThumbnailLoader(BMessenger(this), generation, replies);
-    loader->Run();
+    Listi::StartReadWorker(loader);
     Update();
+  }
+  void DetachedFromWindow() override {
+    ++*generation;
+    Listi::RetireReadWorker(loader);
+    pending.clear();
+    replies->Clear();
+    BView::DetachedFromWindow();
   }
   bool CancelSelectionGesture() override { return band->Escape(); }
   void Reset() {
@@ -435,11 +440,11 @@ public:
               ext == ".tiff" || ext == ".tif" || ext == ".avif" ||
               ext == ".heif" || ext == ".svg" || ext == ".ico" ||
               ext == ".tga") {
-            pending.insert(row->path);
             BMessage job(kThumbnail);
             job.AddString("path", row->path.c_str());
             job.AddInt64("serial", generation->load());
-            loader->PostMessage(&job);
+            if (loader->PostMessage(&job) == B_OK)
+              pending.insert(row->path);
           }
         }
       }

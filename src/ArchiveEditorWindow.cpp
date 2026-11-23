@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "ArchiveEditor.h"
+#include "ReadWorker.h"
+#include "ReadStatus.h"
 #include "VirtualFile.h"
 #include <Alert.h>
 #include <Application.h>
@@ -298,13 +300,46 @@ class RecoveryWindow : public BWindow {
   BStringView *status;
   BButton *open;
   std::string editor;
-  bool busy = true;
   struct Records {
-    std::mutex mutex;
+    std::atomic<bool> done{false};
     std::vector<Listi::ArchiveEditRecord> values;
     std::string error;
   };
   std::shared_ptr<Records> records = std::make_shared<Records>();
+  Listi::ReadWorker *worker = nullptr;
+  class SessionReader : public Listi::ReadWorker {
+    std::shared_ptr<Records> records;
+  public:
+    explicit SessionReader(std::shared_ptr<Records> records)
+        : ReadWorker("Archive recovery reader"), records(std::move(records)) {}
+    void MessageReceived(BMessage *message) override {
+      if (message->what != kBegin) {
+        ReadWorker::MessageReceived(message);
+        return;
+      }
+      try {
+        records->values = Listi::ListArchiveEdits(Root());
+      } catch (const std::exception &e) {
+        records->error = e.what();
+      }
+      records->done.store(true);
+    }
+  };
+  void Collect() {
+    if (!worker || !records->done.load())
+      return;
+    Listi::RetireReadWorker(worker);
+    SetPulseRate(0);
+    for (const auto &r : records->values)
+      list->AddRow(new EditRow(r));
+    list->InvalidateLayout();
+    status->SetText(records->error.empty()
+                        ? (records->values.empty()
+                               ? "No retained archive edits."
+                               : "Choose an edit to resume. Changed source "
+                                 "archives will not be overwritten.")
+                        : records->error.c_str());
+  }
 
 public:
   explicit RecoveryWindow(const std::string &application)
@@ -323,8 +358,11 @@ public:
     list->SetExplicitMinSize(BSize(450, 180));
     open = new BButton("Resume selected edit", new BMessage(kOpen));
     open->SetEnabled(false);
-    status =
-        Line("archive recovery status", "Reading retained edit sessions...");
+    status = new Listi::ReadStatus("archive recovery status", "Reading retained edit sessions...",
+                                   [this] { Collect(); });
+    status->SetExplicitMinSize(BSize(0, B_SIZE_UNSET));
+    status->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
+    status->SetTruncation(B_TRUNCATE_MIDDLE);
     BLayoutBuilder::Group<>(this, B_VERTICAL, 8)
         .SetInsets(10)
         .Add(list)
@@ -334,37 +372,19 @@ public:
         .AddGlue()
         .Add(new BButton("Close", new BMessage(B_QUIT_REQUESTED)))
         .End();
-    Show();
-    auto state = records;
-    BMessenger target(this);
-    std::thread([state, target] {
-      {
-        std::lock_guard<std::mutex> lock(state->mutex);
-        try {
-          state->values = Listi::ListArchiveEdits(Root());
-        } catch (const std::exception &e) {
-          state->error = e.what();
-        }
-      }
-      target.SendMessage(kLoaded);
-    }).detach();
-  }
-  bool QuitRequested() override { return !busy; }
-  void MessageReceived(BMessage *m) override {
-    if (m->what == kLoaded) {
-      std::lock_guard<std::mutex> lock(records->mutex);
-      busy = false;
-      for (auto &r : records->values)
-        list->AddRow(new EditRow(r));
-      list->InvalidateLayout();
-      status->SetText(records->error.empty()
-                          ? (records->values.empty()
-                                 ? "No retained archive edits."
-                                 : "Choose an edit to resume. Changed source "
-                                   "archives will not be overwritten.")
-                          : records->error.c_str());
-      return;
+    worker = new SessionReader(records);
+    BMessage begin(kBegin);
+    if (!Listi::StartReadWorker(worker) ||
+        BMessenger(worker).SendMessage(&begin, static_cast<BHandler *>(nullptr), 0) != B_OK) {
+      Listi::RetireReadWorker(worker);
+      status->SetText("Cannot start a recovery reader. Reopen this window to retry.");
+    } else {
+      SetPulseRate(100000);
     }
+    Show();
+  }
+  ~RecoveryWindow() override { Listi::RetireReadWorker(worker); }
+  void MessageReceived(BMessage *m) override {
     if (m->what == kTick) {
       auto row = static_cast<EditRow *>(list->CurrentSelection());
       open->SetEnabled(row && row->record.error.empty());

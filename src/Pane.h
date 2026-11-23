@@ -25,6 +25,7 @@ class BGroupView;
 class BSplitView;
 class BMenuField;
 namespace Listi {
+class ReadWorker;
 class Shelf;
 inline constexpr uint32 kApplyPattern = 'spap';
 }
@@ -148,7 +149,7 @@ private:
   };
   std::unique_ptr<BMessageRunner> progressTimer;
   std::map<std::string, Transfer> transfers;
-  BLooper *scanner = nullptr;
+  Listi::ReadWorker *scanner = nullptr;
   void StartDirectoryReader();
   void AfterInterruptedCopy(const char *folder);
   bool mediaReadSuspended = false;

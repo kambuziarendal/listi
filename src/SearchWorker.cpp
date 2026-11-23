@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+#include "ReadWorker.h"
 #include "SearchWorker.h"
 #include "FileSearch.h"
 #include <MessageRunner.h>
@@ -9,7 +10,7 @@
 namespace Listi {
 namespace {
 constexpr uint32 kRefresh = 'sref', kReconcile = 'srec';
-class SearchWorker : public BLooper {
+class SearchWorker : public Listi::ReadWorker {
   BMessenger target;
   std::shared_ptr<std::atomic<int64>> generation;
   std::shared_ptr<std::atomic<int64>> failedSerial;
@@ -99,7 +100,7 @@ class SearchWorker : public BLooper {
 public:
   SearchWorker(BMessenger receiver, std::shared_ptr<std::atomic<int64>> token,
                std::shared_ptr<std::atomic<int64>> failure)
-      : BLooper("file search"), target(receiver), generation(token), failedSerial(failure) {}
+      : ReadWorker("file search"), target(receiver), generation(token), failedSerial(failure) {}
   void MessageReceived(BMessage *m) override {
     switch (m->what) {
     case kSearchStart: {
@@ -187,7 +188,7 @@ public:
   }
 };
 }
-BLooper *NewSearchWorker(BMessenger target,
+ReadWorker *NewSearchWorker(BMessenger target,
                          std::shared_ptr<std::atomic<int64>> generation,
                          std::shared_ptr<std::atomic<int64>> failure) {
   return new SearchWorker(target, generation, failure);

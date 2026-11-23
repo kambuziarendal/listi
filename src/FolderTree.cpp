@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+#include "ReadWorker.h"
 #include "FolderTree.h"
 #include "Common.h"
 #include "VirtualFile.h"
@@ -11,13 +12,13 @@
 #include <algorithm>
 namespace {
 constexpr uint32 kTreeRead = 'trrd', kTreeLoaded = 'trld';
-class TreeReader : public BLooper {
+class TreeReader : public Listi::ReadWorker {
   BMessenger target;
   std::shared_ptr<std::atomic<int64>> generation;
 
 public:
   TreeReader(BMessenger t, std::shared_ptr<std::atomic<int64>> g)
-      : BLooper("folder tree reader"), target(t), generation(g) {}
+      : ReadWorker("folder tree reader"), target(t), generation(g) {}
   void MessageReceived(BMessage *m) override {
     if (m->what != kTreeRead) {
       BLooper::MessageReceived(m);
@@ -107,8 +108,7 @@ FolderTree::FolderTree(BHandler *target)
 }
 FolderTree::~FolderTree() {
   generation->store(-1);
-  if (reader && reader->Lock())
-    reader->Quit();
+  Listi::RetireReadWorker(reader);
   Clear();
 }
 void FolderTree::Clear() {
@@ -125,7 +125,7 @@ void FolderTree::AttachedToWindow() {
   if (reader)
     return;
   reader = new TreeReader(BMessenger(this), generation);
-  reader->Run();
+  Listi::StartReadWorker(reader);
 }
 std::string FolderTree::PathAt(BPoint screen) const {
   const BPoint point = list->ConvertFromScreen(screen);

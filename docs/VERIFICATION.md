@@ -258,8 +258,9 @@ ordinary working volume to exercise a failure path.
 
 A failed archive operation reports if Listi cannot remove its staging folder.
 On restart, **Listi → Review interrupted operations…** reads Listi's
-private stage and bulk rename inventory. It shows the recorded path and
-whether its entry and parent still match. It never resumes, relocates or
+private stage and bulk rename inventory without probing affected volumes.
+**Check local paths** optionally checks whether an entry and its parent still
+match. The review can be closed while a check is pending. It never resumes, relocates or
 deletes an entry. A missing or substituted name is not safe to reuse.
 A match is only advisory, especially after devices are remounted.
 In the destination you can also look for hidden `.Listi-archive-stage-*` directories

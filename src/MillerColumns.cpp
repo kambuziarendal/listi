@@ -2,6 +2,7 @@
 #include "MillerColumns.h"
 #include "AdaptiveScrollView.h"
 #include "DirectoryScanner.h"
+#include "ReadWorker.h"
 #include "FileDrop.h"
 #include "Pane.h"
 #include "PanelAppearance.h"
@@ -386,7 +387,7 @@ struct MillerColumns::State {
   bool active = false, enabled = false, attached = false;
   std::string location, reading;
   PaneModel incoming;
-  BLooper *scanner = nullptr;
+  Listi::ReadWorker *scanner = nullptr;
   std::shared_ptr<std::atomic<int64>> generation =
       std::make_shared<std::atomic<int64>>(0);
   std::shared_ptr<DirectoryScanDelivery> delivery =
@@ -422,6 +423,8 @@ struct MillerColumns::State {
 
   void CancelRead() {
     ++*generation;
+    if (!reading.empty())
+      Listi::RetireReadWorker(scanner);
     timer.reset();
     reading.clear();
     incoming.Clear();
@@ -438,7 +441,7 @@ struct MillerColumns::State {
       if (!scanner) {
         scanner =
             CreateDirectoryScanner(BMessenger(owner), generation, delivery);
-        scanner->Run();
+        Listi::StartReadWorker(scanner);
       }
       reading = rows->location;
       const auto serial = ++*generation;
@@ -449,7 +452,8 @@ struct MillerColumns::State {
       BMessage check(kCheckColumnRead);
       check.AddInt64("serial", serial);
       timer.reset(new BMessageRunner(BMessenger(owner), &check, 250000));
-      if (timer->InitCheck() == B_OK && scanner->PostMessage(&scan) == B_OK)
+      if (timer->InitCheck() == B_OK && scanner &&
+          scanner->PostMessage(&scan) == B_OK)
         return;
       Finish(rows, true);
     }
@@ -481,8 +485,7 @@ MillerColumns::MillerColumns(Pane *pane, PaneModel *model)
 MillerColumns::~MillerColumns() {
   state->CancelRead();
   state->generation->store(-1);
-  if (state->scanner && state->scanner->Lock())
-    state->scanner->Quit();
+  Listi::RetireReadWorker(state->scanner);
 }
 
 void MillerColumns::AttachedToWindow() {

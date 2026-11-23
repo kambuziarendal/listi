@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include <stdexcept>
 #include "MainWindow.h"
-#include "RecoveryInventory.h"
-#include "AdaptiveScrollView.h"
-#include "ThemeTextView.h"
+#include "RecoveryReviewWindow.h"
 #include "FlatView.h"
 #include "MainWindowMenu.h"
 #include "ApplicationServices.h"
@@ -558,33 +556,12 @@ public:
     case kShowJobs:
       queue.Toggle();
       break;
-    case kReviewRecovery: {
-      std::string text;
-      try {
-        text = queue.Busy() ? "Wait for the active operation before reviewing recovery records."
-                            : Listi::ReviewRecovery();
-      } catch (const std::exception &error) {
-        text = error.what();
-      }
-      auto *review = new BWindow(BRect(0, 0, 610, 365),
-                                 "Listi recovery review", B_TITLED_WINDOW,
-                                 B_CLOSE_ON_ESCAPE | B_AUTO_UPDATE_SIZE_LIMITS);
-      auto *report = new ThemeTextView("recovery records",
-                                       B_DOCUMENT_BACKGROUND_COLOR,
-                                       B_DOCUMENT_TEXT_COLOR);
-      report->MakeEditable(false);
-      report->MakeSelectable(true);
-      report->SetWordWrap(true);
-      report->SetText(text.c_str());
-      auto *scroll = new Listi::AdaptiveScrollView("recovery scroll", report, false);
-      scroll->SetExplicitMinSize(BSize(320, 140));
-      BLayoutBuilder::Group<>(review, B_VERTICAL)
-          .SetInsets(8)
-          .Add(scroll);
-      review->CenterIn(Frame());
-      review->Show();
+    case kReviewRecovery:
+      if (queue.Busy())
+        queue.ErrorInfo("Wait for the active operation before reviewing recovery records.");
+      else
+        Listi::OpenRecoveryReview(Frame());
       break;
-    }
     case kCompareFolders:
       OpenFolderCompare(pane.Path(), panes[1 - source]->Path());
       break;

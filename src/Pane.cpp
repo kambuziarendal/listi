@@ -4,6 +4,7 @@
 #include "FlatView.h"
 #include "PanelAppearance.h"
 #include "DirectoryScanner.h"
+#include "ReadWorker.h"
 #include "PropertiesWindow.h"
 #include "FileDetails.h"
 #include "FileGrid.h"
@@ -202,8 +203,7 @@ Pane::~Pane() {
   generation->store(-1);
   scanTimer.reset();
   stop_watching(this);
-  if (scanner && scanner->Lock())
-    scanner->Quit();
+  Listi::RetireReadWorker(scanner);
 }
 void Pane::AttachedToWindow() {
   display->Menu()->SetTargetForItems(this);
@@ -217,14 +217,13 @@ void Pane::AttachedToWindow() {
   edit->TextView()->AddFilter(new PaneInput(this, edit));
   auto field = dynamic_cast<BMenuField *>(FindView("go"));
   field->Menu()->SetTargetForItems(this);
-  StartDirectoryReader();
   Apply(prefs);
   Navigate(path);
 }
 void Pane::StartDirectoryReader() {
   scanDelivery = std::make_shared<DirectoryScanDelivery>();
   scanner = CreateDirectoryScanner(BMessenger(this), generation, scanDelivery);
-  scanner->Run();
+  Listi::StartReadWorker(scanner);
 }
 void Pane::AfterInterruptedCopy(const char *folder) {
   const std::string lost(folder);
@@ -235,10 +234,7 @@ void Pane::AfterInterruptedCopy(const char *folder) {
     // rejects batches that were already in the window's port.
     history.Complete(serial, path.String(), false);
     generation->store(++serial);
-    scanDelivery->retired.store(true);
-    BMessage quit(B_QUIT_REQUESTED);
-    BMessenger(scanner).SendMessage(&quit, (BHandler *)nullptr, 0);
-    StartDirectoryReader();
+    Listi::RetireReadWorker(scanner);
     scanning = refreshPending = false;
     scanTimer.reset();
   }
@@ -484,7 +480,7 @@ void Pane::Apply(const Preferences &p) {
   UpdateActivityAppearance();
 }
 void Pane::Navigate(const char *p) {
-  if (!scanner)
+  if (!Window())
     return;
   std::string request = p;
   if (request.empty())
@@ -558,6 +554,10 @@ void Pane::StartNavigation(const std::string &request, int target, bool trash) {
   path = request.c_str();
   SetDisplayMode(LocationMode());
   edit->SetText(path);
+  if (scanning)
+    Listi::RetireReadWorker(scanner);
+  if (!scanner)
+    StartDirectoryReader();
   scanning = true;
   locationValid = false;
   sidebar->UpdateLocation();
@@ -581,7 +581,8 @@ void Pane::StartNavigation(const std::string &request, int target, bool trash) {
   BMessage check(kCheckScanDelivery);
   check.AddInt64("serial", serial);
   scanTimer.reset(new BMessageRunner(BMessenger(this), &check, 250000));
-  if (scanTimer->InitCheck() != B_OK || scanner->PostMessage(&m) != B_OK) {
+  if (scanTimer->InitCheck() != B_OK || !scanner ||
+      scanner->PostMessage(&m) != B_OK) {
     BMessage failed(kScanDone);
     failed.AddInt64("serial", serial);
     failed.AddString("error",
