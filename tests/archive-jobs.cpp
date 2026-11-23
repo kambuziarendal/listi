@@ -6,10 +6,10 @@
 #include "ArchiveSettings.h"
 #include "MessageStore.h"
 #include "RecoveryInventory.h"
-#include <FindDirectory.h>
 #include "JobSnapshot.h"
 #include "VirtualFile.h"
 #include <Application.h>
+#include <FindDirectory.h>
 #include <TextControl.h>
 #include <StringView.h>
 #include <Window.h>
@@ -215,7 +215,7 @@ void *run(void *) {
       }
       if (!recordPath.empty()) {
         const auto record = LoadMessageStore(recordPath, true);
-        sawPublishing = record.GetString("destination", "") == original &&
+        sawPublishing = record.GetString("destination", "") == edit.destination &&
                         record.GetInt32("phase", -1) == int(RecoveryPhase::Publishing);
       }
       return !sawPublishing;
