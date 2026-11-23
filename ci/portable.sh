@@ -18,4 +18,5 @@ for name in filter(None, files):
 PY
 python3 ci/native-inventory.py
 python3 ci/test-native-gate.py
+bash ci/test-public-fixtures.sh
 make audit-transfer audit-sanitize fuzz-parsers

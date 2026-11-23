@@ -30,7 +30,28 @@ GitHub-hosted throwaway runners only, never a persistent self-hosted runner,
 never pull_request_target. No deployment rights, write tokens, secrets,
 agent forwarding, caches or reusable host credentials are needed.
 
-Prepare a powered-off **test-only** standalone qcow2 image (no backing file)
+Hosted CI needs no repository variables: it fetches the public x86_64 beta6
+guest and its public guest-only SSH test identity from
+[anyvm-org/haiku-builder v2.0.3](https://github.com/anyvm-org/haiku-builder/releases/tag/v2.0.3).
+Both SHA-256 digests are pinned in `ci/fetch-public-fixtures.sh`. Never use
+this identity for other guests or services. The first boot of the disposable
+overlay has outbound NAT to install test dependencies; that script, like the
+rest of the PR, is not trusted host code. After a clean poweroff the same
+overlay boots with restricted networking for source export, build and tests.
+The workflow uploads an early preflight log even if fixture validation fails.
+Package versions resolved at provisioning time are recorded in the native audit.
+
+To run this same lane locally in a clean checkout on a disposable Linux host:
+
+```sh
+fixture=$(mktemp -d)
+bash ci/fetch-public-fixtures.sh "$fixture" &&
+python3 tests/run-ephemeral-audit.py --base "$fixture/haiku.qcow2" \
+  --key "$fixture/guest-identity" --output "$fixture/evidence" \
+  --provision-public-fixture --qualify-package
+```
+
+Alternatively prepare a powered-off **test-only** standalone qcow2 image (no backing file)
 with a fresh Haiku x86_64 installation, GUI app_server, OpenSSH, GCC, Python
 3, Make, Haiku build tools, development headers and required optional codecs.
 See [verification](VERIFICATION.md#native-regression-audit-and-smoke-test).
@@ -100,13 +121,12 @@ is **not** a required hosted check and its absence does not qualify it.
    and available Actions artifact allowance. Do not enable paid usage. The
    jobs are deliberately disabled in private repos; a skipped job there must
    not be required as proof of verification.
-2. Have the owner make the public, sanitized test image and its disposable
-   guest-only SSH identity available at stable HTTPS URLs on existing free
-   infrastructure. Both are **public fixtures**, not secrets; this identity
-   must authorize nothing outside that image. Compute SHA-256 independently
-   and add repository Actions **variables** LISTI_CI_IMAGE_URL,
-   LISTI_CI_IMAGE_SHA256, LISTI_CI_IDENTITY_URL and LISTI_CI_IDENTITY_SHA256.
-   Missing variables, failed downloads or checksum mismatches fail native CI.
+2. Use the pinned public fixture by default. To override it with an already
+   provisioned public test image, configure all four Actions variables:
+   LISTI_CI_IMAGE_URL, LISTI_CI_IMAGE_SHA256, LISTI_CI_IDENTITY_URL and
+   LISTI_CI_IDENTITY_SHA256. Partial overrides, failed downloads and checksum
+   mismatches fail native CI. Never publish a development image or a key
+   authorized outside the disposable fixture.
 3. After review and authorization, land the workflow on the default branch.
    Enable Actions and read-only token access. Run a manual dispatch and
    a test PR; check the exact commit, artifact logs and stable names
