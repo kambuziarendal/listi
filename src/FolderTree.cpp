@@ -14,11 +14,12 @@ namespace {
 constexpr uint32 kTreeRead = 'trrd', kTreeLoaded = 'trld';
 class TreeReader : public Listi::ReadWorker {
   BMessenger target;
+  std::shared_ptr<TerminalReplies> terminal;
   std::shared_ptr<std::atomic<int64>> generation;
 
 public:
-  TreeReader(BMessenger t, std::shared_ptr<std::atomic<int64>> g)
-      : ReadWorker("folder tree reader"), target(t), generation(g) {}
+  TreeReader(BMessenger t, std::shared_ptr<std::atomic<int64>> g, std::shared_ptr<TerminalReplies> queue)
+      : ReadWorker("folder tree reader"), target(t), terminal(queue), generation(g) {}
   void MessageReceived(BMessage *m) override {
     if (m->what != kTreeRead) {
       BLooper::MessageReceived(m);
@@ -46,7 +47,9 @@ public:
     } catch (const std::exception &e) {
       result.AddString("error", e.what());
     }
-    target.SendMessage(&result, (BHandler *)nullptr, 500000);
+    terminal->Deliver(result, *generation, [&] {
+      return target.SendMessage(&result, (BHandler *)nullptr, 50000);
+    });
   }
 };
 } // namespace
@@ -97,7 +100,7 @@ public:
   }
 };
 FolderTree::FolderTree(BHandler *target)
-    : BView("folder tree panel", B_WILL_DRAW | B_SUPPORTS_LAYOUT),
+    : BView("folder tree panel", B_PULSE_NEEDED | B_WILL_DRAW | B_SUPPORTS_LAYOUT),
       navigationTarget(target),
       generation(std::make_shared<std::atomic<int64>>(0)) {
   list = new TreeList(this);
@@ -124,7 +127,7 @@ void FolderTree::Clear() {
 void FolderTree::AttachedToWindow() {
   if (reader)
     return;
-  reader = new TreeReader(BMessenger(this), generation);
+  reader = new TreeReader(BMessenger(this), generation, terminal);
   Listi::StartReadWorker(reader);
 }
 std::string FolderTree::PathAt(BPoint screen) const {
@@ -187,7 +190,11 @@ void FolderTree::ExpandPath(const std::string &path) {
   BMessage m(kTreeRead);
   m.AddString("path", path.c_str());
   m.AddInt64("serial", generation->load());
-  reader->PostMessage(&m);
+  if (reader->PostMessage(&m) != B_OK) {
+    m.what = kTreeLoaded;
+    m.AddString("error", "Folder reader busy. Expand again to retry.");
+    MessageReceived(&m);
+  }
 }
 void FolderTree::Follow() {
   // Disks is not a directory. Late branch reads must not reselect the last
@@ -209,6 +216,10 @@ void FolderTree::Follow() {
       ExpandPath(p);
     }
   }
+}
+void FolderTree::Pulse() {
+  for (auto &reply : terminal->Take())
+    MessageReceived(&reply);
 }
 void FolderTree::MessageReceived(BMessage *m) {
   if (m->what != kTreeLoaded) {

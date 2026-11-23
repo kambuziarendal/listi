@@ -203,13 +203,14 @@ BBitmap *DecodeImage(Inspector::Input &input, const Listi::TransferControl &cont
 
 class Loader : public Listi::ReadWorker {
   BMessenger target;
+  std::shared_ptr<TerminalReplies> terminal;
   std::shared_ptr<BitmapMailbox> replies;
   std::shared_ptr<std::atomic<int64>> generation;
 
 public:
   Loader(BMessenger t, std::shared_ptr<std::atomic<int64>> g,
-         std::shared_ptr<BitmapMailbox> r)
-      : ReadWorker("image preview reader"), target(t), replies(r), generation(g) {}
+         std::shared_ptr<BitmapMailbox> r, std::shared_ptr<TerminalReplies> queue)
+      : ReadWorker("image preview reader"), target(t), terminal(queue), replies(r), generation(g) {}
   void MessageReceived(BMessage *m) override {
     if (m->what != kLoad) {
       BLooper::MessageReceived(m);
@@ -315,6 +316,12 @@ private:
   void Send(BMessage &message, std::unique_ptr<BBitmap> image) {
     int64 reply = image ? replies->Put(image.release()) : -1;
     message.AddInt64("bitmap", reply);
+    if (message.what == kReady) {
+      terminal->Deliver(message, *generation, [&] {
+        return target.SendMessage(&message, (BHandler *)nullptr, 50000);
+      });
+      return;
+    }
     if (target.SendMessage(&message, (BHandler *)nullptr, 50000) != B_OK)
       replies->Take(reply);
   }
@@ -377,7 +384,7 @@ void ImagePreview::OpenWindow(const std::string &path) {
 }
 
 ImagePreview::ImagePreview(bool standalone)
-    : BView("inspector", B_WILL_DRAW | B_FULL_UPDATE_ON_RESIZE |
+    : BView("inspector", B_PULSE_NEEDED | B_WILL_DRAW | B_FULL_UPDATE_ON_RESIZE |
                              B_FRAME_EVENTS | B_SUPPORTS_LAYOUT),
       replies(std::make_shared<BitmapMailbox>(2)),
       generation(std::make_shared<std::atomic<int64>>(0)), standalone(standalone) {
@@ -438,7 +445,7 @@ void ImagePreview::AttachedToWindow() {
   FrameResized(Bounds().Width(), Bounds().Height());
   if (loader)
     return;
-  loader = new Loader(BMessenger(this), generation, replies);
+  loader = new Loader(BMessenger(this), generation, replies, terminal);
   Listi::StartReadWorker(loader);
   if (!path.empty() && !editor)
     Request(1);
@@ -462,7 +469,7 @@ bool ImagePreview::ShowFile(const std::string &p) {
       pendingFile = p;
     return path == p;
   }
-  if (path == p)
+  if (path == p && !submissionFailed)
     return true;
   path = p;
   photoView = {};
@@ -521,6 +528,7 @@ void ImagePreview::RemoveEditor() {
 }
 void ImagePreview::Request(int requestedPage, bool playback) {
   ready = false;
+  submissionFailed = false;
   int64 serial = ++*generation;
   replies->Clear();
   if (kind == Inspector::Kind::Unknown) {
@@ -538,8 +546,10 @@ void ImagePreview::Request(int requestedPage, bool playback) {
     m.AddInt32("page", requestedPage);
     m.AddBool("play", playback);
     m.AddBool("standalone", standalone);
-    if (loader->PostMessage(&m) != B_OK)
-      caption = "Preview reader busy.";
+    if (loader->PostMessage(&m) != B_OK) {
+      submissionFailed = true;
+      caption = "Preview reader busy. Select the file again.";
+    }
   }
   UpdateControls();
 }
@@ -569,6 +579,10 @@ void ImagePreview::UpdateControls() {
   play->SetLabel(playing ? "Stop preview" : "Play preview");
   LayoutControls();
   Invalidate();
+}
+void ImagePreview::Pulse() {
+  for (auto &reply : terminal->Take())
+    MessageReceived(&reply);
 }
 void ImagePreview::MessageReceived(BMessage *m) {
   switch (m->what) {

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "BitmapMailbox.h"
 #include "ImagePreview.h"
+#include "TerminalReplies.h"
 #include "VirtualFile.h"
 #include <Application.h>
 #include <iostream>
@@ -32,6 +33,21 @@ int main(int argc, char **argv) {
     auto cleared = mailbox.Put(received.release());
     mailbox.Clear();
     check(!mailbox.Take(cleared), "navigation clears unconsumed bitmap replies");
+    TerminalReplies terminal;
+    std::atomic<int64> generation{1};
+    for (uint32 what : {'pird', 'thrd', 'trld'}) {
+      BMessage result(what);
+      result.AddInt64("serial", 1);
+      result.AddString("path", "/fixture");
+      terminal.Deliver(result, generation, [] { return B_TIMED_OUT; });
+      auto retained = terminal.Take();
+      check(retained.size() == 1 && retained.front().what == what &&
+                std::string(retained.front().GetString("path", "")) == "/fixture" &&
+                terminal.Take().empty(),
+            "lost UI notification retains its complete result exactly once");
+      terminal.Deliver(result, generation, [] { return B_OK; });
+      check(terminal.Take().empty(), "normal retry does not duplicate completion");
+    }
     int calls = 0;
     control.proceed = [&] { return ++calls < 3; };
     bool cancelled = false;

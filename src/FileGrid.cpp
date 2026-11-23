@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "ReadWorker.h"
+#include "TerminalReplies.h"
 #include "FileDrop.h"
 #include "FileGrid.h"
 #include "PanelAppearance.h"
@@ -20,13 +21,14 @@ namespace {
 constexpr uint32 kThumbnail = 'thum', kThumbnailReady = 'thrd';
 class ThumbnailLoader : public Listi::ReadWorker {
   BMessenger target;
+  std::shared_ptr<TerminalReplies> terminal;
   std::shared_ptr<BitmapMailbox> replies;
   std::shared_ptr<std::atomic<int64>> generation;
 
 public:
   ThumbnailLoader(BMessenger t, std::shared_ptr<std::atomic<int64>> g,
-                  std::shared_ptr<BitmapMailbox> r)
-      : ReadWorker("thumbnail reader"), target(t), replies(r), generation(g) {}
+                  std::shared_ptr<BitmapMailbox> r, std::shared_ptr<TerminalReplies> queue)
+      : ReadWorker("thumbnail reader"), target(t), terminal(queue), replies(r), generation(g) {}
   void MessageReceived(BMessage *m) override {
     if (m->what != kThumbnail) {
       BLooper::MessageReceived(m);
@@ -48,12 +50,14 @@ public:
     done.AddInt64("serial", serial);
     auto reply = replies->Put(bitmap);
     done.AddInt64("bitmap", reply);
-    if (target.SendMessage(&done, (BHandler *)nullptr, 500000) != B_OK)
-      replies->Take(reply);
+    terminal->Deliver(done, *generation, [&] {
+      return target.SendMessage(&done, (BHandler *)nullptr, 50000);
+    });
   }
 };
 } // namespace
 class GridView : public FileGrid {
+  std::shared_ptr<TerminalReplies> terminal = std::make_shared<TerminalReplies>();
   Pane *pane;
   PaneModel *model;
   int mode = 1;
@@ -104,7 +108,7 @@ public:
     Invalidate();
   }
   GridView(Pane *p, PaneModel *state)
-      : FileGrid("file grid", B_WILL_DRAW | B_NAVIGABLE | B_FRAME_EVENTS |
+      : FileGrid("file grid", B_PULSE_NEEDED | B_WILL_DRAW | B_NAVIGABLE | B_FRAME_EVENTS |
                                   B_FULL_UPDATE_ON_RESIZE),
         pane(p), model(state),
         generation(std::make_shared<std::atomic<int64>>(0)) {
@@ -165,7 +169,7 @@ public:
     Listi::RetireReadWorker(loader);
   }
   void AttachedToWindow() override {
-    loader = new ThumbnailLoader(BMessenger(this), generation, replies);
+    loader = new ThumbnailLoader(BMessenger(this), generation, replies, terminal);
     Listi::StartReadWorker(loader);
     Update();
   }
@@ -382,6 +386,10 @@ public:
       }
     }
     BView::KeyDown(bytes, length);
+  }
+  void Pulse() override {
+    for (auto &reply : terminal->Take())
+      MessageReceived(&reply);
   }
   void MessageReceived(BMessage *m) override {
     if (m->what == kThumbnailReady) {

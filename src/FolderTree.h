@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #pragma once
+#include "TerminalReplies.h"
 #include <Messenger.h>
 #include <View.h>
 #include <atomic>
@@ -14,6 +15,7 @@ public:
   explicit FolderTree(BHandler *navigationTarget);
   ~FolderTree();
   void AttachedToWindow() override;
+  void Pulse() override;
   void MessageReceived(BMessage *) override;
   void ShowPath(const std::string &);
   std::string PathAt(BPoint screen) const;
@@ -22,6 +24,7 @@ public:
   void Reset();
 
 private:
+  std::shared_ptr<TerminalReplies> terminal = std::make_shared<TerminalReplies>();
   BHandler *navigationTarget;
   TreeList *list;
   Listi::ReadWorker *reader = nullptr;

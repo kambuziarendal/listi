@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #pragma once
+#include "TerminalReplies.h"
 #include "InspectorContent.h"
 #include "InspectorPhoto.h"
 #include <View.h>
@@ -20,6 +21,7 @@ public:
   ~ImagePreview();
   void AttachedToWindow() override;
   void DetachedFromWindow() override;
+  void Pulse() override;
   void MessageReceived(BMessage *) override;
   void Draw(BRect) override;
   void FrameResized(float, float) override;
@@ -34,6 +36,7 @@ public:
   const std::string &File() const { return path; }
 
 private:
+  std::shared_ptr<TerminalReplies> terminal = std::make_shared<TerminalReplies>();
   void Request(int page, bool playback = false);
   void UpdateControls();
   void RemoveEditor();
@@ -57,6 +60,7 @@ private:
   BButton *fileAction, *closeQuickView;
   BButton *detachEditor, *doneEditing;
   BView *editor = nullptr;
+  bool submissionFailed = false;
   bool ready = false, canEdit = false;
   Inspector::Kind kind = Inspector::Kind::Unknown;
   const bool standalone;
