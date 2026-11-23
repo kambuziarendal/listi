@@ -53,9 +53,10 @@ jobs:
         with:
           persist-credentials: false
       - name: Install native runner tools
+        shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/haiku-log"
-          sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils zstd
+          { sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends acl qemu-system-x86 qemu-utils zstd; } 2>&1 | tee "$RUNNER_TEMP/haiku-log/host-tools.log"
       - name: Download and verify the disposable test fixtures
         env:
           IMAGE_URL: ${{ vars.LISTI_CI_IMAGE_URL }}
@@ -72,8 +73,7 @@ jobs:
           test -z "$(git status --porcelain)"
           flags=()
           [[ ! -f "$RUNNER_TEMP/provision-public-fixture" ]] || flags+=(--provision-public-fixture)
-          if [[ -c /dev/kvm ]]; then
-            sudo setfacl -m "u:$(id -un):rw" /dev/kvm
+          if [[ -c /dev/kvm ]] && sudo setfacl -m "u:$(id -un):rw" /dev/kvm && [[ -r /dev/kvm && -w /dev/kvm ]]; then
             flags+=(--accel kvm)
           fi
           python3 tests/run-ephemeral-audit.py "${flags[@]}" --base "$RUNNER_TEMP/haiku.qcow2" \
