@@ -18,6 +18,8 @@ public:
   void MessageReceived(BMessage *) override;
 
   float ContentWidth(float viewport) const;
+  BPoint ScrollPosition() const;
+  void RestoreScroll(BPoint);
   void SetLocation(const std::string &);
   void Refresh();
   void RedrawRows();

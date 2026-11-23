@@ -382,7 +382,7 @@ public:
     menu->SetFolderTree(page == PanelPage::Files && pane.CanToggleTree(),
                         SidebarHasTree(pane.Sidebar()));
     const bool canSaveClipboard =
-        !actionArea->Pending() && Listi::CanSaveClipboardIn(path);
+        !pane.IsSearchList() && !actionArea->Pending() && Listi::CanSaveClipboardIn(path);
     const bool canUndoBulkRename =
         !actionArea->Pending() && queue.CanUndoBulkRename();
     if (auto *paste = menu->FindItem(kClipboardPaste))
@@ -461,7 +461,7 @@ public:
     const bool needsCurrentFolder = writesHere || m->what == kBulkRename ||
         m->what == kRename || m->what == kCompareFolders ||
         m->what == kCommand || m->what == Listi::kTerminalWindow;
-    if ((needsOtherFolder && panes[1-source]->IsSearchList()) ||
+    if ((needsOtherFolder && panes[prefs.SinglePane() ? source : 1 - source]->IsSearchList()) ||
         (needsCurrentFolder && panes[source]->IsSearchList())) {
       queue.ErrorInfo("Choose a real folder for this action, not a search list.");
       return;

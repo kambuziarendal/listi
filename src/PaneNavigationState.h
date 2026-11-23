@@ -16,7 +16,7 @@ struct PaneNavigationState {
   std::map<std::string, std::pair<int64_t, int64_t>> selection;
   std::pair<int64_t, int64_t> focusIdentity{-1, -1};
   PaneSort sorting;
-  int32 view = -1;
+  int32 view = -1, folderView = -1;
   BPoint scroll{0, 0};
 };
 constexpr uint32 kOpenSearchList = 'osli';

@@ -594,7 +594,7 @@ void Pane::StartNavigation(const std::string &request, int target, bool trash, b
   generation->store(serial);
   directoryWatch->Begin(serial, sameDirectory, BMessenger(this));
   ClearRows();
-  if (IsSearchList() || wasQuery)
+  if (IsSearchList() || wasQuery || restore)
     list->SetAttributes(IsSearchList() ? std::vector<std::string>{"Original folder"} : attributeColumns);
   SetDisplayMode(LocationMode());
   navigationFailed = false;

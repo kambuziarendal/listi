@@ -25,14 +25,14 @@ std::string Pane::LocationLabel() const {
 BPoint Pane::ScrollPosition() {
   if (mode == 0)
     return list->ScrollPosition();
-  return mode == MillerMode ? columns->Bounds().LeftTop() : grid->Bounds().LeftTop();
+  return mode == MillerMode ? columns->ScrollPosition() : grid->Bounds().LeftTop();
 }
 
 void Pane::RestoreScroll(BPoint position) {
   if (mode == 0)
     list->RestoreScroll(position);
   else if (mode == MillerMode)
-    columns->ScrollTo(position);
+    columns->RestoreScroll(position);
   else
     grid->ScrollTo(position);
 }
@@ -47,6 +47,7 @@ Listi::PaneNavigationState Pane::CaptureNavigation() {
   state.queries = queries;
   state.filter = filter->Text();
   state.view = mode;
+  state.folderView = restoredView >= 0 ? restoredView : prefs.PaneMode(id);
   state.sorting = Sorting();
   state.scroll = ScrollPosition();
   state.selection = savedSelection;
@@ -65,7 +66,7 @@ void Pane::RestoreNavigation(const Listi::PaneNavigationState &state) {
     return;
   history = state.history;
   queries = state.queries;
-  restoredView = state.view;
+  restoredView = state.folderView >= 0 ? state.folderView : state.view;
   restoring = state;
   const int index = history.Position();
   StartNavigation(state.location, index >= 0 && history.At(index) == state.location ? index : -1,

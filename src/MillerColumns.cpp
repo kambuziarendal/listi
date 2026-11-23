@@ -627,6 +627,16 @@ float MillerColumns::ContentWidth(float viewport) const {
   return ColumnWidth(viewport) * state->columns.size();
 }
 
+BPoint MillerColumns::ScrollPosition() const {
+  return {Bounds().left, state->current < state->columns.size()
+                            ? state->columns[state->current].rows->Bounds().top : 0};
+}
+void MillerColumns::RestoreScroll(BPoint position) {
+  if (auto *bar = ScrollBar(B_HORIZONTAL)) bar->SetValue(position.x);
+  if (state->current < state->columns.size())
+    if (auto *bar = state->columns[state->current].rows->ScrollBar(B_VERTICAL))
+      bar->SetValue(position.y);
+}
 void MillerColumns::LayoutColumns() {
   if (Parent())
     Parent()->InvalidateLayout();

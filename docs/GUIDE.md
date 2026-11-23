@@ -569,3 +569,18 @@ index types string, signed 32/64-bit integer, float and double. It checks an
 existing index instead of replacing it, and checks whether a native query
 returns the selected entry. Creating an index does not rewrite or backfill old
 attributes. Use Find files' volume query mode to search an indexed attribute.
+
+### Use a local search as a file list
+
+In **View > Find files…**, choose the search folder and criteria, or load a
+saved search, then choose **Open as file list**. The query replaces the file
+list in the originating pane; **Back** returns to the previous location.
+Each row refers to its original file and shows its original folder in Details.
+Use normal multiple selection, Copy, preview or Add to Shelf. For a live BFS
+predicate, additions and removals update the list without transferring a
+selection to a replacement file. An unavailable scope is shown as an error;
+Reload retries the same criteria.
+
+A search is not a physical folder. To paste or drop files, navigate to an
+actual destination folder. Opening a saved search reruns the criteria; no
+files are copied into the saved search.
