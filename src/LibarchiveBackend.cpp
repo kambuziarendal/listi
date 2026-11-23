@@ -2,6 +2,7 @@
 #include "DynamicLibrary.h"
 #include "ArchiveBackend.h"
 #include "ArchiveTextLocale.h"
+#include "ArchiveMetadata.h"
 #include "ArchivePasswords.h"
 #include <memory>
 #include <algorithm>
@@ -13,8 +14,6 @@
 #include <cstring>
 #include <exception>
 #include <fcntl.h>
-#include <map>
-#include <set>
 #include <unistd.h>
 #include <sys/stat.h>
 
@@ -274,49 +273,75 @@ std::string LibarchiveOpen(const std::string &path, const TransferControl &c) {
 }
 std::vector<FileEntry> LibarchiveList(const Location &location,
                                       const TransferControl &c) {
+  ArchiveMetadataBudget budget;
+  return LibarchiveList(location, c, budget);
+}
+namespace {
+// Each component is owned once under its immediate parent. An implicit
+// folder can later be an explicit directory, but never an explicit file.
+struct MemberPath {
+  std::map<std::string, MemberPath, std::less<>> children;
+  bool explicitEntry = false;
+  bool file = false;
+
+  void Insert(std::string_view path, bool directory,
+              ArchiveMetadataBudget &budget) {
+    MemberPath *node = this;
+    for (size_t depth = 0;; ++depth) {
+      const auto slash = path.find('/');
+      const auto component = path.substr(0, slash);
+      auto child = node->children.find(component);
+      if (child == node->children.end()) {
+        budget.Charge(sizeof(decltype(children)::value_type) +
+                      ArchiveMetadataBudget::NodeOverhead +
+                      2 * (component.size() + 1));
+        child = node->children.try_emplace(std::string(component)).first;
+      }
+      node = &child->second;
+      if (slash == std::string_view::npos)
+        break;
+      if (depth >= 64)
+        throw std::runtime_error("Archive exceeds the safe folder depth");
+      if (node->file)
+        throw std::runtime_error("Archive has conflicting file and folder paths");
+      path.remove_prefix(slash + 1);
+    }
+    if (node->explicitEntry)
+      throw std::runtime_error(
+          "Archive contains duplicate entry paths; nothing was extracted");
+    if (!directory && !node->children.empty())
+      throw std::runtime_error("Archive has conflicting file and folder paths");
+    node->explicitEntry = true;
+    node->file = !directory;
+  }
+};
+} // namespace
+
+std::vector<FileEntry> LibarchiveList(const Location &location,
+                                     const TransferControl &c,
+                                     ArchiveMetadataBudget &budget) {
   ArchiveTextLocale locale;
   Reader reader(location.archive, c);
-  std::map<std::string, FileEntry> children;
-  std::string prefix =
+  ArchiveListingChildren children(location, budget);
+  const std::string prefix =
       location.path == "/" ? "" : location.path.substr(1) + "/";
   size_t count = 0;
-  std::set<std::string> explicitPaths, files, parents;
+  MemberPath paths;
   while (auto entry = reader.Next()) {
     if (++count > 200000)
       throw std::runtime_error("Archive has too many entries for this view");
-    auto name = EntryName(reader, entry, location);
+    const auto name = EntryName(reader, entry, location);
     if (name.empty())
       continue;
     const auto type = LIBCALL(reader.lib, archive_entry_filetype)(entry);
-    if (!explicitPaths.insert(name).second)
-      throw std::runtime_error(
-          "Archive contains duplicate entry paths; nothing was extracted");
-    if (type != AE_IFDIR) {
-      if (parents.count(name))
-        throw std::runtime_error(
-            "Archive has conflicting file and folder paths");
-      files.insert(name);
-    }
-    size_t separator = 0, depth = 0;
-    while ((separator = name.find('/', separator)) != std::string::npos) {
-      if (++depth > 64)
-        throw std::runtime_error("Archive exceeds the safe folder depth");
-      auto parent = name.substr(0, separator++);
-      if (files.count(parent))
-        throw std::runtime_error(
-            "Archive has conflicting file and folder paths");
-      parents.insert(parent);
-    }
+    paths.Insert(name, type == AE_IFDIR, budget);
     if (name.compare(0, prefix.size(), prefix) != 0)
       continue;
-    auto rest = name.substr(prefix.size());
+    const auto rest = std::string_view(name).substr(prefix.size());
     if (rest.empty())
       continue;
-    auto slash = rest.find('/');
-    std::string leaf = rest.substr(0, slash);
-    auto &item = children[leaf];
-    item.name = leaf;
-    item.path = ChildLocation(location.URL(), leaf);
+    const auto slash = rest.find('/');
+    auto &item = children.Get(rest.substr(0, slash));
     bool implied = slash != std::string::npos;
     if (implied) {
       if (!item.directory)
@@ -339,10 +364,7 @@ std::vector<FileEntry> LibarchiveList(const Location &location,
       item.modifiedKnown = LIBCALL(reader.lib, archive_entry_mtime_is_set)(entry);
     }
   }
-  std::vector<FileEntry> out;
-  for (auto &pair : children)
-    out.push_back(pair.second);
-  return out;
+  return children.Finish();
 }
 namespace {
 // One open sequential reader per worker/job. Reuse avoids rescanning every

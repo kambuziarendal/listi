@@ -4,7 +4,9 @@
 #include "ArchiveVolumes.h"
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <regex>
+#include <string_view>
 #include <map>
 #include <memory>
 
@@ -12,9 +14,10 @@ namespace Listi {
 std::string SafeArchivePath(const char *raw) {
   if (!raw)
     throw std::runtime_error("Archive entry has no name");
-  std::string name = raw;
-  if (name.size() > 32768)
+  const size_t length = strnlen(raw, 32769);
+  if (length > 32768)
     throw std::runtime_error("Archive path is too long");
+  const std::string_view name(raw, length);
   if (!name.empty() && (name[0] == '/' || name[0] == '\\'))
     throw std::runtime_error("Archive contains an unsafe absolute path");
   if (name.find('\\') != std::string::npos ||

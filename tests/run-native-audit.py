@@ -18,7 +18,7 @@ file-operation-faults directory-finalization copy-crash-recovery worker-lifecycl
 operation-queue removable-copy archive-move-scaling directory-delivery search-filters
 archive-local-move-faults archive-local-move same-file-type folder-compare
 archive-editor-faults archive-editor archive-move-faults archive-move
-archive-folder-operations transfer-races archive-ambiguity archive-volumes
+archive-folder-operations transfer-races archive-ambiguity archive-metadata archive-volumes
 sevenzip-backend archive-passwords archive-jobs ar-writer arj-writer rar-store
 cab-writer lha-writer preferences-state message-store-faults recovery-inventory main-window-routing application-services settings-window
 workspace-layout workspace-editor miller-columns navigation-history selection-model type-to-select
