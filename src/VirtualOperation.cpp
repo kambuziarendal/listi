@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "FileOperation.h"
+#include "JobReportStore.h"
 #include "DirectoryFinalization.h"
 #include "RemovableCopy.h"
 #include "StagingSpace.h"
@@ -166,6 +167,12 @@ struct Runner {
     Guard();
   }
   Result result;
+  void AddError(const std::string &error) {
+    if (hooks.report)
+      hooks.report->AddError(error);
+    else
+      result.errors.push_back(error);
+  }
   bool replaceAll = false, skipAll = false;
   size_t visited = 0;
   TransferControl Control(const std::string &p, bool bytes = true) {
@@ -323,6 +330,7 @@ struct Runner {
         throw std::runtime_error(
             "Destination changed during transfer; it was left untouched");
       Hooks local = hooks;
+      local.report.reset(); // This internal result drives publication error handling.
       local.proceed = control.proceed;
       local.fileDone = {};
       local.fileFailed = {};
@@ -362,8 +370,26 @@ struct Runner {
     TempFile temp(LocationLeaf(dst), src, dst);
     Sha256 expected;
     const auto stagedBytes = Stage(src, source, temp, Control(src, false), &expected);
-    result.outcomes.push_back({src, dst, "unprocessed", "", UploadVerification{}});
-    auto &entry = result.outcomes.back();
+    EntryOutcome entry{src, dst, "unprocessed", "", UploadVerification{}};
+    auto record = [&] {
+      if (hooks.report)
+        hooks.report->WriteOutcome(entry, false);
+      else
+        result.outcomes.push_back(std::move(entry));
+    };
+    try {
+      PublishUpload(src, dst, target, exists, temp, expected, stagedBytes,
+                    control, entry);
+    } catch (...) {
+      record();
+      throw;
+    }
+    record();
+  }
+  void PublishUpload(const std::string &src, const std::string &dst,
+                     const FileEntry &target, bool exists, const TempFile &temp,
+                     Sha256 &expected, uint64_t stagedBytes,
+                     const TransferControl &control, EntryOutcome &entry) {
     auto &receipt = *entry.upload;
     RecoveryRecord recovery("upload", ParentLocation(dst), ".listi-", src, dst);
     const auto &staged = recovery.Stage();
@@ -603,14 +629,14 @@ Result RunVirtual(const Job &job, const Hooks &hooks) {
           ++runner.result.completed;
       } catch (const RemovableCopyInterrupted &e) {
         runner.result.interruptedCopyFolder = e.folder.empty() ? job.destination : e.folder;
-        runner.result.errors.push_back(source + ": " + e.what());
+        runner.AddError(source + ": " + e.what());
         if (hooks.fileFailed)
           hooks.fileFailed(source, e.what());
         break;
       } catch (const Cancelled &) {
         throw;
       } catch (const std::exception &e) {
-        runner.result.errors.push_back(source + ": " + e.what());
+        runner.AddError(source + ": " + e.what());
         if (hooks.fileFailed)
           hooks.fileFailed(source, e.what());
         if (runner.result.cancelled)
@@ -620,7 +646,7 @@ Result RunVirtual(const Job &job, const Hooks &hooks) {
   } catch (const Cancelled &) {
     runner.result.cancelled = true;
   } catch (const std::exception &e) {
-    runner.result.errors.push_back(e.what());
+    runner.AddError(e.what());
   }
   return runner.result;
 }

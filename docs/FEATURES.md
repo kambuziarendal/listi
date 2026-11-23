@@ -99,8 +99,9 @@ waiting job or cancel the queue. None of those actions undoes committed work.
 A local result marked **Copied; source retained** is not a completed move.
 For a partially completed folder, check its individual entries in the report.
 Remote and archive jobs may report only a job-level error or recovery path.
-Job reports last for the current session. After an interruption, compare source
-and destination before retrying; a hidden staging file is not a backup.
+The newest 24 finished job reports are available for the current session. After
+an interruption, compare source and destination before retrying; a hidden
+staging file is not a backup.
 See [Panels and jobs][jobs] for result labels and recovery details.
 
 ## Find, collect and rename

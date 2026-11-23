@@ -222,8 +222,10 @@ editable text field still inserts text into that field.
 Open **Operations > Details** and choose a job by
 number to review its result, even after another job has started. **Recent
 activity** is the combined log; a specific job shows its source and destination
-paths where available. Large reports have multiple pages. Job results are for
-this session, not saved to disk. **Clear finished** frees completed reports without cancelling any jobs.
+paths where available. Large reports have multiple pages, with errors first.
+Listi keeps temporary reports for the newest 24 finished jobs in this window.
+They are not saved across sessions. **Clear finished** releases the reports
+without cancelling jobs or removing recovery records.
 **Listi → Review interrupted operations…** shows recorded paths without touching
 the affected volumes. Choose **Check local paths** for an optional identity
 check. You can close the review while a check is pending. It never resumes

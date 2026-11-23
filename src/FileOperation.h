@@ -2,6 +2,7 @@
 #pragma once
 #include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <utility>
 #include <stdint.h>
@@ -74,6 +75,7 @@ struct Job {
   // move must not follow a destination merge into another mounted volume.
   bool copyForArchiveMove = false;
 };
+class JobReportStore;
 struct Hooks {
   std::function<bool()> proceed;
   std::function<void(const std::string &, uint64_t)> progress;
@@ -84,6 +86,8 @@ struct Hooks {
   // solely for a progress estimate.
   std::function<void(const std::string &, uint64_t)> fileSize;
   bool privateStaging = false;
+  // Optional disk-backed detail stream owned by the operation queue.
+  std::shared_ptr<JobReportStore> report;
 };
 enum class Publication { NotAttempted, Unknown, Published };
 struct UploadVerification {

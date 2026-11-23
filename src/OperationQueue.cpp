@@ -97,6 +97,9 @@ class ProgressView : public BView {
   void KeepError(const char *error) {
     if (!*error || (!unreadErrors.empty() && unreadErrors.back() == error))
       return;
+    // Full job errors remain available in their report.
+    if (unreadErrors.size() == 24)
+      unreadErrors.pop_back();
     unreadErrors.emplace_back(error);
     ShowNextError();
   }
@@ -564,20 +567,29 @@ void OperationQueue::PublishCancelled(const QueuedJob &queued) {
   BString summary;
   summary << Verb(queued.job.action) << ": Cancelled before starting.";
   done.AddString("result", summary);
-  Listi::Result result;
-  result.cancelled = true;
+  auto details = std::make_shared<Listi::JobReportStore>();
   for (const auto &path : queued.job.sources)
-    result.outcomes.push_back({path, "", "unprocessed", ""});
+    details->WriteOutcome({path, "", "unprocessed", ""}, false);
   if (queued.job.sources.empty() && !queued.job.destination.empty())
-    result.outcomes.push_back({"", queued.job.destination, "unprocessed", ""});
-  Finish(done, std::move(result));
+    details->WriteOutcome({"", queued.job.destination, "unprocessed", ""}, false);
+  Finish(done, std::move(details));
 }
-void OperationQueue::Finish(BMessage &done, Listi::Result result) {
+void OperationQueue::Finish(
+    BMessage &done, std::shared_ptr<Listi::JobReportStore> details) {
+  details->Seal();
+  std::string reportSummary = done.GetString("result", "");
+  const char *source, *destination;
+  if (done.FindString("retainedSource", &source) == B_OK &&
+      done.FindString("retainedDestination", &destination) == B_OK)
+    reportSummary += std::string("\nComplete copy retained at: ") + destination +
+                     "\nSource left intact: " + source;
   auto report = std::make_shared<JobReport>(
-      JobReport{done.GetString("result", ""), std::move(result)});
+      JobReport{std::move(reportSummary), std::move(details)});
   {
     std::lock_guard<std::mutex> lock(mutex);
     reports.emplace(done.GetInt64("operation", 0), std::move(report));
+    while (reports.size() > kFinishedReportLimit)
+      reports.erase(reports.begin());
   }
   Publish(done);
 }
@@ -688,18 +700,27 @@ void OperationQueue::Loop() {
     size.AddInt64("operation", operation);
     size.AddInt64("total", total);
     Publish(size);
-    std::map<std::string, uint64_t> fileBytes, fileSizes;
+    std::string activePath;
+    uint64_t fileBytes = 0, fileSize = 0;
     uint64_t bytes = 0;
     bigtime_t last = 0;
     Listi::Hooks hooks;
+    hooks.report = std::make_shared<Listi::JobReportStore>();
     hooks.proceed = [this] { return Proceed(); };
     hooks.conflict = [this](auto &p) { return Ask(p); };
     hooks.fileSize = [&](const std::string &path, uint64_t size) {
-      fileSizes[path] = size;
+      activePath = path;
+      fileSize = size;
+      fileBytes = 0;
     };
     hooks.progress = [&](auto &p, uint64_t n) {
       bytes += n;
-      fileBytes[p] += n;
+      if (p != activePath) {
+        activePath = p;
+        fileBytes = 0;
+        fileSize = 0;
+      }
+      fileBytes += n;
       if (system_time() - last < 80000)
         return;
       last = system_time();
@@ -712,8 +733,8 @@ void OperationQueue::Loop() {
       file.AddString("path", p.c_str());
       file.AddInt32("state", 1);
       file.AddFloat("fraction",
-                    fileSizes[p]
-                        ? std::min(0.99f, float(fileBytes[p]) / fileSizes[p])
+                    fileSize
+                        ? std::min(0.99f, float(fileBytes) / fileSize)
                         : 0.f);
       main.SendMessage(&file, (BHandler *)nullptr, 500000);
     };
@@ -745,6 +766,13 @@ void OperationQueue::Loop() {
       main.SendMessage(&file, (BHandler *)nullptr, 500000);
     };
     auto result = Listi::Run(job, hooks);
+    auto &details = *hooks.report;
+    for (const auto &error : result.errors)
+      details.AddError(error);
+    for (const auto &row : result.outcomes)
+      details.WriteOutcome(row, false);
+    result.errors.clear();
+    result.outcomes.clear();
     const bool renameBatch = job.action == Listi::Action::BulkRename;
     const bool undoBatch = job.action == Listi::Action::UndoBulkRename;
     const bool undoAvailable = result.bulkRenameUndo.has_value();
@@ -772,7 +800,7 @@ void OperationQueue::Loop() {
         done.AddString("moved", root.first.c_str());
     BString summary;
     summary << Verb(job.action) << ": " << result.completed << " completed, "
-            << result.skipped << " skipped, " << int32(result.errors.size())
+            << result.skipped << " skipped, " << int32(details.ErrorCount())
             << " errors";
     if (result.bulkRenameRecoveryNeeded)
       summary << ". Check entry locations in the operation report.";
@@ -783,6 +811,8 @@ void OperationQueue::Loop() {
       summary << ". Undo unavailable: contents could not be verified.";
     if (result.recoverableMoves)
       summary << ". Cross-volume originals kept in source Trash.";
+    if (details.Incomplete())
+      summary << ". Job report storage unavailable; some details may be missing.";
     done.AddString("result", summary);
     if (!result.interruptedCopyFolder.empty())
       done.AddString("interruptedCopyFolder", result.interruptedCopyFolder.c_str());
@@ -798,7 +828,8 @@ void OperationQueue::Loop() {
         done.AddString("transferResult", transferResult);
       }
     }
-    done.AddBool("complete", !result.cancelled && result.errors.empty() &&
+    done.AddBool("complete", !result.cancelled && !details.ErrorCount() &&
+                                 !details.Incomplete() &&
                                  result.skipped == 0);
     done.AddBool("cancelled", result.cancelled);
     if (result.retainedMoveCopy) {
@@ -806,9 +837,12 @@ void OperationQueue::Loop() {
       done.AddString("retainedSource", source.c_str());
       done.AddString("retainedDestination", destination.c_str());
     }
-    for (auto &e : result.errors)
-      done.AddString("error", e.c_str());
+    const auto sample = details.Page(0, 4);
+    for (const auto &error : sample.errors)
+      done.AddString("error", error.c_str());
+    if (details.ErrorCount() > sample.errors.size() || details.Incomplete())
+      done.AddString("error", "See the job report for available details.");
     done.AddBool("idle", count.load() == 0);
-    Finish(done, std::move(result));
+    Finish(done, std::move(hooks.report));
   }
 }

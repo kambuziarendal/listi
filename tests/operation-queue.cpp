@@ -196,9 +196,11 @@ int main(){
            passwordDiscarded(removed.archivePasswordToken),
        "Cancel selected retains the waiting job's identity and releases its password");
  auto pendingReport = window->queue->Report(pending);
- check(pendingReport && pendingReport->result.outcomes.size() == 51 &&
-           pendingReport->result.outcomes[50].source == removed.sources[50] &&
-           pendingReport->result.outcomes[50].status == "unprocessed",
+ const auto finalPage = pendingReport ? pendingReport->details->Page(50, 50)
+                                      : Listi::ReportPage{};
+ check(finalPage.total == 51 && finalPage.outcomes.size() == 1 &&
+           finalPage.outcomes.front().source == removed.sources[50] &&
+           finalPage.outcomes.front().status == "unprocessed",
        "a pending cancellation retains all untouched entries independently of the UI");
  window->Lock();
  check(nextPage->IsEnabled() && reportText().find("Showing 1 to 50 of 51") != std::string::npos &&
@@ -357,11 +359,70 @@ int main(){
            bytes(two) == std::string(32768, 'D'),
        "queued undo consumes the last batch exactly once and restores both names");
 
+ // Failures and successful rows must both remain accessible past page one.
+ const auto reportFolder = root + "/in/report-tree";
+ mkdir(reportFolder.c_str(), 0700);
+ for (int i = 0; i < 105; ++i)
+   std::ofstream(reportFolder + "/leaf" + std::to_string(i)) << i;
+ Job paged{Action::Copy, {reportFolder}, root + "/out"};
+ for (int i = 0; i < 55; ++i)
+   paged.sources.push_back(root + "/in/missing" + std::to_string(i));
+ const auto pagedId = window->queue->Enqueue(paged);
+ check(wait([&] { return finished(pagedId, 0, false, false, false); }),
+       "file tree and missing selections finish in one actual queued job");
+ if (const auto report = window->queue->Report(pagedId)) {
+   std::set<std::string> files, failuresSeen;
+   size_t errorsSeen = 0;
+   bool completePages = true;
+   for (size_t first = 0; first < 216; first += 50) {
+     const auto page = report->details->Page(first, 50);
+     completePages &= !page.incomplete && page.total == 216;
+     errorsSeen += page.errors.size();
+     for (const auto &row : page.outcomes) {
+       if (row.status == "copied" && row.source != reportFolder &&
+           bytes(row.destination) == Leaf(row.source).substr(4))
+         files.insert(row.source);
+       if (row.status == "failed" && !row.detail.empty())
+         failuresSeen.insert(row.source);
+     }
+   }
+   check(completePages && errorsSeen == 55 && files.size() == 105 &&
+             failuresSeen.size() == 55,
+         "disk pages preserve every copied result and missing-file error without duplicates");
+ } else {
+   check(false, "mixed job report is available");
+ }
+
+ Listi::JobReportStore receipts;
+ EntryOutcome upload{"source", "destination", "outcome unknown", "Transfer interrupted"};
+ upload.upload.emplace();
+ upload.upload->publication = Publication::Unknown;
+ upload.upload->recoveryPaths = {"staged path", "backup path"};
+ receipts.WriteOutcome(upload, false);
+ receipts.Seal();
+ const auto receiptPage = receipts.Page(0, 50);
+ check(receiptPage.outcomes.size() == 1 &&
+           receiptPage.outcomes[0].status == "outcome unknown" &&
+           receiptPage.outcomes[0].detail.find("Destination publication not confirmed") != std::string::npos &&
+           receiptPage.outcomes[0].detail.find("staged path") != std::string::npos &&
+           receiptPage.outcomes[0].detail.find("backup path") != std::string::npos,
+       "uncertain publication and both recovery names survive disk paging");
+
+ std::vector<int64> historyIds;
+ for (size_t i = 0; i < OperationQueue::kFinishedReportLimit + 1; ++i) {
+   Job folder{Action::MakeDirectory, {}, root + "/history-" + std::to_string(i)};
+   historyIds.push_back(window->queue->Enqueue(folder));
+ }
+ check(wait([&] { return finished(historyIds.back(), 0, true, false, false); }) &&
+           !window->queue->Report(pagedId) && !window->queue->Report(historyIds.front()) &&
+           window->queue->Report(historyIds[1]) && window->queue->Report(historyIds.back()),
+       "history expires the oldest completed reports at its explicit limit");
+
  window->queue->Enqueue(job(0,401));check(wait([&]{return window->conflicts.size()==5;}),"shutdown fixture is genuinely waiting at conflict");
  window->Lock();
  clearReports->Invoke();
  window->Unlock();
- check(wait([&] { return !window->queue->Report(fresh) && !window->queue->Report(pending); }) &&
+ check(wait([&] { return !window->queue->Report(historyIds.back()); }) &&
            window->queue->Busy(),
        "clearing finished reports leaves the current waiting conflict intact");
  auto start=system_time();window->Lock();window->Quit();check(system_time()-start<2000000,"queue destruction releases blocked conflict without UI-thread deadlock");

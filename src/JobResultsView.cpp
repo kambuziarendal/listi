@@ -15,7 +15,7 @@ namespace {
 constexpr uint32 kSelectReport = 'jslr', kPreviousPage = 'jprp',
                  kNextPage = 'jnxp', kCancelWaiting = 'jcnw',
                  kClearFinished = 'jclr';
-constexpr size_t kPageSize = 50;
+constexpr size_t kPageSize = Listi::JobReportStore::kPageSize;
 constexpr size_t kActivityBytes = 65536;
 
 std::string Label(const std::string &status) {
@@ -54,7 +54,9 @@ JobResultsView::JobResultsView(OperationQueue *owner)
   clear = new BButton("clear-finished", "Clear finished",
                       new BMessage(kClearFinished));
   clear->SetToolTip(
-      "Forget finished job reports in this window. Files are not changed.");
+      ("Forget finished reports. This window keeps the newest " +
+       std::to_string(OperationQueue::kFinishedReportLimit) +
+       " finished jobs until it closes. Files and recovery records are not changed.").c_str());
   clear->SetEnabled(false);
   text = new ThemeTextView("history", B_DOCUMENT_BACKGROUND_COLOR,
                            B_DOCUMENT_TEXT_COLOR);
@@ -131,6 +133,20 @@ void JobResultsView::Finished(const BMessage &event) {
   const char *error;
   for (int i = 0; event.FindString("error", i, &error) == B_OK; ++i)
     log += std::string("\n") + error;
+  for (auto it = rows.begin(); it != rows.end();) {
+    if (!it->second.finished || queue->Report(it->first)) {
+      ++it;
+      continue;
+    }
+    if (it->first == selected) {
+      selected = 0;
+      first = 0;
+      jobs->ItemAt(0)->SetMarked(true);
+    }
+    jobs->RemoveItem(it->second.item);
+    delete it->second.item;
+    it = rows.erase(it);
+  }
   AppendActivity(log);
 }
 void JobResultsView::ShowFileError(const std::string &line) {
@@ -163,19 +179,17 @@ void JobResultsView::Display() {
   const auto &row = rows.at(selected);
   std::string page = row.item->Label();
   if (auto report = queue->Report(selected)) {
-    const auto &r = report->result;
     page += "\n" + report->summary + "\n";
-    const size_t entries = r.outcomes.size(), lines = entries + r.errors.size();
-    const size_t end = std::min(lines, first + kPageSize);
-    if (lines > kPageSize)
+    const auto details = report->details->Page(first, kPageSize);
+    const size_t end = std::min(details.total, first + kPageSize);
+    if (details.incomplete)
+      page += "Some report details could not be stored or read.\n";
+    if (details.total > kPageSize)
       page += "Showing " + std::to_string(first + 1) + " to " +
-              std::to_string(end) + " of " + std::to_string(lines) + "\n";
-    for (size_t i = first; i < end; ++i) {
-      if (i >= entries) {
-        page += "\nError: " + r.errors[i - entries] + "\n";
-        continue;
-      }
-      const auto &e = r.outcomes[i];
+              std::to_string(end) + " of " + std::to_string(details.total) + "\n";
+    for (const auto &error : details.errors)
+      page += "\nError: " + error + "\n";
+    for (const auto &e : details.outcomes) {
       page += "\n" + Label(e.status) + ": " + e.source;
       if (!e.destination.empty())
         page += "\n  Destination: " + e.destination;
@@ -184,7 +198,7 @@ void JobResultsView::Display() {
       page += "\n";
     }
     previous->SetEnabled(first > 0);
-    next->SetEnabled(end < lines);
+    next->SetEnabled(end < details.total);
   } else if (row.waiting) {
     auto cancel = new BMessage(kCancelWaiting);
     cancel->AddInt64("operation", selected);

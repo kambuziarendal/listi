@@ -116,7 +116,8 @@ def run():
         print("TEST", name, flush=True)
         inputs = objects
         if name == "virtual-operation-faults":
-            inputs = [SRC / "DirectoryFinalization.cpp", SRC / "RemovableCopy.cpp",
+            inputs = [SRC / "JobReportStore.cpp", SRC / "DirectoryFinalization.cpp",
+                      SRC / "RemovableCopy.cpp",
                       SRC / "VirtualOperation.cpp", SRC / "VirtualFile.cpp",
                       SRC / "VirtualLocation.cpp", SRC / "Sha256.cpp",
                       SRC / "RecoveryInventory.cpp", SRC / "MessageStore.cpp"]

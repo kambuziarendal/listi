@@ -19,6 +19,7 @@ requires {
  lib:libgcc_s
  lib:libcurl
  lib:libsmbclient
+ lib:libsqlite3
  cmd:pdftoppm
 }
 urls { "https://github.com/kambuziarendal/listi" }

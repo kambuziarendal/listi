@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "FileOperation.h"
+#include "JobReportStore.h"
 #include "BulkRename.h"
 #include "DirectoryFinalization.h"
 #include "ArchiveVolumes.h"
@@ -160,7 +161,29 @@ struct Runner {
     CheckDevice(volume, ParentLocation(guardedSource));
   }
   size_t mutations = 0;
+  std::optional<EntryOutcome> pendingOutcome;
+  void FlushOutcome() {
+    if (pendingOutcome) {
+      h.report->WriteOutcome(*pendingOutcome, true);
+      pendingOutcome.reset();
+    }
+  }
+  void AddError(const std::string &error) {
+    if (h.report)
+      h.report->AddError(error);
+    else
+      result.errors.push_back(error);
+  }
   EntryOutcome &Outcome(const std::string &src, const std::string &dst = {}) {
+    if (h.report) {
+      if (!pendingOutcome || pendingOutcome->source != src) {
+        FlushOutcome();
+        pendingOutcome = h.report->FindOutcome(src);
+      }
+      if (!dst.empty())
+        pendingOutcome->destination = dst;
+      return *pendingOutcome;
+    }
     auto index = outcomeIndex.emplace(src, result.outcomes.size());
     if (index.second)
       result.outcomes.push_back({src, dst, "unprocessed", {}});
@@ -396,9 +419,10 @@ struct Runner {
       auto &row = Outcome(source);
       row.status = "failed";
       row.detail = copy.destination + ": destination changed; source retained";
+      const std::string error = row.detail;
       if (source != guardedSource)
         Outcome(guardedSource).status = "partial";
-      throw std::runtime_error(row.detail);
+      throw std::runtime_error(error);
     }
   }
   void VerifyCopiedTree(const std::string &root, const Snapshot &before) {
@@ -829,15 +853,15 @@ struct Runner {
             FlushDestination(parentDirectory, parentIdentity.st_dev, true);
             recovery.Retire();
           } catch (const RemovableCopyInterrupted &error) {
-            result.errors.push_back(tmp + ": " + error.what() +
+            AddError(tmp + ": " + error.what() +
                                     " Staging recovery record retained.");
             throw;
           } catch (const std::exception &error) {
-            result.errors.push_back(tmp + ": " + error.what() +
+            AddError(tmp + ": " + error.what() +
                                     " Staging recovery record retained.");
           }
         } else {
-          result.errors.push_back(tmp + ": temporary name retained for manual inspection.");
+          AddError(tmp + ": temporary name retained for manual inspection.");
         }
       }
       throw;
@@ -946,7 +970,7 @@ struct Runner {
           row.status = "moved";
           if (!warning.empty()) {
             row.detail = warning;
-            result.errors.push_back(warning);
+            AddError(warning);
           }
           result.completed++;
           if (h.fileDone)
@@ -1051,7 +1075,7 @@ struct Runner {
         throw; // Later selected roots must not enter the disconnected mount.
       } catch (const std::runtime_error &e) {
         Problem(source, e.what());
-        result.errors.push_back(e.what());
+        AddError(e.what());
         if (h.fileFailed)
           h.fileFailed(source, e.what());
       }
@@ -1065,8 +1089,13 @@ Result Run(const Job &j, const Hooks &h) {
   if (j.action == Action::ConvertImage)
     return RunImageConversion(j, h);
   if (j.action == Action::CreateArchive || j.action == Action::ExtractArchive ||
-      j.action == Action::EditArchive || j.action == Action::MoveArchive)
-    return RunArchiveJob(j, h);
+      j.action == Action::EditArchive || j.action == Action::MoveArchive) {
+    // Archive routines make private intermediate calls to Run and use their
+    // synchronous Result to decide whether publication may proceed.
+    Hooks archive = h;
+    archive.report.reset();
+    return RunArchiveJob(j, archive);
+  }
   // Source-only actions must not depend on the location in the other pane.
   const bool usesDestination =
       j.action == Action::Copy || j.action == Action::Move ||
@@ -1112,10 +1141,13 @@ Result Run(const Job &j, const Hooks &h) {
   } catch (const Cancelled &) {
     r.result.cancelled = true;
   } catch (const std::exception &e) {
-    r.result.errors.push_back(e.what());
-    if (r.result.outcomes.size() == 1)
+    r.AddError(e.what());
+    if (h.report && r.pendingOutcome && h.report->OutcomeCount() == 0)
+      r.Problem(r.pendingOutcome->source, e.what());
+    else if (r.result.outcomes.size() == 1)
       r.Problem(r.result.outcomes.front().source, e.what());
   }
-  return r.result;
+  r.FlushOutcome();
+  return std::move(r.result);
 }
 } // namespace Listi
