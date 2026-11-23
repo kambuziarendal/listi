@@ -153,6 +153,7 @@ private:
   void StartDirectoryReader();
   void AfterInterruptedCopy(const char *folder);
   bool mediaReadSuspended = false;
+  std::shared_ptr<class DirectoryWatch> directoryWatch;
   std::shared_ptr<struct DirectoryScanDelivery> scanDelivery;
   std::unique_ptr<BMessageRunner> scanTimer;
   std::unique_ptr<BMessageRunner> directoryRefreshTimer;

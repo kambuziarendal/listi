@@ -27,7 +27,7 @@ std::atomic<int> rowAttempts{0}, doneAttempts{0};
 std::atomic<int64> lastDoneSerial{-1};
 std::shared_ptr<std::atomic<int64>> generation;
 bool cancelOnFailure=false;
-std::atomic<bool> holdNextRows{false};
+std::atomic<bool> holdNextRows{false}, holdNextDone{false};
 sem_id held, resume, released;
 std::string blockedPath;
 std::atomic<bool> blockOpen{false};
@@ -60,6 +60,10 @@ extern "C" status_t __wrap__ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl(c
   auto fail=[&](std::atomic<int>& n) { int old=n.load(); if(old>0) {n.fetch_sub(1);return true;} return false; };
   if(message->what==kRows) { ++rowAttempts; if(fail(rowFailures)) {if(cancelOnFailure)generation->fetch_add(1);return B_TIMED_OUT;} }
   if (message->what == kScanDone) {
+    if (holdNextDone.exchange(false)) {
+      release_sem(held);
+      acquire_sem_etc(resume, 1, B_RELATIVE_TIMEOUT, 5000000);
+    }
     ++doneAttempts;
     lastDoneSerial = message->GetInt64("serial", -1);
     if (fail(doneFailures))
@@ -209,6 +213,31 @@ int main() {
  held = create_sem(0, "held directory reader");
  resume = create_sem(0, "resume directory reader");
  released = create_sem(0, "released directory reader");
+ // Mutate the directory after enumeration and before the terminal message.
+ holdNextDone = true;
+ pane->Navigate(folder.c_str());
+ window->Unlock();
+ bool pausedDone = acquire_sem_etc(held, 1, B_RELATIVE_TIMEOUT, 5000000) == B_OK;
+ auto removed = folder + "/file-159", added = folder + "/new-entry";
+ bool mutated = pausedDone && unlink(removed.c_str()) == 0 &&
+                bool(std::ofstream(added) << "new");
+ release_sem(resume);
+ bool converged = false;
+ auto deadline = system_time() + 5000000;
+ while (mutated && !converged && system_time() < deadline) {
+   window->Lock();
+   if (!pane->IsScanning()) {
+     pane->Select(1);
+     auto rows = pane->Selected();
+     converged = rows.size() == 160 &&
+         std::find(rows.begin(), rows.end(), added) != rows.end() &&
+         std::find(rows.begin(), rows.end(), removed) == rows.end();
+   }
+   window->Unlock();
+   snooze(20000);
+ }
+ check(converged, "pre-completion creation and removal converge without manual reload");
+ window->Lock();
  holdNextRows = true;
  pane->Navigate(folder.c_str());
  window->Unlock();

@@ -201,6 +201,8 @@ Pane::Pane(int32 number, const Preferences &p,
 }
 Pane::~Pane() {
   generation->store(-1);
+  if (directoryWatch)
+    directoryWatch->Begin(-1, false, BMessenger(this));
   scanTimer.reset();
   stop_watching(this);
   Listi::RetireReadWorker(scanner);
@@ -222,7 +224,9 @@ void Pane::AttachedToWindow() {
 }
 void Pane::StartDirectoryReader() {
   scanDelivery = std::make_shared<DirectoryScanDelivery>();
-  scanner = CreateDirectoryScanner(BMessenger(this), generation, scanDelivery);
+  if (!directoryWatch)
+    directoryWatch = std::make_shared<DirectoryWatch>();
+  scanner = CreateDirectoryScanner(BMessenger(this), generation, scanDelivery, directoryWatch);
   Listi::StartReadWorker(scanner);
 }
 void Pane::AfterInterruptedCopy(const char *folder) {
@@ -243,7 +247,8 @@ void Pane::AfterInterruptedCopy(const char *folder) {
       Reload();
     return;
   }
-  stop_watching(this);
+  if (directoryWatch)
+    directoryWatch->Begin(-1, false, BMessenger(this));
   mediaReadSuspended = true;
   locationValid = false;
   ClearRows();
@@ -535,7 +540,7 @@ void Pane::UpdateNavigation() {
   forward->SetEnabled(history.Forward() >= 0);
 }
 void Pane::StartNavigation(const std::string &request, int target, bool trash) {
-  stop_watching(this);
+  const bool sameDirectory = !trash && path == request.c_str();
   directoryRefreshPending = false;
   mediaReadSuspended = false;
   reveal = {};
@@ -566,6 +571,7 @@ void Pane::StartNavigation(const std::string &request, int target, bool trash) {
   history.Begin(serial, request, target, trash);
   UpdateNavigation();
   generation->store(serial);
+  directoryWatch->Begin(serial, sameDirectory, BMessenger(this));
   ClearRows();
   navigationFailed = false;
   SetStatus("Reading directory...");
@@ -1181,11 +1187,8 @@ void Pane::MessageReceived(BMessage *m) {
       if (stale)
         SetStatus(
             "Search result changed during navigation. Search again; nothing selected.");
-      const void *p;
-      ssize_t n;
-      if (m->FindData("node", B_RAW_TYPE, &p, &n) == B_OK &&
-          n == sizeof(node_ref))
-        watch_node(static_cast<const node_ref *>(p), B_WATCH_ALL, this);
+      if (m->GetBool("watchFailed", false))
+        SetStatus("Live updates unavailable. Reload to refresh.");
       if (changedColumn)
         SetStatus("Column entry changed. Select it again.");
       else if (action.GetBool("context", false))

@@ -23,6 +23,8 @@ class Scanner : public Listi::ReadWorker {
   std::shared_ptr<std::atomic<int64>> generation;
   std::shared_ptr<DirectoryScanDelivery> delivery;
 
+  std::shared_ptr<DirectoryWatch> watch;
+
   bool Send(BMessage &message, int64 serial) {
     for (int attempt = 0; attempt < 3 && generation->load() == serial;
          ++attempt) {
@@ -43,8 +45,8 @@ class Scanner : public Listi::ReadWorker {
 
 public:
   Scanner(BMessenger t, std::shared_ptr<std::atomic<int64>> g,
-          std::shared_ptr<DirectoryScanDelivery> d)
-      : ReadWorker("directory reader"), target(t), generation(g), delivery(d) {}
+          std::shared_ptr<DirectoryScanDelivery> d, std::shared_ptr<DirectoryWatch> w)
+      : ReadWorker("directory reader"), target(t), generation(g), delivery(d), watch(w) {}
   void MessageReceived(BMessage *m) override {
     if (m->what != kScan) {
       BLooper::MessageReceived(m);
@@ -234,6 +236,18 @@ public:
         if (!dir)
           done.AddString("error", strerror(errno));
         else {
+          struct stat opened;
+          if (watch) {
+            node_ref ref;
+            status_t status = B_ERROR;
+            if (fstat(dirfd(dir), &opened) == 0) {
+              ref.device = opened.st_dev;
+              ref.node = opened.st_ino;
+              status = watch->Install(serial, ref, target);
+            }
+            if (status != B_OK)
+              done.AddBool("watchFailed", true);
+          }
           if (generation->load() == serial && path != "/") {
             std::string parent = path.String();
             parent = parent.substr(0, parent.find_last_of('/'));
@@ -257,10 +271,7 @@ public:
           closedir(dir);
           if (generation->load() != serial)
             return;
-          BNode node(path.String());
-          node_ref ref;
-          if (node.GetNodeRef(&ref) == B_OK)
-            done.AddData("node", B_RAW_TYPE, &ref, sizeof(ref));
+
         }
       }
     }
@@ -279,6 +290,7 @@ public:
 Listi::ReadWorker *
 CreateDirectoryScanner(BMessenger target,
                        std::shared_ptr<std::atomic<int64>> generation,
-                       std::shared_ptr<DirectoryScanDelivery> delivery) {
-  return new Scanner(target, generation, delivery);
+                       std::shared_ptr<DirectoryScanDelivery> delivery,
+                       std::shared_ptr<DirectoryWatch> watch) {
+  return new Scanner(target, generation, delivery, watch);
 }
