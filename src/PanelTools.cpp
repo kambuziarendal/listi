@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "PanelTools.h"
+#include "FolderTabs.h"
 #include "FlatView.h"
 #include "ViewVisibility.h"
 
@@ -32,6 +33,8 @@ PanelTools::PanelTools(int32 index, Pane &list)
   closeButton->SetToolTip("Close this tool and return to files");
   BLayoutBuilder::Group<>(tabs).AddGlue().Add(closeButton);
   GroupLayout()->AddView(tabs, 0.0f);
+  folderBar = new FolderTabs(index, files);
+  GroupLayout()->AddView(folderBar, 0.0f);
   AddChild(&files);
   tabs->Hide();
   UpdateTabs();
@@ -166,7 +169,13 @@ void PanelTools::ShowPage(PanelPage page) {
   UpdateTabs();
 }
 
+void PanelTools::ShowFolderTabs(bool always) {
+  alwaysFolderTabs = always;
+  folderBar->SetShown(current == PanelPage::Files, always);
+}
+
 void PanelTools::UpdateTabs() {
+  ShowFolderTabs(alwaysFolderTabs);
   const bool otherTools = Page(PanelPage::Search) || Page(PanelPage::Preview);
   SetViewVisible(tabs, toolsEnabled && otherTools);
   for (size_t i = 0; i < buttons.size(); ++i) {

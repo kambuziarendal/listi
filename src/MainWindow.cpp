@@ -2,6 +2,9 @@
 #include <stdexcept>
 #include "MainWindow.h"
 #include "WindowOverview.h"
+#include "FolderTabs.h"
+#include <atomic>
+#include <MenuItem.h>
 #include "LayoutIntroduction.h"
 #include "RecoveryReviewWindow.h"
 #include "FlatView.h"
@@ -47,15 +50,26 @@
 using Listi::PanelPage;
 
 void PostMainWindowNotice(const char *text) {
+  if (auto *window = dynamic_cast<BWindow *>(BLooper::LooperForThread(find_thread(nullptr)))) {
+    if (window->FindView("first panel tools")) {
+      BMessage local(kInlineNotice);
+      local.AddString("error", text);
+      window->PostMessage(&local);
+      return;
+    }
+  }
   BMessage error(kServiceError);
   error.AddString("error", text);
   be_app->PostMessage(&error);
 }
 
 namespace {
+std::atomic<int> browserCount{0};
 class MainWindow : public Listi::WorkingWindow {
   BMessenger overview, guide;
   std::string titleLocation;
+  std::array<std::string, 2> tabLocations;
+  bool detachedBrowser = false;
   Preferences prefs;
   BMessenger service;
   BMessenger searchWindow;
@@ -78,6 +92,10 @@ class MainWindow : public Listi::WorkingWindow {
       pane->SetPlaces(savedNavigation.Places(), savedNavigation.CanEditPlaces());
   }
   void Save() {
+    // A detached window has independent layout choices. Do not overwrite
+    // the primary window's global preferences with its temporary Einn layout.
+    if (detachedBrowser)
+      return;
     auto saved = prefs.Save();
     saved.what = kSavePreferences;
     service.SendMessage(&saved);
@@ -108,6 +126,12 @@ class MainWindow : public Listi::WorkingWindow {
     split->Focus();
   }
   void UpdateTransferTarget() {
+    for (int side = 0; side < 2; ++side) {
+      if (tabLocations[side] != panes[side]->Path()) {
+        tabLocations[side] = panes[side]->Path();
+        split->Panel(side).FolderBar().UpdateLabel();
+      }
+    }
     const int source = split->Source();
     const char *current = panes[source]->Path();
     if (titleLocation != current) {
@@ -130,6 +154,8 @@ class MainWindow : public Listi::WorkingWindow {
     toolbar.SetTransferTarget(source, available, folder ? target.Path() : nullptr);
   }
   void ApplyWorkspace() {
+    for (int side = 0; side < 2; ++side)
+      split->Panel(side).ShowFolderTabs(prefs.alwaysFolderTabs);
     toolbar.Arrange();
     split->ApplyWorkspace();
     queue.SetCompact(prefs.SinglePane());
@@ -159,6 +185,64 @@ class MainWindow : public Listi::WorkingWindow {
       return split->OpenPanelPreview(1 - split->Source());
     SetQuickView(true);
     return &split->Inspector();
+  }
+
+  bool HandleFolderTab(BMessage &message) {
+    using namespace Listi;
+    switch (message.what) {
+    case kTabNew: case kTabDuplicate: case kTabClose: case kTabReopen:
+    case kTabRename: case kTabNamed: case kTabLeft: case kTabRight:
+    case kTabNext: case kTabPrevious: case kTabChoose: case kTabDetach: case kTabAlways:
+      break;
+    default:
+      return false;
+    }
+    if (PromptBlocksCommand())
+      return true;
+    const int side = message.GetInt32("pane", split->Source());
+    if (!split->ActivateFiles(side))
+      return true;
+    auto &bar = split->Panel(side).FolderBar();
+    switch (message.what) {
+    case kTabAlways:
+      prefs.alwaysFolderTabs = !prefs.alwaysFolderTabs;
+      for (int index = 0; index < 2; ++index)
+        split->Panel(index).ShowFolderTabs(prefs.alwaysFolderTabs);
+      Save();
+      return true;
+    case kTabRename: {
+      BMessage accepted(kTabNamed);
+      accepted.AddInt32("pane", side);
+      accepted.AddInt64("tab", bar.ActiveId());
+      accepted.AddBool("placeLabel", true);
+      const auto tab = bar.Snapshot();
+      AskInline("Name this tab:", "Save name", accepted, tab.alias.c_str());
+      return true;
+    }
+    case kTabNamed:
+      if (message.GetInt64("tab", -1) == bar.ActiveId())
+        bar.Rename(message.GetString("name", ""));
+      return true;
+    case kTabDetach: {
+      auto tab = bar.Snapshot();
+      Preferences standalone = prefs;
+      standalone.workspace = Workspace::einn;
+      standalone.singlePane = 0;
+      auto *window = new MainWindow(standalone, service, savedNavigation.Places(), false,
+                                    SavedSearches::FromMessage(savedNavigation.SearchStore()),
+                                    false, true);
+      window->MoveTo(Frame().LeftTop() + BPoint(24, 24));
+      window->split->Panel(0).FolderBar().Adopt(std::move(tab));
+      window->Show();
+      bar.AfterDetach();
+      break;
+    }
+    default:
+      bar.Change(message.what, message.GetInt64("tab", -1));
+    }
+    split->RefreshPanels();
+    split->Focus();
+    return true;
   }
 
   bool HandleNavigation(BMessage *m) {
@@ -315,10 +399,10 @@ class MainWindow : public Listi::WorkingWindow {
 public:
   MainWindow(const Preferences &p, BMessenger svc,
              const Listi::SavedPlaces &saved, bool writable,
-             const Listi::SavedSearches &queries, bool queriesWritable)
+             const Listi::SavedSearches &queries, bool queriesWritable, bool detached = false)
       : Listi::WorkingWindow(BRect(70, 70, 1170, 710), "Listi", "File manager",
                 B_AUTO_UPDATE_SIZE_LIMITS),
-        prefs(p), service(svc),
+        detachedBrowser(detached), prefs(p), service(svc),
         savedNavigation(svc, saved, writable, queries, queriesWritable) {
     panes[0] = new Pane(0, prefs, shelf.Model());
     panes[1] = new Pane(1, prefs, shelf.Model());
@@ -346,6 +430,11 @@ public:
     PublishPlaces();
     split->Focus();
     ResizeTo(1140, 650);
+    ++browserCount;
+  }
+  ~MainWindow() override {
+    if (--browserCount == 0)
+      be_app->PostMessage(B_QUIT_REQUESTED);
   }
   void FrameResized(float width, float height) override {
     BWindow::FrameResized(width, height);
@@ -379,6 +468,17 @@ public:
     const char *path = pane.Path();
     const auto page = split->Panel(split->Source()).Current();
     const bool flat = page == PanelPage::Flat;
+    const auto &bar = split->Panel(split->Source()).FolderBar();
+    const bool filePage = page == PanelPage::Files;
+    for (uint32 cmd : {Listi::kTabNew, Listi::kTabDuplicate, Listi::kTabRename,
+                       Listi::kTabDetach, Listi::kTabAlways})
+      menu->FindItem(cmd)->SetEnabled(filePage);
+    for (uint32 cmd : {Listi::kTabPrevious, Listi::kTabNext, Listi::kTabClose})
+      menu->FindItem(cmd)->SetEnabled(filePage && bar.Count() > 1);
+    menu->FindItem(Listi::kTabLeft)->SetEnabled(filePage && bar.Index() > 0);
+    menu->FindItem(Listi::kTabRight)->SetEnabled(filePage && bar.Index() + 1 < bar.Count());
+    menu->FindItem(Listi::kTabReopen)->SetEnabled(filePage && bar.CanReopen());
+    menu->FindItem(Listi::kTabAlways)->SetMarked(prefs.alwaysFolderTabs);
     menu->SetFolderTree(page == PanelPage::Files && pane.CanToggleTree(),
                         SidebarHasTree(pane.Sidebar()));
     const bool canSaveClipboard =
@@ -408,11 +508,10 @@ public:
     }
     if (clipboard.ArchivePromptPending())
       CloseAction();
-    be_app->PostMessage(B_QUIT_REQUESTED);
     return true;
   }
   void MessageReceived(BMessage *m) override {
-    if (HandleWindowAction(m))
+    if (HandleFolderTab(*m) || HandleWindowAction(m))
       return;
     if (m->what == Listi::kOpenWindowOverview) {
       overview = Listi::OpenWindowOverview(*this, overview);

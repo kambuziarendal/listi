@@ -13,6 +13,7 @@ class Pane;
 
 namespace Listi {
 class Shelf;
+class FolderTabs;
 enum class PanelPage : int32 { Files, Search, Preview, Flat };
 inline constexpr uint32 kPanelPage = 'ptpg', kClosePanelPage = 'ptcl';
 
@@ -22,6 +23,8 @@ class PanelTools : public BGroupView {
 public:
   PanelTools(int32 pane, Pane &files);
 
+  FolderTabs &FolderBar() const { return *folderBar; }
+  void ShowFolderTabs(bool always);
   Pane &Files() const { return files; }
   PanelPage Current() const { return current; }
   BView *Page(PanelPage page) const { return pages[size_t(page)]; }
@@ -49,6 +52,8 @@ private:
   PanelPage current = PanelPage::Files;
   bool toolsEnabled = false;
   BGroupView *tabs;
+  FolderTabs *folderBar;
+  bool alwaysFolderTabs = false;
   BButton *closeButton;
   std::array<BView *, 4> pages{};
   std::array<BButton *, 3> buttons{};

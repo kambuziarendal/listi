@@ -110,7 +110,7 @@ enum : uint32 {
 };
 struct Preferences : WorkspaceLayout {
   BFont font = *be_plain_font;
-  bool icons = true, size = true, date = true;
+  bool icons = true, size = true, date = true, alwaysFolderTabs = false;
   // Quick overrides are independent of saved layout profiles.
   int32 tviskiptButtons = -1, smidjaButtons = -1;
   bool ActionButtonsVisible() const {

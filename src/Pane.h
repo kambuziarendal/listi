@@ -72,6 +72,10 @@ public:
   std::map<std::string, Listi::NodeIdentity> SelectedLocalIdentities(size_t limit = SIZE_MAX) const {
     return entries.SelectedLocalIdentities(limit);
   }
+  std::string SelectedFolder() const {
+    const auto *entry = entries.OnlySelected();
+    return entry && entry->directory ? entry->path : "";
+  }
   std::string SelectedPath() const {
     const auto *entry = entries.OnlySelected();
     return entry ? entry->path : "";

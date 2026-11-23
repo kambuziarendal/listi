@@ -47,6 +47,7 @@ void Preferences::Load(const BMessage &m) {
     if (*path && mode >= 0 && mode < ViewModeCount)
       folderModes[path] = mode;
   }
+  alwaysFolderTabs = m.GetBool("alwaysFolderTabs", false);
   icons = m.GetBool("icons", true);
   size = m.GetBool("size", true);
   date = m.GetBool("date", true);
@@ -71,6 +72,7 @@ void Preferences::ApplyDialog(const BMessage &message) {
   auto layout = CaptureLayout();
   BMessage changes;
   const bool hasChanges = message.FindMessage("layoutChanges", &changes) == B_OK;
+  updated.alwaysFolderTabs = alwaysFolderTabs;
   updated.tviskiptButtons = tviskiptButtons;
   updated.smidjaButtons = smidjaButtons;
   for (auto w : {Workspace::tviskipt, Workspace::einn, Workspace::askr,
@@ -102,6 +104,7 @@ BMessage Preferences::Save() const {
     folder.AddInt32("mode", entry.second);
     m.AddMessage("folderView", &folder);
   }
+  m.AddBool("alwaysFolderTabs", alwaysFolderTabs);
   m.AddBool("icons", icons);
   m.AddBool("size", size);
   m.AddBool("date", date);

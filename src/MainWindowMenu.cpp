@@ -2,6 +2,7 @@
 #include "MainWindowMenu.h"
 #include "Common.h"
 #include "FlatView.h"
+#include "FolderTabs.h"
 #include "MainWindow.h"
 #include "PaneSidebar.h"
 #include "ShelfWindow.h"
@@ -29,6 +30,20 @@ MainWindowMenu::MainWindowMenu() : BMenuBar("menu") {
   AddCommand(windows, "Use folder name", Listi::kUseFolderName);
   windows->AddSeparatorItem();
   AddCommand(windows, "Open windows…", Listi::kOpenWindowOverview);
+  auto *tabs = new BMenu("Folder tabs");
+  AddCommand(tabs, "New tab here or in selected folder", Listi::kTabNew);
+  AddCommand(tabs, "Duplicate tab", Listi::kTabDuplicate);
+  AddCommand(tabs, "Previous tab", Listi::kTabPrevious);
+  AddCommand(tabs, "Next tab", Listi::kTabNext);
+  AddCommand(tabs, "Name tab…", Listi::kTabRename);
+  AddCommand(tabs, "Move tab left", Listi::kTabLeft);
+  AddCommand(tabs, "Move tab right", Listi::kTabRight);
+  AddCommand(tabs, "Detach to Einn window", Listi::kTabDetach);
+  AddCommand(tabs, "Close tab", Listi::kTabClose);
+  AddCommand(tabs, "Reopen closed tab", Listi::kTabReopen);
+  tabs->AddSeparatorItem();
+  AddCommand(tabs, "Always show folder tabs", Listi::kTabAlways);
+  windows->AddItem(tabs);
   AddItem(windows);
   auto *help = new BMenu("Help");
   AddCommand(help, "Layout introduction…", Listi::kShowLayoutGuide);
