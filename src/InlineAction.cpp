@@ -105,7 +105,7 @@ bool InlineAction::Ask(const char *text, const char *button,
     options->ItemAt(0)->SetMarked(true);
     AddChild(new BMenuField("output format", "Format:", options));
   }
-  auto cancel = new BButton("Cancel", new BMessage(Event(kCancel)));
+  auto cancel = new BButton("Cancel", "Cancel", new BMessage(Event(kCancel)));
   auto accept = new BButton(button, new BMessage(Event(kAccept)));
   auto buttons = new BGroupView(B_HORIZONTAL, 8);
   BLayoutBuilder::Group<>(buttons, B_HORIZONTAL, 8)

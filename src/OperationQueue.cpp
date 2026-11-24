@@ -121,7 +121,7 @@ class ProgressView : public BView {
   void AddChoice(BButton *&button, const char *label, Listi::Decision decision) {
     auto message = new BMessage(kAnswer);
     message->AddInt32("decision", int(decision));
-    button = new BButton(label, message);
+    button = new BButton(label, label, message);
     choices->AddChild(button);
   }
   BStringView *comparison[3];
@@ -181,7 +181,7 @@ public:
     AddChoice(skipChoice, "Skip", Listi::Decision::Skip);
     AddChoice(replaceChoice, "Replace", Listi::Decision::Replace);
     AddChoice(abortChoice, "Abort", Listi::Decision::Abort);
-    repeat = new BCheckBox("Repeat Replace or Skip for remaining conflicts", nullptr);
+    repeat = new BCheckBox("repeat-conflict", "Repeat Replace or Skip for remaining conflicts", nullptr);
     choices->AddChild(repeat);
     choices->Hide();
     cancelButton->SetToolTip("Stops this job. Completed work is kept.");

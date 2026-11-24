@@ -153,7 +153,7 @@ int main(){
    clean(root);
    return 2;
  }
- auto *repeat = dynamic_cast<BCheckBox *>(window->FindView("Repeat Replace or Skip for remaining conflicts"));
+ auto *repeat = dynamic_cast<BCheckBox *>(window->FindView("repeat-conflict"));
  check(repeat && repeat->Value() == B_CONTROL_OFF &&
            window->FindView("Replace") && window->FindView("Skip") && window->FindView("Keep both") &&
            !window->FindView("Replace all") && !window->FindView("Skip all"),

@@ -138,8 +138,8 @@ in this alpha.
   report and recovery inventory before using a partial copy.
 - A regular copy to FAT can ask **Copy without attributes**: the file bytes can
   be copied, but the FAT volume cannot store the Haiku attributes on the source.
-  Consent applies only to this copy job on that volume. Cancel to keep those
-  attributes with the original instead. This exception never applies to Move.
+  Consent applies only to this copy job on that volume; the original retains
+  its attributes either way. This exception never applies to Move.
 - After an ordinary successful copy the status line shows what went where.
   **Details** retains the results. A **Failed** row marks an operation on that
   entry, not damage to the original file.
