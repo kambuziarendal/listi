@@ -16,6 +16,7 @@
 #include <VolumeRoster.h>
 #include <cstring>
 #include <dirent.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 namespace {
 void ReadLocalIcon(const entry_ref &ref, int32 pixels, BMessage &row) {
@@ -137,11 +138,14 @@ public:
       count = 0;
       batchLimit = 80;
     };
-    auto row = [&](const char *full, const char *label, bool parent = false) {
+    auto row = [&](const char *full, const char *label, bool parent = false,
+                   int directory = -1, const struct stat *opened = nullptr) {
       if (deliveryFailed || generation->load() != serial)
         return;
       struct stat st;
-      if (lstat(full, &st) || generation->load() != serial)
+      if ((directory < 0 ? lstat(full, &st)
+                         : fstatat(directory, label, &st, AT_SYMLINK_NOFOLLOW)) ||
+          generation->load() != serial)
         return;
       BMessage item;
       item.AddInt32("iconSize", iconPixels);
@@ -151,7 +155,9 @@ public:
       bool link = S_ISLNK(st.st_mode);
       bool dir = S_ISDIR(st.st_mode);
       struct stat resolved;
-      const bool resolvedLink = link && stat(full, &resolved) == 0;
+      const bool resolvedLink = link &&
+          (directory < 0 ? stat(full, &resolved)
+                         : fstatat(directory, label, &resolved, 0)) == 0;
       if (resolvedLink)
         dir = S_ISDIR(resolved.st_mode);
       const mode_t targetMode = resolvedLink ? resolved.st_mode : st.st_mode;
@@ -161,12 +167,16 @@ public:
       item.AddInt64("node", st.st_ino);
       item.AddInt64("size", st.st_size);
       item.AddInt64("date", st.st_mtime);
-      entry_ref ref;
-      BEntry e(full, false);
-      if (e.GetRef(&ref) == B_OK) {
-        item.AddRef("ref", &ref);
-        if (!parent && (S_ISREG(st.st_mode) || S_ISDIR(st.st_mode)) &&
-            m->HasString("attribute")) {
+      const bool cells = !parent && (S_ISREG(st.st_mode) || S_ISDIR(st.st_mode)) &&
+                         m->HasString("attribute");
+      const bool localIcon = icons && (S_ISREG(targetMode) || S_ISDIR(targetMode));
+      if (cells || localIcon) {
+        entry_ref ref;
+        if (opened)
+          ref = entry_ref(opened->st_dev, opened->st_ino, label);
+        else if (BEntry(full, false).GetRef(&ref) != B_OK)
+          ref = entry_ref();
+        if (cells && ref.name) {
           BNode node(&ref);
           node_ref observed;
           bool same = node.GetNodeRef(&observed) == B_OK &&
@@ -193,7 +203,7 @@ public:
         }
         // Tracker icon lookup may open the node. Never open a device, FIFO,
         // or a link to one just to display a directory listing.
-        if (icons && (S_ISREG(targetMode) || S_ISDIR(targetMode))) {
+        if (localIcon && ref.name) {
           ReadLocalIcon(ref, iconPixels, item);
         }
       }
@@ -313,12 +323,17 @@ public:
             if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..") ||
                 Listi::IsListiPrivateEntry(Listi::Join(path.String(), e->d_name)))
               continue;
-            row(Listi::Join(path.String(), e->d_name).c_str(), e->d_name);
+            row(Listi::Join(path.String(), e->d_name).c_str(), e->d_name,
+                false, dirfd(dir), identified ? &opened : nullptr);
           }
           closedir(dir);
           if (generation->load() != serial)
             return;
-
+          struct stat named;
+          if (identified && (stat(path.String(), &named) != 0 ||
+              named.st_dev != opened.st_dev || named.st_ino != opened.st_ino) &&
+              !done.HasString("error"))
+            done.AddString("error", "Folder changed while reading. Reload to try again.");
         }
       }
     }
