@@ -45,7 +45,7 @@ extern "C" BMenuItem *__wrap__ZN10BPopUpMenu2GoE6BPointbbb(
   if (std::strcmp(menu->Name(), "Copy to window") != 0)
     return __real__ZN10BPopUpMenu2GoE6BPointbbb(menu, at, deliver, open, asynchronous);
   if (chooseDestination.exchange(false))
-    menu->ItemAt(0)->Invoke();
+    static_cast<BInvoker *>(menu->ItemAt(0))->Invoke();
   delete menu;
   return nullptr;
 }
