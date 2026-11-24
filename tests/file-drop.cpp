@@ -21,18 +21,18 @@ int main(){BApplication app("application/x-vnd.Kambuzi-DropTests");char tmp[]="/
 try{
  auto f=a+"/æ $' file.txt";Write(f,"original");Write(a+"/two","second");
  auto drag=MakeFileDrag({f,a+"/two"});Check(drag.what==B_SIMPLE_DATA && drag.HasRef("refs"),"native drag uses file refs");
- PaneEntry folder;
- folder.path = b;
- folder.directory = true;
- folder.kind = 1;
- Check(FolderDropTarget(root, &folder) == b, "ordinary local folder is the receiving target");
+ PaneEntry folderRow;
+ folderRow.path = b;
+ folderRow.directory = true;
+ folderRow.kind = 1;
+ Check(FolderDropTarget(root, &folderRow) == b, "ordinary local folder is the receiving target");
  Check(FolderDropTarget(root, nullptr).empty(), "background has no child target");
- Check(FolderDropTarget("@query:1", &folder).empty(), "query results are not targets");
- folder.parent = true;
- Check(FolderDropTarget(root, &folder).empty(), "parent entry is not a child target");
- folder.parent = false;
- folder.kind = 2;
- Check(FolderDropTarget(root, &folder).empty(), "link to a folder is not a target");
+ Check(FolderDropTarget("@query:1", &folderRow).empty(), "query results are not targets");
+ folderRow.parent = true;
+ Check(FolderDropTarget(root, &folderRow).empty(), "parent entry is not a child target");
+ folderRow.parent = false;
+ folderRow.kind = 2;
+ Check(FolderDropTarget(root, &folderRow).empty(), "link to a folder is not a target");
  Check(IsFileHover(B_INSIDE_VIEW, &drag) && !IsFileHover(B_EXITED_VIEW, &drag),
        "file hover ends on exit");
  auto job=PrepareFileDrop(drag,b);Check(job.sources.size()==2 && job.expectedSources.size()==2,"multi-selection identities frozen");
