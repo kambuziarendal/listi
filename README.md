@@ -6,18 +6,23 @@ Listi is a native Haiku file manager. Browse a single folder, compare two panels
 
 *Quick view in Listi 0.35.0. [Image credit](docs/screenshots/CREDITS.md).*
 
-## Current development focus
+## Feature overview
 
-We want you to be able to browse another folder or cancel a copy while hundreds of small files are moving, without losing track of what actually reached the destination. The development build groups updates to an open folder instead of repeatedly rescanning it as files arrive. We are measuring the cost of recording each transfer safely and testing what happens when a copy stops partway through. The next hardware check is a physical USB disconnect during a copy. See the [test results and limits](docs/VERIFICATION.md#current-development-build).
+- **Browse your way.** Choose one of four workspaces, use per-panel folder tabs or detach a tab into its own window. Open a live BFS search as a file list, or use Flat View to sort an entire local tree by subfolder, type, size or modification date.
+- **Work with a selection.** Queue transfers, keep both files on a local copy conflict, copy names or paths as text, export a displayed list to CSV, or collect originals from several folders on the Shelf. Compare folders by SHA-256 without changing either side.
+- **Stay in the file manager.** Preview photos, PDFs and media, edit text, work with typed BFS attributes, detach a running shell, or browse archives and SMB, FTP, FTPS and SFTP locations.
+
+These features are in the public alpha linked below. The [feature tour](docs/FEATURES.md) also covers two newer milestones:
+
+- The [development branch](https://github.com/kambuziarendal/listi/tree/feature/listi-c-4515) adds named working sets, verified copying between windows and an optional guided setup.
+- The **unreleased 0.38.0-19 candidate** adds manual BFS folder history: save a point, browse an earlier tree and restore it into a new folder without overwriting the original. It also improves large-directory navigation and copying to and from FAT32 and NTFS. This candidate is **not** the public HPKG. It does **not** save history automatically.
 
 ## Install
 
-Revision 0.38.0-12 includes the folder refresh and transfer recovery changes described above.
-
-Download the **[0.38.0-12 alpha test candidate for Haiku x86_64](https://github.com/kambuziarendal/listi/releases/tag/v0.38.0-12)**. Open the HPKG in HaikuDepot, or install it from the download folder:
+Download the **[0.38.0-13 alpha test candidate for Haiku x86_64](https://github.com/kambuziarendal/listi/releases/tag/test-4515)**. Open the HPKG in HaikuDepot, or install it from the download folder:
 
 ```sh
-pkgman install ./Listi-0.38.0-12-x86_64.hpkg
+pkgman install ./listi-0.38.0-13-x86_64.hpkg
 ```
 
 This is alpha software. See the release notes for what was tested, and try it on copies of your files. To transfer files between disks, use **Copy**, remount the destination and check the copy before removing the original. In 0.36.1-3 a virtual USB disconnect could leave a regular-file copy waiting after **Cancel**. Newer candidates isolate staged data writes and flushes on USB destinations so a stalled request cannot later publish the file. The [physical USB test](docs/VERIFICATION.md#physical-usb-disconnect-during-copy) has not been run.
