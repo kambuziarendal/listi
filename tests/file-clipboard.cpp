@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "FileClipboard.h"
+#include "Common.h"
 #include <Application.h>
 #include <Node.h>
 #include <Path.h>
@@ -55,6 +56,14 @@ int main(int argc, char **argv) {
     Check(Rejected([&] { PutPathsAsText({}, &clip); }) &&
               ReadClipboardText(&clip) == a + "/one\n" + archivePath,
           "Copy paths without a selection preserves clipboard contents");
+    PutFileClipboard({a+"/one",a+"/two"},false,&clip);
+    const std::vector<std::string> pictures{a + "/blå logo.png", b + "/blå logo.png"};
+    CopySelectionText(kCopyNames, pictures, root, &clip);
+    Check(ReadClipboardText(&clip) == "blå logo.png\nblå logo.png", "Names preserve Unicode and extensions");
+    CopySelectionText(kCopyRelative, pictures, root, &clip);
+    Check(ReadClipboardText(&clip) == "a/blå logo.png\nb/blå logo.png", "Relative paths distinguish duplicate names");
+    Check(Rejected([&] { CopySelectionText(kCopyRelative, pictures, a, &clip); }),
+          "Relative paths require a shared base");
     PutFileClipboard({a+"/one",a+"/two"},false,&clip);
     auto paste=PrepareFilePaste(b,&clip);
     auto r=Run(paste.jobs[0],{}); FinishFilePaste(paste,{},&clip);

@@ -109,6 +109,11 @@ PaneContextMenuResult RunPaneContextMenu(
   // Browsing a directory (including a volume root) needs no transfer identity.
   if (action == kSelectedBrowser && options.directory && selected.size() == 1)
     return {BMessage(action), {}};
+  if (action == kCopyPaths || action == kCopyNames || action == kCopyRelative) {
+    CopySelectionText(action, selected, folder);
+    pane.ShowStatus("Selection copied as text.");
+    return {};
+  }
   if (action == kRestoreSidebar) {
     BMessage restore(kRestoreSidebar);
     pane.MessageReceived(&restore);
@@ -161,7 +166,7 @@ PaneContextMenuResult RunPaneContextMenu(
       pane.Reload();
       return {};
     }
-  } else if (local && action != kCopyPaths) {
+  } else if (local) {
     if (fileSnapshotError)
       std::rethrow_exception(fileSnapshotError);
     Listi::ReadFileClipboard(snapshot);

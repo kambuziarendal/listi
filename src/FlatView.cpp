@@ -2,7 +2,8 @@
 #include "ColumnRows.h"
 #include "AdaptiveColumnList.h"
 #include "FlatView.h"
-#include "Common.h"
+#include "CopyTextMenu.h"
+#include "FileClipboard.h"
 #include "FileSearch.h"
 #include "FileDrop.h"
 #include "JobSnapshot.h"
@@ -379,11 +380,17 @@ public:
       menu.AddItem(open);
       menu.AddItem(new BMenuItem("Copy", new BMessage(kClipboardCopy)));
       menu.AddItem(new BMenuItem("Cut", new BMessage(kClipboardCut)));
-      menu.AddItem(new BMenuItem("Copy paths", new BMessage(kCopyPaths)));
+      AddCopyTextMenu(menu, true, true, true);
       menu.AddSeparatorItem();
       menu.AddItem(new BMenuItem("Add to Shelf", new BMessage(kAddToShelf)));
       if (auto *choice = menu.Go(message->GetPoint("point", BPoint()), false, true, false))
-        Window()->MessageReceived(choice->Message());
+        {
+          const uint32 action = choice->Message()->what;
+          if (action == kCopyNames || action == kCopyPaths || action == kCopyRelative)
+            MessageReceived(choice->Message());
+          else
+            Window()->MessageReceived(choice->Message());
+        }
       break;
     }
     case kInvoke: {
@@ -400,6 +407,8 @@ public:
     case kOpenSystem:
     case kClipboardCopy:
     case kClipboardCut:
+    case kCopyNames:
+    case kCopyRelative:
     case kCopyPaths: {
       try {
         auto selected = results->SelectedEntries();
@@ -409,12 +418,13 @@ public:
           FreezeLocalJob(selected);
           Open(selected.sources.front());
         } else {
-          if (message->what == kCopyPaths)
-            PutPathsAsText(selected.sources);
+          const bool text = message->what != kClipboardCopy && message->what != kClipboardCut;
+          if (text)
+            CopySelectionText(message->what, selected.sources, rootPath);
           else
             PutFileClipboard(selected.sources, message->what == kClipboardCut,
                              be_clipboard, selected.expectedSources);
-          const char *notice = message->what == kCopyPaths ? "Paths copied as text."
+          const char *notice = text ? "Selection copied as text."
                                : message->what == kClipboardCut ? "Files marked for moving."
                                                                : "Files copied to clipboard.";
           shelfStatus->SetText(notice);

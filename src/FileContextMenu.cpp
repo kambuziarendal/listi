@@ -2,6 +2,7 @@
 #include "FileContextMenu.h"
 #include "Common.h"
 #include "MainWindow.h"
+#include "CopyTextMenu.h"
 #include "ShelfWindow.h"
 #include <MenuItem.h>
 #include <PopUpMenu.h>
@@ -101,8 +102,8 @@ void FileActions(BMenu &menu, const ContextMenuOptions &options) {
   menu.AddSeparatorItem();
   add("Copy", kClipboardCopy, local || options.archiveRemove);
   add("Cut", kClipboardCut, local || options.archiveRemove);
-  add(single ? "Copy path as text" : "Copy paths as text", kCopyPaths,
-      options.selected != 0);
+  AddCopyTextMenu(menu, local && options.selected, options.selected,
+                  local && options.folderLocal && options.selected);
   add("Add to Shelf", Listi::kAddToShelf, options.addToShelf);
   add("Paste here", kClipboardPaste,
       options.folderLocal || options.folderArchive);

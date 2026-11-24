@@ -49,6 +49,8 @@ enum : uint32 {
   kOpenWith = 'opwi',
   kClipboardCopy = 'ccpy',
   kCopyPaths = 'cpat',
+  kCopyNames = 'cpnm',
+  kCopyRelative = 'cpre',
   kClipboardCut = 'ccut',
   kClipboardPaste = 'cpst',
   kClipboardSaveText = 'ctsf',

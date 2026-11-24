@@ -44,3 +44,8 @@ make
 Run `make test` for the built-in self-test or `make package` to create an HPKG in `dist/`. See [testing and known limits](docs/VERIFICATION.md) for the full native audit.
 
 [Changelog](CHANGELOG.md) · [Roadmap](docs/ROADMAP.md) · [Report a bug](https://github.com/kambuziarendal/listi/issues) · [MIT licence](LICENSE) · [Third-party licences and the RAR restriction](docs/LICENSING.md)
+
+**Copy as** in the file context menu copies human-readable text, one item per
+line, without shell quoting. Names retain their extensions. Relative paths
+start at the displayed folder (the root in Flat View); this option is disabled
+in search results. A newline in a filename remains a newline in the text.

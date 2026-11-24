@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "TransferCommand.h"
 #include "FileClipboard.h"
+#include "Common.h"
 #include "ClipboardLock.h"
 #include "ArchiveJobs.h"
 #include "ArchiveVolumes.h"
@@ -147,6 +148,24 @@ void PutPathsAsText(const std::vector<std::string> &paths,
           "Add clipboard text");
   ClipboardLock lock(clipboard);
   Commit(clipboard, message);
+}
+
+void CopySelectionText(uint32 action, const std::vector<std::string> &paths,
+                       const std::string &root, BClipboard *clipboard) {
+  if (action == kCopyPaths)
+    return PutPathsAsText(paths, clipboard);
+  const std::string prefix = root.empty() || root.back() == '/' ? root : root + "/";
+  std::vector<std::string> lines;
+  for (const auto &path : paths) {
+    if (action == kCopyNames)
+      lines.push_back(path == "/" ? path : path.substr(path.rfind('/') + 1));
+    else if (action == kCopyRelative && !prefix.empty() &&
+             path.compare(0, prefix.size(), prefix) == 0 && path.size() > prefix.size())
+      lines.push_back(path.substr(prefix.size()));
+    else
+      throw std::runtime_error("Select entries below the displayed folder.");
+  }
+  PutPathsAsText(lines, clipboard);
 }
 
 std::vector<ClipboardItem> ReadFileClipboard(const BMessage &message) {
