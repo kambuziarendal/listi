@@ -347,7 +347,10 @@ original name. If two entries have the same name, remove one reference
 before packing. Creating an archive leaves the originals and Shelf unchanged.
 
 Local drag-and-drop asks Copy here, Move here or Cancel for the receiving
-panel's current folder, not the row under the pointer. Duplicate and symbolic
+folder shown in the confirmation. In Details, icons and Miller columns, drag
+over an outlined local folder to target it directly. Empty space or an entry
+without an outline targets the current panel or column folder. Links, archives
+and the parent entry are not subfolder targets. Duplicate and symbolic
 link creation are local, single-entry actions; links can be relative or absolute.
 Archive and network drops remain copy-only.
 

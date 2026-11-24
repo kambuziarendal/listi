@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "FileDrop.h"
+#include "FolderDropTarget.h"
 #include "AdaptiveColumnList.h"
 // Only this renderer depends on Haiku's private ColumnListView API.
 #include "FileDetails.h"
@@ -94,11 +95,13 @@ public:
 class NameColumn : public BStringColumn {
 public:
   Preferences prefs;
+  std::string hoverPath;
   BView *batchTarget = nullptr;
   Pane *pane;
   NameColumn(Pane *owner, const Preferences &p)
       : BStringColumn("Name", 260, 80, 1200, B_TRUNCATE_MIDDLE), prefs(p), pane(owner) {}
   void DrawField(BField *f, BRect r, BView *v) override {
+    const BRect fieldRect = r;
     v->SetFont(&prefs.font);
     auto n = static_cast<NameField *>(f);
     rgb_color old = v->HighColor();
@@ -125,6 +128,8 @@ public:
       r.left += 23;
     }
     BStringColumn::DrawField(f, r, v);
+    if (hoverPath == n->entry->path)
+      Listi::DrawFolderHover(v, fieldRect);
     if (n->entry->transferState) {
       rgb_color color =
           ui_color(n->entry->transferState == 2   ? B_SUCCESS_COLOR
@@ -233,6 +238,36 @@ public:
     return B_SKIP_MESSAGE;
   }
 };
+std::string DetailsDropTarget(BColumnListView *list, Pane *pane, BPoint point) {
+  auto row = static_cast<FileRow *>(list->RowAt(point));
+  return pane->IsSearchList() || !list->ColumnAt(point) ? std::string()
+      : Listi::FolderDropTarget(pane->Path(), row ? row->entry : nullptr);
+}
+
+class FolderHoverFilter : public BMessageFilter {
+  BColumnListView *list;
+  Pane *pane;
+  NameColumn *name;
+
+public:
+  FolderHoverFilter(BColumnListView *list, Pane *pane, NameColumn *name)
+      : BMessageFilter(B_MOUSE_MOVED), list(list), pane(pane), name(name) {}
+  filter_result Filter(BMessage *message, BHandler **) override {
+    BMessage drag;
+    BPoint point;
+    bool located = message->FindPoint("be:view_where", &point) == B_OK;
+    if (!located && message->FindPoint("screen_where", &point) == B_OK) {
+      point = list->ScrollView()->ConvertFromScreen(point);
+      located = true;
+    }
+    const bool hover = located && list->ScrollView()->Bounds().Contains(point) &&
+        message->FindMessage("be:drag_message", &drag) == B_OK &&
+        Listi::IsFileHover(message->GetInt32("be:transit", B_INSIDE_VIEW), &drag);
+    Listi::SetFolderHover(list->ScrollView(), name->hoverPath,
+                          hover ? DetailsDropTarget(list, pane, point) : "");
+    return B_DISPATCH_MESSAGE;
+  }
+};
 class DetailsList : public Listi::AdaptiveColumnList {
   Listi::TypeToSelect typeSelect;
 
@@ -259,6 +294,7 @@ public:
     SetSortColumn(name, false, true);
     SetInvocationMessage(new BMessage(kInvoke));
     ScrollView()->AddFilter(new ContextClick(this, pane, typeSelect));
+    ScrollView()->AddFilter(new FolderHoverFilter(this, pane, name));
     band = new RubberBand(ScrollView());
     band->ready = [this] { return !pane->IsScanning(); };
     band->path = [this] { return std::string(pane->Path()); };
@@ -415,7 +451,8 @@ public:
     DragMessage(&drag, BRect(point.x, point.y, point.x + 90, point.y + 22));
     return true;
   }
-  void MessageDropped(BMessage *message, BPoint) override {
+  void MessageDropped(BMessage *message, BPoint point) override {
+    Listi::SetFolderHover(ScrollView(), name->hoverPath, "");
     if (pane->IsSearchList()) {
       pane->ShowStatus("A search list is not a destination folder.");
       return;
@@ -423,7 +460,8 @@ public:
     BMessage drop(*message);
     drop.what = kDrop;
     drop.RemoveName("destination");
-    drop.AddString("destination", pane->Path());
+    const auto target = DetailsDropTarget(this, pane, point);
+    drop.AddString("destination", target.empty() ? pane->Path() : target.c_str());
     Window()->PostMessage(&drop);
   }
 };

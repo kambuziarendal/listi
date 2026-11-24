@@ -2,6 +2,7 @@
 #include "ReadWorker.h"
 #include "TerminalReplies.h"
 #include "FileDrop.h"
+#include "FolderDropTarget.h"
 #include "FileGrid.h"
 #include "PanelAppearance.h"
 #include "RubberBand.h"
@@ -296,7 +297,21 @@ public:
       pane->MessageReceived(&invoke);
     }
   }
-  void MouseMoved(BPoint point, uint32, const BMessage *) override {
+  std::string hoverPath;
+  std::string DropTarget(BPoint point) const {
+    if (!Bounds().Contains(point) || pane->IsSearchList())
+      return {};
+    const int index = int(point.y / cellHeight) * Columns() +
+        int(point.x / ((Bounds().Width() + 1) / Columns()));
+    const auto &rows = model->Visible();
+    return Listi::FolderDropTarget(pane->Path(),
+        index >= 0 && index < int(rows.size()) ? rows[index] : nullptr);
+  }
+  void MouseMoved(BPoint point, uint32 transit, const BMessage *payload) override {
+    Listi::SetFolderHover(this, hoverPath,
+        Listi::IsFileHover(transit, payload) ? DropTarget(point) : "");
+    if (payload)
+      return;
     if (dragging || pressedIndex < 0 ||
         pressedIndex >= int(model->Visible().size()) ||
         (std::abs(point.x - pressed.x) < 5 &&
@@ -418,7 +433,9 @@ public:
       BMessage dropped(*m);
       dropped.what = kDrop;
       dropped.RemoveName("destination");
-      dropped.AddString("destination", pane->Path());
+      const auto target = DropTarget(ConvertFromScreen(m->DropPoint()));
+      Listi::SetFolderHover(this, hoverPath, "");
+      dropped.AddString("destination", target.empty() ? pane->Path() : target.c_str());
       Window()->PostMessage(&dropped);
       return;
     }
@@ -497,6 +514,8 @@ public:
         FillRect(BRect(cell.left + 4, cell.bottom - 3, cell.left + 4 + width,
                        cell.bottom - 1));
       }
+      if (row->path == hoverPath)
+        Listi::DrawFolderHover(this, cell);
       if (IsFocus() && focused == row) {
         SetHighUIColor(B_KEYBOARD_NAVIGATION_COLOR);
         StrokeRoundRect(cell, 4, 4);
