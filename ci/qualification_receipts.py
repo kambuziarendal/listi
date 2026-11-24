@@ -29,3 +29,12 @@ def validate_full_audit(lines, required):
     if lines[-1] != f"PASS Listi --self-test; {len(required)} selected native cases exited successfully":
         raise RuntimeError("Invalid final native suite result")
     validate_checks(lines[positions[-1] + 1:-1])
+
+
+def validate_installed_multiwindow(lines):
+    start = "TEST installed multiwindow"
+    done = "PASS installed multiwindow"
+    if (not lines or lines[0] != start or lines[-1] != done or
+            lines.count(start) != 1 or lines.count(done) != 1 or
+            "PASS closing the last browser exits Listi" not in lines):
+        raise RuntimeError("Missing or incomplete installed multiwindow receipts")

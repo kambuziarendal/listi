@@ -147,7 +147,9 @@ class MainWindow : public Listi::WorkingWindow {
     const char *current = panes[source]->Path();
     const bool copyTarget = split->Panel(source).Current() == PanelPage::Files &&
         panes[source]->LocationValid() && !panes[source]->IsSearchList() && current[0] == '/';
-    SetCopyFolder(copyTarget ? current : "");
+    const auto [device, node] = panes[source]->FolderIdentity();
+    SetCopyFolder(copyTarget ? current : "", copyTarget
+        ? Listi::NodeIdentity{int32_t(device), node} : Listi::NodeIdentity{});
     if (titleLocation != current) {
       titleLocation = current;
       const auto last = titleLocation.find_last_not_of('/');
@@ -759,6 +761,17 @@ public:
       }
       return;
     }
+    try {
+      Listi::Job job;
+      if (HandleCopyFolder(*m, job)) {
+        if (job.checkDestinationWindow)
+          queue.Enqueue(job);
+        return;
+      }
+    } catch (const std::exception &error) {
+      PostMainWindowNotice(error.what());
+      return;
+    }
     const int source = split->Source();
     if (m->what == kCopyToWindow) {
       if (PromptBlocksCommand())
@@ -778,8 +791,7 @@ public:
           if (path.empty() || path.front() != '/' || Listi::IsVirtual(path))
             throw std::runtime_error("Copy to window supports local entries only.");
         job.action = Listi::Action::Copy;
-        if (PickCopyFolder(job))
-          fileOperations.SubmitTransfer(std::move(job));
+        PickCopyFolder(std::move(job));
       } catch (const std::exception &error) {
         PostMainWindowNotice(error.what());
       }

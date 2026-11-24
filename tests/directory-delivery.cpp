@@ -213,6 +213,45 @@ int main() {
  held = create_sem(0, "held directory reader");
  resume = create_sem(0, "resume directory reader");
  released = create_sem(0, "released directory reader");
+ // A reader enumerates one opened directory. Replacing the pathname during
+ // enumeration must not publish a valid mixed listing from the replacement.
+ {
+   auto *receiver = new Receiver;
+   receiver->Run();
+   auto epoch = std::make_shared<std::atomic<int64>>(1);
+   auto *reader = CreateDirectoryScanner(BMessenger(receiver), epoch);
+   reader->Run();
+   BMessage request(kScan);
+   request.AddInt64("serial", 1);
+   request.AddString("path", folder.c_str());
+   request.AddBool("icons", false);
+   holdNextRows = true;
+   reader->PostMessage(&request);
+   const bool paused = acquire_sem_etc(held, 1, B_RELATIVE_TIMEOUT, 5000000) == B_OK;
+   const auto moved = folder + "-moved";
+   const bool renamed = paused && rename(folder.c_str(), moved.c_str()) == 0;
+   const bool replaced = renamed && mkdir(folder.c_str(), 0700) == 0;
+   if (replaced)
+     std::ofstream(folder + "/replacement") << "different folder";
+   release_sem(resume);
+   if (paused)
+     acquire_sem_etc(released, 1, B_RELATIVE_TIMEOUT, 5000000);
+   const bool completed = acquire_sem_etc(receiver->done, 1, B_RELATIVE_TIMEOUT, 5000000) == B_OK;
+   receiver->Lock();
+   check(replaced && completed &&
+       receiver->error == "Folder changed while reading. Reload to try again." &&
+       receiver->count == 160 && receiver->names.count("replacement") == 0,
+       "directory replacement does not authorize a mixed listing");
+   receiver->Quit();
+   if (reader->Lock())
+     reader->Quit();
+   if (replaced) {
+     unlink((folder + "/replacement").c_str());
+     rmdir(folder.c_str());
+   }
+   if (renamed && rename(moved.c_str(), folder.c_str()) != 0)
+     return 4;
+ }
  // Mutate the directory after enumeration and before the terminal message.
  holdNextDone = true;
  pane->Navigate(folder.c_str());

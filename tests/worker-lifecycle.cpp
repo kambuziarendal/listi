@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "Pane.h"
+#include "PaneModel.h"
+#include "FileGrid.h"
 #include "ReadWorker.h"
 #include "ImagePreview.h"
 #include "SearchWindow.h"
@@ -99,6 +101,30 @@ int main() {
   check(!Listi::StartReadWorker(extra) && !extra, "capacity refuses a worker without leaking its looper");
   if (extra)
     Listi::RetireReadWorker(extra);
+  auto *gridWindow = new BWindow(BRect(10, 10, 400, 350), "Grid recovery", B_TITLED_WINDOW, 0);
+  gridWindow->SetPulseRate(50000);
+  Pane pane(0, Preferences{});
+  PaneModel model;
+  auto row = std::make_unique<PaneEntry>();
+  row->name = "preview.png";
+  row->path = "/tmp/listi-thumbnail-capacity-fixture.png";
+  row->iconRequested = true; // Let the released slot belong to the thumbnail reader.
+  model.AddScanned(std::move(row), "", false);
+  auto *grid = CreateFileGrid(&pane, &model);
+  grid->ResizeTo(350, 300);
+  grid->SetMode(3);
+  gridWindow->AddChild(grid);
+  gridWindow->Show();
+  check(FindReader("thumbnail reader") < 0, "attached thumbnail grid respects the full pool");
+  Listi::RetireReadWorker(readers.back());
+  const auto deadline = system_time() + 3000000;
+  while (FindReader("thumbnail reader") < 0 && system_time() < deadline)
+    snooze(20000);
+  check(FindReader("thumbnail reader") >= 0, "same attached thumbnail grid recovers after one slot opens");
+  extra = new Listi::ReadWorker("excess reader");
+  check(!Listi::StartReadWorker(extra) && !extra, "recovered thumbnail grid still respects the worker cap");
+  gridWindow->Lock();
+  gridWindow->Quit();
   for (auto &worker : readers)
     Listi::RetireReadWorker(worker);
   check(Listi::DrainReadWorkers(2000000), "all capacity probes exited");

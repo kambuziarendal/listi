@@ -350,7 +350,7 @@ int32 Pane::LocationMode() const {
   return remembered == prefs.folderModes.end() ? (restoredView >= 0 ? restoredView : prefs.PaneMode(id))
                                                : remembered->second;
 }
-void Pane::SetDisplayMode(int32 value) {
+void Pane::SetDisplayMode(int32 value, bool appendedDetails) {
   auto focus = Window() ? Window()->CurrentFocus() : nullptr;
   while (focus && focus != cards)
     focus = focus->Parent();
@@ -361,9 +361,10 @@ void Pane::SetDisplayMode(int32 value) {
                                       : mode == MillerMode ? 2
                                                            : 1);
   columns->SetEnabled(mode == MillerMode);
-  if (mode == 0)
-    list->Refresh();
-  else if (mode == MillerMode) {
+  if (mode == 0) {
+    if (!appendedDetails)
+      list->Refresh();
+  } else if (mode == MillerMode) {
     columns->SetLocation(path.String());
     columns->Refresh();
   } else {
@@ -554,6 +555,14 @@ void Pane::UpdateNavigation() {
   forward->SetEnabled(history.Forward() >= 0);
 }
 void Pane::StartNavigation(const std::string &request, int target, bool trash, bool restore) {
+  try {
+    if (Listi::IsVirtual(request))
+      Listi::RequireConnection(request);
+  } catch (const std::exception &error) {
+    restoring.reset();
+    SetNavigationError(error.what());
+    return;
+  }
   if (!restore && locationValid && !scanning)
     history.SavePosition(CaptureVisit());
   pendingVisit = restore ? restoring->pendingVisit
@@ -1283,7 +1292,10 @@ void Pane::MessageReceived(BMessage *m) {
       entries.Sort(entries.Sorting());
     history.Complete(serial, path.String(), locationValid);
     UpdateNavigation();
-    SetDisplayMode(LocationMode());
+    const int32 finalMode = LocationMode();
+    // Native details rows were already appended by the scan. Keep the
+    // final location, menu and model updates without revisiting every row.
+    SetDisplayMode(finalMode, mode == 0 && finalMode == mode && locationValid);
     edit->SetText(LocationLabel().c_str());
     sidebar->UpdateLocation();
     const char *error;
@@ -1356,8 +1368,11 @@ void Pane::MessageReceived(BMessage *m) {
       }
       restoring.reset();
     }
-    if (refreshPending)
+    if (refreshPending) {
+      directoryRefreshTimer.reset();
+      directoryRefreshPending = false;
       Reload();
+    }
     break;
   }
   case B_NODE_MONITOR:

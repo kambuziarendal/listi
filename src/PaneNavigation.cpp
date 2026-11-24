@@ -199,36 +199,35 @@ bool Pane::HandleQueryReply(BMessage &message) {
   }
   // A live query reconciles periodically even without a notification. Do
   // not discard native rows, selection gestures or scroll on an unchanged list.
-  if (!initial && entries.MatchesSnapshot(queryRows)) {
-    queryRows.clear();
-    return true;
-  }
-  ClearRows();
-  std::string focus;
-  for (auto &row : queryRows) {
-    const auto selected = state.selection.find(row->path);
-    const auto identity = IdentityOf(*row);
-    if (row->path == state.focused && identity == state.focusIdentity)
-      focus = row->path;
-    entries.AddScanned(std::move(row), einn ? "" : filter->Text(),
-                       selected != state.selection.end() && selected->second == identity);
+  const bool rebuild = initial || !entries.MatchesSnapshot(queryRows);
+  if (rebuild) {
+    ClearRows();
+    std::string focus;
+    for (auto &row : queryRows) {
+      const auto selected = state.selection.find(row->path);
+      const auto identity = IdentityOf(*row);
+      if (row->path == state.focused && identity == state.focusIdentity)
+        focus = row->path;
+      entries.AddScanned(std::move(row), einn ? "" : filter->Text(),
+                         selected != state.selection.end() && selected->second == identity);
+    }
+    entries.SetSelection(entries.Selected(), focus);
+    scanning = false;
+    locationValid = true;
+    savedSelection.clear();
+    restoring.reset();
+    history.Complete(serial, path.String(), true);
+    UpdateNavigation();
+    SetDisplayMode(0);
+    Sort(state.sorting);
+    RestoreScroll(state.scroll);
+    RestoreVisit();
   }
   queryRows.clear();
-  entries.SetSelection(entries.Selected(), focus);
-  scanning = false;
-  locationValid = true;
-  savedSelection.clear();
-  restoring.reset();
-  history.Complete(serial, path.String(), true);
-  UpdateNavigation();
-  SetDisplayMode(0);
-  Sort(state.sorting);
-  RestoreScroll(state.scroll);
-  RestoreVisit();
-  if (!initial && entries.Selected().size() < state.selection.size())
-    ShowStatus("A selected original disappeared, changed identity or no longer matches.");
-  else if (message.GetBool("limited", false) || message.GetInt64("skipped", 0) > 0)
+  if (message.GetBool("limited", false) || message.GetInt64("skipped", 0) > 0)
     ShowStatus("Partial search results. Some entries were skipped or a search limit was reached.");
+  else if (rebuild && !initial && entries.Selected().size() < state.selection.size())
+    ShowStatus("A selected original disappeared, changed identity or no longer matches.");
   if (!message.GetBool("live", false)) {
     scanTimer.reset();
     Listi::RetireReadWorker(queryWorker);

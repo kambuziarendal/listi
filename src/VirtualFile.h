@@ -62,13 +62,24 @@ struct FileEntry {
   int64_t size = 0, modified = 0;
   unsigned permissions = 0644;
   bool modifiedKnown = false; // Distinguishes an explicit epoch from an absent timestamp.
-  // MLSD decimal digits, without insignificant trailing zeros. Do not round
+  // Decimal digits, without insignificant trailing zeros. Do not round
   // the source revision to the precision of time_t or of the local filesystem.
   std::string modifiedFraction;
 
   bool SameModification(const FileEntry &other) const {
     return modifiedKnown == other.modifiedKnown && modified == other.modified &&
            modifiedFraction == other.modifiedFraction;
+  }
+
+  void SetModification(int64_t seconds, long nanoseconds) {
+    modified = seconds;
+    modifiedKnown = true;
+    modifiedFraction.clear();
+    if (nanoseconds > 0 && nanoseconds < 1000000000) {
+      modifiedFraction = std::to_string(1000000000 + nanoseconds).substr(1);
+      while (modifiedFraction.back() == '0')
+        modifiedFraction.pop_back();
+    }
   }
 
   long ModifiedNanoseconds() const {
@@ -92,7 +103,10 @@ std::string DecodePath(const std::string &);
 std::string ChildLocation(const std::string &, const std::string &);
 std::string ParentLocation(const std::string &);
 std::string LocationLeaf(const std::string &);
-void SetConnection(const std::string &url, const Connection &);
+// Interim single-account mode: a normalized route can be registered only
+// once per process. Existing panes and queued work never adopt new credentials.
+bool SetConnection(const std::string &url, const Connection &);
+void RequireConnection(const std::string &url);
 Connection GetConnection(const std::string &url);
 std::vector<FileEntry> ListFiles(const std::string &,
                                  const TransferControl & = {});

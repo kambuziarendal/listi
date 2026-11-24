@@ -9,6 +9,7 @@
 #include <map>
 #include <mutex>
 #include <sys/stat.h>
+#include <tuple>
 #include <unistd.h>
 
 namespace Listi {
@@ -40,7 +41,25 @@ bool IsListiPrivateEntry(const std::string &path) {
 }
 namespace {
 std::mutex connectionsMutex;
-std::map<std::string, Connection> connections;
+std::map<std::string, const Connection> connections;
+std::string ConnectionRoute(Location location) {
+  if (!location.port)
+    location.port = location.scheme == "smb" ? 445 : location.scheme == "sftp" ? 22 :
+                    location.scheme == "ftps" ? 990 : 21;
+  return location.Authority();
+}
+auto Credentials(const Connection &auth) {
+  return std::tie(auth.username, auth.password, auth.domain, auth.privateKey,
+                  auth.knownHosts, auth.keyPassphrase);
+}
+const Connection &BoundConnection(const Location &location) {
+  std::lock_guard<std::mutex> guard(connectionsMutex);
+  const auto it = connections.find(ConnectionRoute(location));
+  if (it == connections.end())
+    throw std::runtime_error("No account is bound to this server. Use Network / Connect first.");
+  // Entries are immutable and never erased during this process.
+  return it->second;
+}
 void Fail(const std::string &p) {
   throw std::runtime_error(p + ": " + strerror(errno));
 }
@@ -51,22 +70,26 @@ FileEntry Entry(const std::string &p, const struct stat &st) {
   e.directory = S_ISDIR(st.st_mode);
   e.link = S_ISLNK(st.st_mode);
   e.size = st.st_size;
-  e.modified = st.st_mtime;
-  e.modifiedKnown = true;
+  e.SetModification(st.st_mtim.tv_sec, st.st_mtim.tv_nsec);
   e.permissions = st.st_mode & 0777;
   return e;
 }
 } // namespace
-void SetConnection(const std::string &url, const Connection &c) {
-  auto l = ParseLocation(url);
+bool SetConnection(const std::string &url, const Connection &auth) {
+  const auto location = ParseLocation(url);
+  if (location.Local() || location.Archive())
+    return false;
   std::lock_guard<std::mutex> guard(connectionsMutex);
-  connections[l.Authority()] = c;
+  const auto [it, inserted] = connections.try_emplace(ConnectionRoute(location), auth);
+  return inserted || Credentials(it->second) == Credentials(auth);
+}
+void RequireConnection(const std::string &url) {
+  const auto location = ParseLocation(url);
+  if (!location.Local() && !location.Archive())
+    BoundConnection(location);
 }
 Connection GetConnection(const std::string &url) {
-  auto l = ParseLocation(url);
-  std::lock_guard<std::mutex> guard(connectionsMutex);
-  auto it = connections.find(l.Authority());
-  return it == connections.end() ? Connection{} : it->second;
+  return BoundConnection(ParseLocation(url));
 }
 std::vector<FileEntry> ListFiles(const std::string &p,
                                  const TransferControl &c) {

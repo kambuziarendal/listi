@@ -78,6 +78,8 @@ struct Job {
   // Internal, never decoded from UI messages: a staged copy for an archive
   // move must not follow a destination merge into another mounted volume.
   bool copyForArchiveMove = false;
+  // In-process guard for cross-window Copy, never decoded from messages.
+  std::function<void()> checkDestinationWindow;
 };
 class JobReportStore;
 struct Hooks {

@@ -213,6 +213,11 @@ echo "TEST installed Listi --self-test"
         digest = hashlib.sha256((output / name).read_bytes()).hexdigest()
         if f"{digest}  {guest_path}" not in installed:
             raise RuntimeError("Exported package differs from the installed artifact")
+        with (output / "installed-multiwindow.log").open("wb") as log:
+            subprocess.run([*ssh, "cd ~/listi-ephemeral && python3 -u tests/multiwindow-installed.py"],
+                           stdout=log, stderr=subprocess.STDOUT, check=True, timeout=240)
+        multiwindow = (output / "installed-multiwindow.log").read_text().splitlines()
+        receipts["validate_installed_multiwindow"](multiwindow)
     if args.extended_fixture:
         # Host dependencies are opt-in. Nothing here uses a production service.
         helper = Path(__file__).resolve().parents[1] / "ci/run-extended.py"

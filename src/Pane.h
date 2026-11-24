@@ -101,6 +101,7 @@ public:
   }
   bool CanToggleTree() const;
   bool SidebarCanBeRestored() const;
+  Listi::VisitPosition::Identity FolderIdentity() const { return folderIdentity; }
   bool LocationValid() const { return locationValid; }
   void RefreshShelf();
   SidebarMode Sidebar() const { return prefs.Sidebar(id); }
@@ -133,7 +134,7 @@ private:
   float contentSplitterSize = 0;
   BMenuField *display;
   int32 mode = 0;
-  void SetDisplayMode(int32);
+  void SetDisplayMode(int32, bool appendedDetails = false);
   int32 LocationMode() const;
   void PublishDisplay(bool folder = false, bool forget = false);
   bool locationValid = false;

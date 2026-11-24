@@ -7,6 +7,7 @@
 #include <Application.h>
 #include <cstdlib>
 #include <filesystem>
+#include <fcntl.h>
 #include <fstream>
 #include <iostream>
 #include <sys/stat.h>
@@ -88,10 +89,16 @@ int main() {
     };
     auto stableCopy = copy(ftp, "stable");
     struct stat info{};
+    struct stat precision{};
+    const timespec reference[] = {{0, UTIME_OMIT}, {modified, 123456789}};
+    const auto probe = local + "/precision";
+    std::ofstream(probe) << "precision probe";
+    Expect(!utimensat(AT_FDCWD, probe.c_str(), reference, 0) &&
+               !stat(probe.c_str(), &precision), "measure destination timestamp precision");
     Expect(stableCopy.errors.empty() && completed == 1 && notified == 1 &&
                Read(local + "/stable") == "fixture contents\n" &&
                !stat((local + "/stable").c_str(), &info) &&
-               info.st_mtime == modified,
+               info.st_mtime == modified && info.st_mtim.tv_nsec == precision.st_mtim.tv_nsec,
            "ordinary FTP download preserves content and known UTC mtime");
     auto unknownCopy = copy(ftp, "unknown");
     Expect(unknownCopy.errors.empty() && completed == 2 && notified == 2 &&

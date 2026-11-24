@@ -12,7 +12,20 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def check_receipt_contract():
-    validate = runpy.run_path(str(ROOT / "ci/qualification_receipts.py"))["validate_full_audit"]
+    receipts = runpy.run_path(str(ROOT / "ci/qualification_receipts.py"))
+    validate = receipts["validate_full_audit"]
+    multiwindow = receipts["validate_installed_multiwindow"]
+    installed = ["TEST installed multiwindow", "PASS closing the last browser exits Listi",
+                 "PASS installed multiwindow"]
+    multiwindow(installed)
+    for lines in ([], installed[1:], installed[:-1], installed[::2]):
+        try:
+            multiwindow(lines)
+        except RuntimeError:
+            pass
+        else:
+            raise RuntimeError("Incomplete installed multiwindow receipts accepted")
+    print("PASS gate/installed-multiwindow: required receipts")
     valid = ["TEST demo", "PASS demo", "TEST Listi --self-test",
              *(f"PASS check{i}" for i in range(58)), "58 checks, 0 failures",
              "PASS Listi --self-test; 1 selected native cases exited successfully"]

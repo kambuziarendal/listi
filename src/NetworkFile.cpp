@@ -98,8 +98,7 @@ void Fill(FileEntry &e, const Location &l, const struct stat &st) {
   e.directory = S_ISDIR(st.st_mode);
   e.link = S_ISLNK(st.st_mode);
   e.size = st.st_size;
-  e.modified = st.st_mtime;
-  e.modifiedKnown = true;
+  e.SetModification(st.st_mtim.tv_sec, st.st_mtim.tv_nsec);
   e.permissions = st.st_mode & 0777;
 }
 struct SMBSession {
@@ -628,8 +627,7 @@ bool StatNetwork(const Location &l, FileEntry &e, const TransferControl &c,
         LIBCALL(s.lib, curl_easy_getinfo)(s.curl, CURLINFO_FILETIME_T,
                                           &modified) == CURLE_OK &&
         modified > 0) {
-      entry.modified = modified;
-      entry.modifiedKnown = true;
+      entry.SetModification(modified, 0);
     }
   }
   e = std::move(entry);
