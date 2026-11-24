@@ -147,6 +147,15 @@ int main(){
    return 2;
  }
  BMessage oldConflict = window->conflicts.back();
+ const char *incoming = nullptr, *existing = nullptr, *proposed = nullptr;
+ check(oldConflict.GetInt64("request", 0) > 0 &&
+           oldConflict.FindString("detail", 0, &incoming) == B_OK &&
+           oldConflict.FindString("detail", 1, &existing) == B_OK &&
+           oldConflict.FindString("detail", 2, &proposed) == B_OK &&
+           std::string(incoming).find("/in/item0") != std::string::npos &&
+           std::string(existing).find("32768 bytes, modified") != std::string::npos &&
+           std::string(proposed).find("/out/item0 (2)") != std::string::npos,
+       "local file conflict delivers worker metadata and proposed name with request ID");
  BMessage oldPause(*pause->Message()), oldCancel(*cancelJob->Message()),
      oldCancelAll(*cancelAll->Message());
  const std::string conflictText = summary->Text();

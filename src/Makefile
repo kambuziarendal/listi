@@ -7,6 +7,7 @@ SRCS += PaneNavigation.cpp PaneCommands.cpp MillerColumns.cpp TransferCommand.cp
 SRCS += ArchiveJobPreparation.cpp ArchiveJobChecks.cpp RecoveryInventory.cpp RecoveryReviewWindow.cpp VirtualLocation.cpp
 SRCS += FlatView.cpp WorkspaceLayout.cpp WorkspaceEditor.cpp WorkspaceSplit.cpp PanelTools.cpp FolderTabs.cpp InspectorContent.cpp InspectorDocument.cpp InspectorEditor.cpp InspectorPhoto.cpp
 SRCS += InspectorTextView.cpp SearchResultsView.cpp ReadWorker.cpp
+SRCS += FileListExportWindow.cpp FileListExport.cpp
 SRCS += TerminalDock.cpp TerminalPanel.cpp TerminalSession.cpp $(wildcard vendor/libvterm/src/*.c)
 LOCAL_INCLUDE_PATHS += vendor/libvterm/include
 LIBS = shared translation textencoding media be columnlistview tracker sqlite3 $(STDCPPLIBS)

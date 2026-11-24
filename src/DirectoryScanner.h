@@ -40,7 +40,7 @@ public:
       watch_node(&*node, B_STOP_WATCHING, target);
       node.reset();
     }
-    auto status = watch_node(&opened, B_WATCH_ALL, target);
+    auto status = watch_node(&opened, B_WATCH_ALL | B_WATCH_CHILDREN, target);
     if (status == B_OK)
       node = opened;
     return status;

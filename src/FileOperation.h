@@ -28,7 +28,11 @@ enum class Action {
   ConvertImage,
   UndoBulkRename
 };
-enum class Decision { Replace, ReplaceAll, Skip, SkipAll, Abort };
+enum class Decision { Replace, ReplaceAll, Skip, SkipAll, Abort, KeepBoth };
+struct CopyConflict {
+  std::string source, destination, proposed;
+  int64_t sourceSize, destinationSize, sourceModified, destinationModified;
+};
 struct NodeIdentity {
   int32_t device = -1;
   int64_t inode = -1;
@@ -88,6 +92,8 @@ struct Hooks {
   bool privateStaging = false;
   // Optional disk-backed detail stream owned by the operation queue.
   std::shared_ptr<JobReportStore> report;
+  // Only for regular-file collisions in a user-facing local copy.
+  std::function<Decision(const CopyConflict &)> copyConflict;
 };
 enum class Publication { NotAttempted, Unknown, Published };
 struct UploadVerification {

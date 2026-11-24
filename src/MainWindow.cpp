@@ -10,6 +10,7 @@
 #include <atomic>
 #include <MenuItem.h>
 #include "LayoutIntroduction.h"
+#include "FileListExportWindow.h"
 #include "RecoveryReviewWindow.h"
 #include "FlatView.h"
 #include "MainWindowMenu.h"
@@ -25,6 +26,9 @@
 #include "PropertiesWindow.h"
 #include "OpenWith.h"
 #include "SavedNavigationController.h"
+#include "FilePanelFavorite.h"
+#include <FindDirectory.h>
+#include <Path.h>
 #include "SearchWindow.h"
 #include "ShelfController.h"
 #include "ShelfWindow.h"
@@ -249,6 +253,43 @@ class MainWindow : public Listi::WorkingWindow {
   bool HandleNavigation(BMessage *m) {
     const int source = split->Source();
     switch (m->what) {
+    case kFilePanelFavorite:
+    case kFilePanelFavoriteNamed:
+      try {
+        if (m->what == kFilePanelFavorite) {
+          const auto &pane = *panes[source];
+          const std::filesystem::path folder(pane.Path());
+          if (!pane.LocationValid() || pane.IsSearchList() || Listi::IsVirtual(pane.Path()))
+            throw std::runtime_error("Open an available local folder first.");
+          const auto info = Listi::FavoriteFolderIdentity(folder);
+          BMessage accepted(kFilePanelFavoriteNamed);
+          accepted.AddString("folder", folder.c_str());
+          accepted.AddInt64("device", info.st_dev);
+          accepted.AddInt64("inode", info.st_ino);
+          const auto leaf = folder.filename().string();
+          AskInline(("Favorite name for " + folder.string()).c_str(), "Add favorite",
+                    accepted, leaf.empty() ? "Root" : leaf.c_str());
+        } else {
+          BPath settings;
+          if (find_directory(B_USER_SETTINGS_DIRECTORY, &settings) != B_OK)
+            throw std::runtime_error("Could not locate your Haiku settings folder.");
+          const std::string name = m->GetString("name", "");
+          auto result = Listi::AddFilePanelFavorite(settings.Path(), m->GetString("folder", ""),
+              name, m->GetInt64("device", -1), m->GetInt64("inode", -1));
+          if (result == Listi::FavoriteResult::NameInUse) {
+            BMessage retry(*m);
+            retry.RemoveName("name");
+            AskInline("That favorite name is in use. Choose another:", "Add favorite",
+                      retry, name.c_str());
+          } else {
+            PostMainWindowNotice(result == Listi::FavoriteResult::Added
+                ? "Added to Haiku file panel favorites." : "This folder is already a favorite.");
+          }
+        }
+      } catch (const std::exception &error) {
+        PostMainWindowNotice(error.what());
+      }
+      break;
     case kPlaceAction:
     case kPlaceAccepted:
       try {
@@ -736,6 +777,9 @@ public:
     }
     case 'apfg':
       Listi::ForgetArchivePasswords();
+      break;
+    case kExportFileList:
+      Listi::ShowFileListExport(pane.ExportModel());
       break;
     case kResumeArchiveEdits:
       ResumeArchiveEditors(prefs.editor.String());

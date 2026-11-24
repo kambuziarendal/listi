@@ -190,6 +190,8 @@ bool WorkspaceSplit::AllowsCommand(uint32 action) const {
   case kClipboardPaste:
   case kClipboardSaveText: case kClipboardSaveImage: case kUndoBulkRename:
   case kEdit: case kEditExternally: case kView: case kPreviewOtherPanel:
+  case kExportFileList:
+  case kFileTypeIcon: case kFilePanelFavorite:
   case kOpenWith: case kProperties:
   case kDelete: case kRestore: case kPermanentDelete: case kRename:
   case kBulkRename: case kMkdir: case kAddArchive: case kRemoveArchive:

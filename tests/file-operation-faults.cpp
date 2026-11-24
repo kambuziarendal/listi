@@ -143,6 +143,54 @@ int main() {
   const std::string payload(1000, 'x');
   std::ofstream(source) << payload;
   std::ofstream(target) << "original";
+  for (const std::string name : {"report.pdf", ".settings", "notes"}) {
+    const auto incoming = root / name, existing = out / name;
+    const std::string stem = name == "report.pdf" ? "report" : name;
+    const std::string extension = name == "report.pdf" ? ".pdf" : "";
+    const auto occupied = out / (stem + " (2)" + extension);
+    const auto candidate = out / (stem + " (3)" + extension);
+    std::ofstream(incoming) << "incoming";
+    std::ofstream(existing) << "existing";
+    std::ofstream(occupied) << "prior";
+    Job copy{Action::Copy, {incoming.string()}, out.string()};
+    bool race = true;
+    Hooks keep;
+    keep.copyConflict = [&](const CopyConflict &request) {
+      Check(request.source == incoming.string() && request.destination == existing.string() &&
+                request.sourceSize == 8 && request.destinationSize == 8 &&
+                request.proposed == candidate.string(),
+            "keep both describes both files and skips occupied names");
+      if (race)
+        std::ofstream(candidate) << "competitor";
+      return Decision::KeepBoth;
+    };
+    auto raced = Run(copy, keep);
+    Check(!raced.errors.empty() && !raced.completed && Read(candidate) == "competitor" &&
+              Read(existing) == "existing" && Read(incoming) == "incoming",
+          "keep both never overwrites a concurrently claimed name");
+    fs::remove(candidate);
+    race = false;
+    bool cancel = false;
+    keep.progress = [&](const auto &, uint64_t bytes) { cancel = bytes != 0; };
+    keep.proceed = [&] { return !cancel; };
+    auto interrupted = Run(copy, keep);
+    Check(interrupted.cancelled && !interrupted.completed &&
+              Has(interrupted, incoming, candidate, "unprocessed", "Cancelled before commit") &&
+              !fs::exists(candidate) && Read(existing) == "existing",
+          "cancelling staged keep both reports the proposed path without creating it");
+    keep.progress = {};
+    keep.proceed = {};
+    auto copied = Run(copy, keep);
+    Check(copied.errors.empty() && copied.completed == 1 &&
+              Has(copied, incoming, candidate, "copied") &&
+              copied.completedRoots.size() == 1 &&
+              copied.completedRoots.front().second == candidate.string() &&
+              Read(candidate) == "incoming" && Read(existing) == "existing" &&
+              Read(occupied) == "prior",
+          "keep both preserves contents and reports the actual published path");
+    for (const auto &path : {incoming, existing, occupied, candidate})
+      fs::remove(path);
+  }
   Hooks replace;
   replace.conflict = [](const std::string &) { return Decision::Replace; };
   Job move{Action::Move, {source.string()}, out.string()};

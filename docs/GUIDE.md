@@ -118,7 +118,12 @@ in this alpha.
   that folder’s path. The shell stays open after the command finishes.
   Showing the field does not start a shell or run anything.
 - **Operations:** reopen the progress window after hiding it; pause/resume,
-  cancel and choose Replace/Skip/Abort when conflicts occur.
+  cancel and choose Replace/Skip/Abort when conflicts occur. For a local copy
+  between regular files, **Keep both** preserves the original and gives the
+  incoming file the proposed numbered name. If another program claims that name
+  first, the copy fails without replacing it. During publication the new name
+  can be visible before the copy finishes. If interrupted, consult the job
+  report and recovery inventory before using a partial copy.
 
 ### Custom workspaces
 
@@ -385,6 +390,15 @@ programs or guarantee power-loss atomicity.
 
 *Properties, captured in 0.10.0 with synthetic data; cropped to the native window.*
 
+**Listi > Add to Haiku file panel favorites…** adds the active local folder to
+the favorites in Haiku Open and Save panels. Choose another name if one is
+already taken. This does not modify Listi Places.
+
+**Files > File type and icon…** opens Haiku FileTypes for one selected local
+file or folder. Use it for that item's icon, type or preferred application,
+rather than changing the default for every file of its type. Select the
+original item, not a symbolic link.
+
 **Files > Open with...** offers installed native applications for one local
 regular file. **Open once** does not change associations. To change what Haiku uses for other files of the displayed type, select an application and choose **Set type default**. This changes the Haiku association, not just Listi, and does not open the file. A file with its own preferred application keeps that override. If the type is unknown, use **Open once** instead. Remote/archive members
 must be copied locally for that dialog; ordinary archive Edit has its own
@@ -603,3 +617,14 @@ Choose **Files → New window** (Command+Shift+N) to browse the active folder in
 From Terminal, use `/boot/system/apps/Listi --new-window [directory]`. Without a directory it opens the default location. In Preferences, the separate-window launch option controls whether launching Listi again from Tracker or Deskbar opens a browser; selecting an existing window only activates it.
 
 **Close window** (Command+W) closes that browser; **Quit Listi** (Command+Q) requests application-wide shutdown. Close a browser’s CLI sessions and finish or cancel its file operations first. Closing the last browser normally quits Listi. Additional browsers keep layout changes for the session; global preferences, Places, and saved searches are shared.
+
+### Export a file list
+
+In a Files panel (including a search list), choose **Files → Export file list…**.
+Choose selected or all visible items and review the count and first three rows.
+Both choices use the filtered order and values captured when the window opened.
+Save to a new filename; existing files are not replaced. Import the CSV as UTF-8
+with comma separators and double-quote text delimiters. Times are UTC; unknown
+values and folder sizes are empty. To prevent formula evaluation, exported text
+starting with a tab or line break, or whose first non-whitespace character is
+`=`, `+`, `-` or `@`, receives a leading apostrophe. This changes only the CSV.

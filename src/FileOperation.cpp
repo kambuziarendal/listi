@@ -280,10 +280,12 @@ struct Runner {
       h.progress(p, n);
   }
   void Attributes(const std::string &src, const std::string &dst,
-                  bool verifyMerge = false) {
-    BNode from(src.c_str()), to(dst.c_str());
+                  bool verifyMerge = false, int destinationFD = -1) {
+    BNode from(src.c_str()), to;
+    if (destinationFD < 0)
+      to.SetTo(dst.c_str());
     char name[B_ATTR_NAME_LENGTH];
-    if (from.InitCheck() != B_OK || to.InitCheck() != B_OK)
+    if (from.InitCheck() != B_OK || (destinationFD < 0 && to.InitCheck() != B_OK))
       throw std::runtime_error("Could not open copy metadata");
     status_t status;
     std::vector<char> buf(65536);
@@ -313,7 +315,9 @@ struct Runner {
               memcmp(existing.data(), buf.data(), n) != 0)
             throw std::runtime_error(dst + ": folder merge would change attribute " +
                                      name + "; source retained");
-        } else if (to.WriteAttr(name, info.type, pos, buf.data(), n) != n)
+        } else if ((destinationFD >= 0
+                        ? fs_write_attr(destinationFD, name, info.type, pos, buf.data(), n)
+                        : to.WriteAttr(name, info.type, pos, buf.data(), n)) != n)
           throw std::runtime_error(dst + ": could not preserve attribute " +
                                    name);
         pos += n;
@@ -322,9 +326,8 @@ struct Runner {
     if (status != B_ENTRY_NOT_FOUND)
       throw std::runtime_error(src + ": could not enumerate attributes");
   }
-  bool Allow(const std::string &dst) {
-    if (!Exists(dst))
-      return true;
+  bool Allow(std::string &dst, const std::string &src, const struct stat &incoming,
+             const struct stat &existing, bool &keepBoth) {
     if (guardedJob && guardedJob->action == Action::Duplicate)
       throw std::runtime_error(
           dst + ": already exists; duplicate does not overwrite");
@@ -334,7 +337,41 @@ struct Runner {
     }
     if (replaceAll)
       return true;
-    Decision d = h.conflict ? h.conflict(dst) : Decision::Abort;
+    Decision d;
+    if (h.copyConflict && !h.privateStaging && !guardedJob->copyForArchiveMove &&
+        guardedJob->action == Action::Copy && S_ISREG(incoming.st_mode) &&
+        S_ISREG(existing.st_mode)) {
+      const auto leaf = Leaf(dst);
+      const auto dot = leaf.find_last_of('.');
+      const auto split = dot == 0 || dot == std::string::npos ? leaf.size() : dot;
+      const auto prefix = Join(ParentLocation(dst), leaf.substr(0, split));
+      std::string proposed;
+      for (uint64_t number = 2;; ++number) {
+        Check();
+        proposed = prefix + " (" + std::to_string(number) + ")" + leaf.substr(split);
+        struct stat candidate;
+        if (lstat(proposed.c_str(), &candidate) != 0) {
+          if (errno != ENOENT)
+            proposed.clear();
+          break;
+        }
+      }
+      if (proposed.empty())
+        d = h.conflict ? h.conflict(dst) : Decision::Abort;
+      else
+        d = h.copyConflict({src, dst, proposed, incoming.st_size, existing.st_size,
+                            incoming.st_mtime, existing.st_mtime});
+      if (d == Decision::KeepBoth) {
+        if (proposed.empty())
+          throw std::runtime_error(dst + ": no suitable new name");
+        dst = proposed;
+        keepBoth = true;
+      }
+    } else {
+      d = h.conflict ? h.conflict(dst) : Decision::Abort;
+      if (d == Decision::KeepBoth)
+        throw std::runtime_error("Keep both is unavailable for this conflict");
+    }
     if (d == Decision::Abort)
       throw Cancelled();
     if (d == Decision::SkipAll)
@@ -515,7 +552,65 @@ struct Runner {
     if (status != B_OK)
       throw std::runtime_error(dst + ": " + strerror(status));
   }
-  bool Copy(const std::string &src, const std::string &dst,
+  struct stat PublishKeepBoth(const std::string &src, const std::string &dst,
+                              const std::string &tmp, PinnedDirectory &parentDirectory,
+                              const struct stat &staged, bool &published) {
+    const int parent = parentDirectory.Descriptor();
+    const auto leaf = Leaf(tmp);
+    // BFS does not support hard links, and BEntry::MoveTo(false) checks
+    // existence separately from rename. Claim the new leaf exclusively
+    // and never reopen it by name for writing. Keep the verified stage
+    // and publishing journal until the new inode has been flushed.
+    FD input(openat(parent, leaf.c_str(), O_RDONLY | O_NOFOLLOW));
+    struct stat opened;
+    if (input.n < 0 || fstat(input.n, &opened) || !SameEntry(opened, staged))
+      throw std::runtime_error(tmp + ": staging changed before publication");
+    if (!StagingSpaceAvailable(parent, staged.st_size))
+      Fail(dst);
+    FD final(openat(parent, Leaf(dst).c_str(), O_RDWR | O_CREAT | O_EXCL |
+                    O_NOFOLLOW | O_CLOEXEC, 0600));
+    if (final.n < 0)
+      Fail(dst);
+    published = true;
+    ++mutations;
+    Outcome(src, dst).status = "partial";
+    Outcome(src).detail = "Publication incomplete; inspect the new file and recovery stage.";
+    FD verify(dup(final.n));
+    if (verify.n < 0)
+      Fail(dst);
+    Attributes(tmp, dst, false, final.n);
+    try {
+      WriteRemovableStagingFile(std::exchange(input.n, -1),
+                                std::exchange(final.n, -1), staged,
+                                [&](size_t) {
+                                  Check();
+                                  CheckDestinationDevice(staged.st_dev);
+                                }, true);
+    } catch (const RemovableCopyInterrupted &) {
+      throw RemovableCopyInterrupted(dst + ": publication interrupted; "
+          "inspect the incomplete file and recovery stage.", ParentLocation(dst));
+    }
+    struct stat finalStat;
+    if (fstat(verify.n, &finalStat) || finalStat.st_size != staged.st_size ||
+        finalStat.st_mode != staged.st_mode ||
+        finalStat.st_mtim.tv_sec != staged.st_mtim.tv_sec ||
+        finalStat.st_mtim.tv_nsec != staged.st_mtim.tv_nsec ||
+        fstatat(parent, Leaf(dst).c_str(), &opened, AT_SYMLINK_NOFOLLOW) ||
+        !SameEntry(opened, finalStat))
+      throw std::runtime_error(dst + ": published file changed");
+    if (fstatat(parent, leaf.c_str(), &opened, AT_SYMLINK_NOFOLLOW) ||
+        !SameEntry(opened, staged))
+      throw std::runtime_error(tmp + ": staging changed during publication");
+    FlushDestination(parentDirectory, staged.st_dev);
+    Outcome(src).detail.clear();
+    if (unlinkat(parent, leaf.c_str(), 0)) {
+      ++mutations;
+      Outcome(src, dst).status = "published-recovery-pending";
+      Fail(tmp);
+    }
+    return finalStat;
+  }
+  bool Copy(const std::string &src, std::string &dst,
             unsigned depth = 0) {
     Outcome(src, dst);
     const size_t before = mutations;
@@ -538,7 +633,7 @@ struct Runner {
       throw;
     }
   }
-  bool CopyEntry(const std::string &src, const std::string &dst, unsigned depth) {
+  bool CopyEntry(const std::string &src, std::string &dst, unsigned depth) {
     Check();
     if (depth > 64)
       throw std::runtime_error("Folder tree exceeds the safe copy depth");
@@ -597,7 +692,8 @@ struct Runner {
       while (auto e = NextEntry(dir.get(), src)) {
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
           continue;
-        if (!Copy(Join(src, e->d_name), Join(dst, e->d_name), depth + 1))
+        auto childDestination = Join(dst, e->d_name);
+        if (!Copy(Join(src, e->d_name), childDestination, depth + 1))
           complete = false;
       }
       Guard();
@@ -643,8 +739,11 @@ struct Runner {
     if (existed && S_ISDIR(before.st_mode))
       throw std::runtime_error(dst +
                                ": a directory cannot be replaced by a file");
-    if (!Allow(dst))
+    bool keepBoth = false;
+    if (existed && !Allow(dst, src, st, before, keepBoth))
       return false;
+    if (keepBoth)
+      Outcome(src, dst);
     Guard();
     const auto parentPath = ParentLocation(dst);
     struct stat parentIdentity;
@@ -786,7 +885,9 @@ struct Runner {
           currentTarget.st_dev != stagingIdentity.st_dev ||
           currentTarget.st_ino != stagingIdentity.st_ino)
         throw std::runtime_error(tmp + ": staging identity changed before publication");
-      if (existed) {
+      if (keepBoth) {
+        staged = PublishKeepBoth(src, dst, tmp, parentDirectory, staged, published);
+      } else if (existed) {
         const auto target = Leaf(dst);
         if (fstatat(parent, target.c_str(), &currentTarget, AT_SYMLINK_NOFOLLOW) ||
             !SameEntry(before, currentTarget))

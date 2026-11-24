@@ -81,6 +81,7 @@ public:
     return entry ? entry->path : "";
   }
   const char *Path() const { return path.String(); }
+  const PaneModel &ExportModel() const { return entries; }
   bool CancelSelectionGesture();
   void FocusList();
   void ToggleTreeFocus();

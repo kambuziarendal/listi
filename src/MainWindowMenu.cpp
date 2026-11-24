@@ -93,6 +93,8 @@ void MainWindowMenu::AddFilesMenu() {
   archives->AddSeparatorItem();
   AddCommand(archives, "Forget archive passwords", 'apfg');
   files->AddItem(archives);
+  AddCommand(files, "Export file list…", kExportFileList);
+  AddCommand(files, "File type and icon…", kFileTypeIcon);
   AddCommand(files, "Properties...", kProperties, 'I', B_SHIFT_KEY);
   files->AddSeparatorItem();
   AddCommand(files, "Close window", B_QUIT_REQUESTED, 'W');
@@ -160,6 +162,7 @@ void MainWindowMenu::AddListiMenu() {
   AddCommand(view, "Switch panel", kSwitch, 'S');
   AddCommand(view, "Same folder in other panel", kSame, 'S', B_SHIFT_KEY);
   AddCommand(view, "Connect to server...", kNetwork, 'K');
+  AddCommand(view, "Add to Haiku file panel favorites…", kFilePanelFavorite);
   AddCommand(view, "Refresh", kRefresh, 'L');
   AddCommand(view, "Filter names", kFilter, 'F');
   AddCommand(view, "Find files...", kSearch, 'F', B_SHIFT_KEY);

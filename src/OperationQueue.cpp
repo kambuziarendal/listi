@@ -14,6 +14,7 @@
 #include <Window.h>
 #include <algorithm>
 #include <cstdio>
+#include <ctime>
 #include <cstring>
 #include <limits>
 #include <set>
@@ -35,6 +36,14 @@ uint64_t EstimateBytes(const std::vector<std::string> &sources,
   }
   return total;
 }
+std::string DescribeFile(const std::string &path, int64_t size, time_t modified) {
+  char date[64] = "unknown";
+  struct tm local;
+  if (localtime_r(&modified, &local))
+    strftime(date, sizeof(date), "%Y-%m-%d %H:%M:%S", &local);
+  return path + "  (" + std::to_string(size) + " bytes, modified " + date + ")";
+}
+
 const char *Verb(Listi::Action a) {
   switch (a) {
   case Listi::Action::CreateArchive:
@@ -104,6 +113,7 @@ class ProgressView : public BView {
     ShowNextError();
   }
   BGroupView *choices;
+  BStringView *comparison[3];
   BView *details;
   BButton *detailsButton;
   bool expanded = false;
@@ -115,6 +125,9 @@ class ProgressView : public BView {
     if (show == choicesVisible)
       return;
     choicesVisible = show;
+    if (!show)
+      for (auto line : comparison)
+        Listi::SetViewVisible(line, false);
     if (show)
       choices->Show();
     else
@@ -154,8 +167,8 @@ public:
     bar->Hide();
     choices = new BGroupView(B_HORIZONTAL, 4);
     const char *labels[] = {"Replace", "Replace all", "Skip", "Skip all",
-                            "Abort"};
-    for (int i = 0; i < 5; i++) {
+                            "Abort", "Keep both"};
+    for (int i = 0; i <= int(Listi::Decision::KeepBoth); i++) {
       auto m = new BMessage(kAnswer);
       m->AddInt32("decision", i);
       choices->AddChild(new BButton(labels[i], m));
@@ -166,7 +179,14 @@ public:
         "Stops the current and waiting jobs. Completed work is kept.");
     results = new JobResultsView(owner);
     details = new BGroupView(B_VERTICAL, 5);
+    for (auto &line : comparison) {
+      line = new BStringView("conflict-detail", "");
+      line->SetExplicitMinSize(BSize(0, B_SIZE_UNSET));
+      line->SetTruncation(B_TRUNCATE_MIDDLE);
+      line->Hide();
+    }
     BLayoutBuilder::Group<>(details, B_VERTICAL, 5)
+        .Add(comparison[0]).Add(comparison[1]).Add(comparison[2])
         .Add(choices)
         .Add(results)
         .AddGroup(B_HORIZONTAL)
@@ -298,8 +318,19 @@ public:
           m->GetInt64("operation", 0) != activeOperation)
         break;
       conflictRequest = m->GetInt64("request", -1);
+      for (int i = 0; i < 3; ++i) {
+        const char *line = nullptr;
+        bool present = m->FindString("detail", i, &line) == B_OK;
+        if (present) {
+          comparison[i]->SetText(line);
+          comparison[i]->SetToolTip(line);
+        }
+        Listi::SetViewVisible(comparison[i], present);
+      }
       for (int32 i = 0; i < choices->CountChildren(); ++i) {
         if (auto button = dynamic_cast<BButton *>(choices->ChildAt(i))) {
+          if (i == int(Listi::Decision::KeepBoth))
+            Listi::SetViewVisible(button, m->HasString("detail"));
           auto answer = new BMessage(kAnswer);
           answer->AddInt32("decision", i);
           answer->AddInt64("request", conflictRequest);
@@ -627,7 +658,7 @@ bool OperationQueue::Answer(Listi::Decision d, int64 request) {
     std::lock_guard<std::mutex> l(mutex);
     if (cancel || stopping || !awaitingAnswer || request != conflictSerial ||
         answer >= 0 || int(d) < int(Listi::Decision::Replace) ||
-        int(d) > int(Listi::Decision::Abort))
+        int(d) > int(allowKeepBoth ? Listi::Decision::KeepBoth : Listi::Decision::Abort))
       return false;
     answer = int(d);
   }
@@ -639,7 +670,7 @@ bool OperationQueue::Proceed() {
   changed.wait(l, [this] { return !paused || cancel || stopping; });
   return !cancel && !stopping;
 }
-Listi::Decision OperationQueue::Ask(const std::string &path) {
+Listi::Decision OperationQueue::Ask(const std::string &path, const Listi::CopyConflict *copy) {
   int64 request, operation;
   {
     std::lock_guard<std::mutex> l(mutex);
@@ -648,12 +679,20 @@ Listi::Decision OperationQueue::Ask(const std::string &path) {
     answer = -1;
     request = ++conflictSerial;
     operation = runningOperation;
+    allowKeepBoth = copy != nullptr;
     awaitingAnswer = true;
   }
   BMessage m(kConflict);
   m.AddInt64("operation", operation);
   m.AddInt64("request", request);
   m.AddString("path", path.c_str());
+  if (copy) {
+    m.AddString("detail", ("Incoming: " + DescribeFile(copy->source, copy->sourceSize,
+                                                       copy->sourceModified)).c_str());
+    m.AddString("detail", ("Existing: " + DescribeFile(path, copy->destinationSize,
+                                                       copy->destinationModified)).c_str());
+    m.AddString("detail", ("Keep both as: " + copy->proposed).c_str());
+  }
   Publish(m);
   std::unique_lock<std::mutex> l(mutex);
   changed.wait(l, [this] { return answer >= 0 || cancel || stopping; });
@@ -707,6 +746,10 @@ void OperationQueue::Loop() {
     Listi::Hooks hooks;
     hooks.report = std::make_shared<Listi::JobReportStore>();
     hooks.proceed = [this] { return Proceed(); };
+    if (job.action == Listi::Action::Copy && !Listi::IsVirtual(job.destination) &&
+        std::none_of(job.sources.begin(), job.sources.end(),
+                     [](const auto &path) { return Listi::IsVirtual(path); }))
+      hooks.copyConflict = [this](const auto &c) { return Ask(c.destination, &c); };
     hooks.conflict = [this](auto &p) { return Ask(p); };
     hooks.fileSize = [&](const std::string &path, uint64_t size) {
       activePath = path;
