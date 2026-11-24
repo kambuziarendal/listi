@@ -460,7 +460,10 @@ int main(int argc, char **argv) {
       assert(static_cast<BInvoker *>(restore)->Invoke() == B_OK);
       waitFor([&] { return active->Current() == Page::Files; });
       assert(active->Current() == Page::Files && !active->Files().IsHidden());
-      assert(!active->FindView("flat results") && pane->Selected() == selected);
+      assert(!active->FindView("flat results"));
+      // Transfer notifications can reload the underlying pane asynchronously.
+      waitFor([&] { return !pane->IsScanning(); });
+      assert(pane->Selected() == selected);
       if (index == 1)
         send(kSwitch);
     }

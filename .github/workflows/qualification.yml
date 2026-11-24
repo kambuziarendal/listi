@@ -75,8 +75,8 @@ jobs:
           [[ ! -f "$RUNNER_TEMP/provision-public-fixture" ]] || flags+=(--provision-public-fixture)
           runner=()
           # Keep KVM group access across both boots, even if the device is recreated.
-          if [[ -c /dev/kvm ]] && sudo -u "$(id -un)" -g kvm test -w /dev/kvm; then
-            runner=(sudo -u "$(id -un)" -g kvm)
+          if [[ -c /dev/kvm ]] && sudo -n runuser -u "$(id -un)" -g kvm -- test -w /dev/kvm; then
+            runner=(sudo -n runuser -u "$(id -un)" -g kvm --)
             flags+=(--accel kvm)
           fi
           "${runner[@]}" python3 tests/run-ephemeral-audit.py "${flags[@]}" --base "$RUNNER_TEMP/haiku.qcow2" \
