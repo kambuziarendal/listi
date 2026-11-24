@@ -78,6 +78,9 @@ class SearchWorker : public Listi::ReadWorker {
               struct stat target;
               item.AddBool("directory", S_ISDIR(st.st_mode) ||
                   (S_ISLNK(st.st_mode) && stat(hit.path.c_str(), &target) == 0 && S_ISDIR(target.st_mode)));
+            } else if (request.flat) {
+              item.AddInt64("size", hit.size);
+              item.AddInt64("date", hit.modified);
             }
             item.AddString("path", hit.path.c_str());
             item.AddInt64("device", hit.device);

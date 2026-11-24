@@ -411,8 +411,12 @@ wildcard expansion. Hidden rows are deselected; Select All and file operations
 act on visible selections. New navigation clears the filter; refreshing the same
 folder preserves it.
 
+Click a Flat View column heading (Name, Subfolder, File type, Date modified, or Size)
+to sort; click it again to reverse the order. File type groups filename extensions,
+with — for files without an extension. Equal values are ordered by full path.
+
 Choose **Flat View** in the panel’s view selector to show a recursive snapshot in the
-active file panel. The other panel stays as it was. The **Relative folder** column distinguishes
+active file panel. The other panel stays as it was. The **Subfolder** column distinguishes
 identical filenames; `.` means the starting folder itself. Filter by a literal
 name or relative-folder fragment without rescanning. Filtered-out files are
 deselected. Choose **Refresh** to rescan the same folder with the filter intact.

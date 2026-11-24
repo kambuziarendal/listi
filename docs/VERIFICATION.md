@@ -176,6 +176,11 @@ filtering and frozen Shelf selection, and stops a deliberately paused scan.
 For a manual workspace check, select files in either panel, set a panel filter,
 and choose **View > File view > Flat View**. Confirm that results appear in
 that panel without opening a window, and the opposite panel remains usable.
+In the installed app, include duplicate names in two subfolders, an extensionless
+README, mixed-case extensions and files of different dates and sizes (e.g. 2
+and 10 bytes). Click each of the five headings twice. Check both directions,
+path-based ties and the extensionless group. Select one duplicate before
+sorting, then copy its full path to confirm the selection still targets it.
 Choose the original view in the panel selector and check that its selection and filter are restored.
 
 ### BFS attribute columns

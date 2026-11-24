@@ -108,7 +108,7 @@ See [Panels and jobs][jobs] for result labels and recovery details.
 
 - **One recursive file list:** Choose **Flat View** alongside Details and Icons to show
   the active panel’s local folder tree in that panel. The other panel stays
-  available. The **Relative folder** column distinguishes files with the
+  available. The **Subfolder** column distinguishes files with the
   same name; `.` marks the starting folder. Filter by file name or relative
   folder, or stop the scan and keep its partial results. Flat View is a
   snapshot. Select a result to inspect its original. **Add to Shelf** collects references to the selected

@@ -2,6 +2,7 @@
 #include "ColumnRows.h"
 #include "AdaptiveColumnList.h"
 #include "FlatView.h"
+#include "PaneModel.h"
 #include "CopyTextMenu.h"
 #include "FileClipboard.h"
 #include "FileSearch.h"
@@ -43,13 +44,50 @@ namespace Listi {
 namespace {
 constexpr uint32 kFilterChanged = 'flfc', kCollect = 'flcl', kDeliveryCheck = 'fldc';
 
+// Let Haiku render and compare its native field types. Equal primary keys use
+// the original path rather than the order in which the worker found the files.
+template<class Field> struct FlatField : Field {
+  const std::string &path;
+  template<class Value> FlatField(const SearchHit &hit, Value value)
+      : Field(value), path(hit.path) {}
+};
+
+template<class Column, class Field> class FlatColumn : public Column {
+public:
+  using Column::Column;
+  int CompareFields(BField *left, BField *right) override {
+    const int result = Column::CompareFields(left, right);
+    if (result != 0)
+      return result;
+    const auto &a = static_cast<FlatField<Field> *>(left)->path;
+    const auto &b = static_cast<FlatField<Field> *>(right)->path;
+    return (a > b) - (a < b);
+  }
+};
+// BDateColumn narrows the subtraction of two time_t values to int.
+class ChronologicalColumn : public BDateColumn {
+public:
+  using BDateColumn::BDateColumn;
+  int CompareFields(BField *left, BField *right) override {
+    const auto a = static_cast<BDateField *>(left)->Seconds();
+    const auto b = static_cast<BDateField *>(right)->Seconds();
+    return (a > b) - (a < b);
+  }
+};
+using FlatTextColumn = FlatColumn<BStringColumn, BStringField>;
+
 class FlatRow : public BRow {
 public:
   const SearchHit &hit;
   FlatRow(const SearchHit &file, const std::string &name)
       : BRow(24), hit(file) {
-    SetField(new BStringField(name.c_str()), 0);
-    SetField(new BStringField(hit.relativeFolder.c_str()), 1);
+    SetField(new FlatField<BStringField>(hit, name.c_str()), 0);
+    SetField(new FlatField<BStringField>(hit, hit.relativeFolder.c_str()), 1);
+    const auto type = FileTypeKey(name);
+    SetField(new FlatField<BStringField>(hit, type.empty() ? "—" : type.c_str()), 2);
+    time_t modified = hit.modified;
+    SetField(new FlatField<BDateField>(hit, &modified), 3);
+    SetField(new FlatField<BSizeField>(hit, hit.size), 4);
   }
 };
 
@@ -92,10 +130,14 @@ public:
       : AdaptiveColumnList("flat results", B_WILL_DRAW | B_NAVIGABLE,
                         B_FANCY_BORDER),
         collect(action), pane(panel) {
-    AddColumn(new BStringColumn("Name", 230, 100, 1000, B_TRUNCATE_MIDDLE), 0);
+    AddColumn(new FlatTextColumn("Name", 230, 100, 1000, B_TRUNCATE_MIDDLE), 0);
     AddColumn(
-        new BStringColumn("Relative folder", 360, 120, 1600, B_TRUNCATE_MIDDLE),
+        new FlatTextColumn("Subfolder", 180, 120, 1600, B_TRUNCATE_MIDDLE),
         1);
+    AddColumn(new FlatTextColumn("File type", 95, 65, 300, B_TRUNCATE_END), 2);
+    AddColumn(new FlatColumn<ChronologicalColumn, BDateField>("Date modified", 160, 90, 320), 3);
+    AddColumn(new FlatColumn<BSizeColumn, BSizeField>("Size", 85, 50, 220), 4);
+    SetSortingEnabled(true);
     SetSelectionMode(B_MULTIPLE_SELECTION_LIST);
     SetInvocationMessage(new BMessage(kInvoke));
     ScrollView()->AddFilter(new FlatContextClick(*this, pane));
@@ -296,7 +338,7 @@ public:
     }
     auto *display = new BMenuField("flat display mode", "View:", modes);
     filter = new BTextControl("flat filter", "Filter:", "", nullptr);
-    filter->SetToolTip("Filter by file name or relative folder");
+    filter->SetToolTip("Filter by file name or subfolder");
     filter->SetModificationMessage(new BMessage(kFilterChanged));
     filter->TextView()->SetMaxBytes(B_PATH_NAME_LENGTH);
     status = Line("flat status", "");
@@ -467,7 +509,8 @@ public:
       BMessage item;
       for (int32 i = 0; message->FindMessage("hit", i, &item) == B_OK; ++i) {
         SearchHit hit{item.GetString("path", ""), item.GetInt64("device", -1),
-                      item.GetInt64("node", -1), item.GetString("folder", "")};
+                      item.GetInt64("node", -1), item.GetString("folder", ""),
+                      item.GetInt64("size", 0), item.GetInt64("date", 0)};
         std::string name = hit.path.substr(hit.path.find_last_of('/') + 1);
         auto &file = files.emplace_back(File{std::move(hit), std::move(name)});
         UpdateRow(file);

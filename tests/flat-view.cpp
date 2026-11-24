@@ -27,6 +27,7 @@
 #include <set>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <utime.h>
 #include <string>
 
 using namespace Listi;
@@ -149,6 +150,8 @@ int main() {
   mkdir(denied.c_str(), 0700);
   std::ofstream(first) << "root";
   std::ofstream(second) << "nested";
+  struct utimbuf older = {1000000000, 1000000000};
+  Check(utime(second.c_str(), &older) == 0, "nested fixture file is older");
   std::ofstream(denied + "/unreadable.txt") << "unreadable";
   symlink(root.c_str(), (nested + "/cycle").c_str());
   symlink(first.c_str(), (root + "/file-link").c_str());
@@ -180,6 +183,39 @@ int main() {
         });
       }),
       "duplicate names retain their origin; links and denied branch are not traversed");
+  // Equal names and extensions break ties by the exact path ("Kitchen" < "same.txt").
+  // The root file is smaller, but newer, than the nested file.
+  Inspect(flat, [&](BWindow &window) {
+    auto *rows = Results(window);
+    if (!rows || rows->CountRows() != 2)
+      return false;
+    for (int32 i = 0; i < 2; ++i) {
+      auto *row = rows->RowAt(i);
+      if (BString(static_cast<BStringField *>(row->GetField(1))->String()) == ".")
+        rows->AddToSelection(row);
+    }
+    return true;
+  });
+  const bool rootFirstAscending[] = {false, true, false, false, true};
+  for (int32 column = 0; column < 5; ++column) {
+    for (bool ascending : {true, false}) {
+      const bool requested = Inspect(flat, [&](BWindow &window) {
+        auto *rows = Results(window);
+        if (!rows || rows->CountColumns() != 5)
+          return false;
+        rows->SetSortColumn(rows->ColumnAt(column), false, ascending);
+        return true;
+      });
+      Check(requested && Await([&] { return Inspect(flat, [&](BWindow &window) {
+        auto *rows = Results(window);
+        if (rows->CountRows() != 2)
+          return false;
+        auto *folder = static_cast<BStringField *>(rows->RowAt(0)->GetField(1));
+        return (BString(folder->String()) == ".") == (rootFirstAscending[column] == ascending) &&
+               FlatSelectedFile(*window.FindView("flat view")) == first;
+      }); }), "Flat View heading sorts in requested direction with deterministic ties");
+    }
+  }
   Inspect(flat, [&](BWindow &window) {
     if (auto rows = Results(window)) {
       for (int32 i = 0; i < rows->CountRows(); ++i) {
