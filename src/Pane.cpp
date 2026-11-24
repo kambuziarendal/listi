@@ -1291,7 +1291,14 @@ void Pane::MessageReceived(BMessage *m) {
       entries.Sort(entries.Sorting());
     history.Complete(serial, path.String(), locationValid);
     UpdateNavigation();
-    SetDisplayMode(LocationMode());
+    const int32 finalMode = LocationMode();
+    if (mode == 0 && finalMode == mode && locationValid) {
+      // Each batch already added its rows to the details view. Keep the model
+      // sorted for navigation, without rebuilding the native row index.
+      entries.Sort(list->Sorting());
+    } else {
+      SetDisplayMode(finalMode);
+    }
     edit->SetText(LocationLabel().c_str());
     sidebar->UpdateLocation();
     const char *error;
@@ -1364,8 +1371,11 @@ void Pane::MessageReceived(BMessage *m) {
       }
       restoring.reset();
     }
-    if (refreshPending)
+    if (refreshPending) {
+      directoryRefreshTimer.reset();
+      directoryRefreshPending = false;
       Reload();
+    }
     break;
   }
   case B_NODE_MONITOR:

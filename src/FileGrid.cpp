@@ -416,7 +416,8 @@ public:
     BView::KeyDown(bytes, length);
   }
   void Pulse() override {
-    if (retrySubmission && (loader || system_time() >= nextReaderAttempt)) {
+    if (retrySubmission && pending.size() < 64 &&
+        (loader || system_time() >= nextReaderAttempt)) {
       retrySubmission = false;
       Invalidate();
     }
@@ -472,7 +473,11 @@ public:
         if (found != thumbnails.end()) {
           if (found->second)
             picture = found->second.get();
-        } else if (!pending.count(row->path) && pending.size() < 64) {
+        } else if (!pending.count(row->path) && pending.size() >= 64) {
+          // A completion may belong to a cell no longer on screen.
+          // Retry the current viewport when the queue has room again.
+          retrySubmission = true;
+        } else if (!pending.count(row->path)) {
           std::string lower = row->name.c_str();
           std::transform(lower.begin(), lower.end(), lower.begin(),
                          [](unsigned char c) { return std::tolower(c); });
