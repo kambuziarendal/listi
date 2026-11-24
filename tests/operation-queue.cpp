@@ -6,6 +6,7 @@
 #include "JobSnapshot.h"
 #include <Application.h>
 #include <Button.h>
+#include <CheckBox.h>
 #include <Window.h>
 #include <StringView.h>
 #include <StatusBar.h>
@@ -115,6 +116,12 @@ int main(){
    successful &= ids[i] > 0 && finished(ids[i], 1000 + i, true, false, false);
  check(successful && std::set<int64>(ids.begin(), ids.end()).size() == ids.size(),
        "enqueue IDs remain unique and independent of tags at completion");
+ auto *compactTitle = dynamic_cast<BStringView *>(window->FindView("operation"));
+ auto *compactPath = dynamic_cast<BStringView *>(window->FindView("current-file"));
+ auto *compactSummary = dynamic_cast<BStringView *>(window->FindView("summary"));
+ check(compactTitle && std::string(compactTitle->Text()).find("Copied item19 to ") == 0 &&
+           compactPath && compactPath->IsHidden() && compactSummary && compactSummary->IsHidden(),
+       "ordinary success is one concise line with the destination");
  window->Unlock();
  bool intact=true;for(int i=0;i<20;++i)intact&=bytes(root+"/out/item"+std::to_string(i))==std::string(32768,char('A'+i));check(intact,"all 20 destinations contain exact payloads");
 
@@ -146,6 +153,11 @@ int main(){
    clean(root);
    return 2;
  }
+ auto *repeat = dynamic_cast<BCheckBox *>(window->FindView("repeat-conflict"));
+ check(repeat && repeat->Value() == B_CONTROL_OFF &&
+           window->FindView("Replace") && window->FindView("Skip") && window->FindView("Keep both") &&
+           !window->FindView("Replace all") && !window->FindView("Skip all"),
+       "single-file conflict choices do not implicitly apply to a batch");
  BMessage oldConflict = window->conflicts.back();
  const char *incoming = nullptr, *existing = nullptr, *proposed = nullptr;
  check(oldConflict.GetInt64("request", 0) > 0 &&

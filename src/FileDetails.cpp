@@ -127,6 +127,12 @@ public:
       }
       r.left += 23;
     }
+    if (n->entry->transferState == 3) {
+      const char *failed = "Failed";
+      const float width = v->StringWidth(failed) + 8;
+      v->DrawString(failed, BPoint(r.right - width, r.top + r.Height() / 2 + prefs.font.Size() / 3));
+      r.right -= width;
+    }
     BStringColumn::DrawField(f, r, v);
     if (hoverPath == n->entry->path)
       Listi::DrawFolderHover(v, fieldRect);

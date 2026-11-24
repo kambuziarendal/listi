@@ -26,7 +26,8 @@ enum class Action {
   MoveArchive,
   BulkRename,
   ConvertImage,
-  UndoBulkRename
+  UndoBulkRename,
+  MakeFile
 };
 enum class Decision { Replace, ReplaceAll, Skip, SkipAll, Abort, KeepBoth };
 struct CopyConflict {
@@ -80,6 +81,8 @@ struct Job {
   bool copyForArchiveMove = false;
   // In-process guard for cross-window Copy, never decoded from messages.
   std::function<void()> checkDestinationWindow;
+  // For confirmed Trash restores, bind the previewed original paths as well as the entries.
+  std::map<std::string, std::string> restoreTargets;
 };
 class JobReportStore;
 struct Hooks {
@@ -96,6 +99,8 @@ struct Hooks {
   std::shared_ptr<JobReportStore> report;
   // Only for regular-file collisions in a user-facing local copy.
   std::function<Decision(const CopyConflict &)> copyConflict;
+  // Offered only by ordinary Copy, never Move or private staging.
+  std::function<bool(const std::string &, const std::string &)> confirmFatCopy;
 };
 enum class Publication { NotAttempted, Unknown, Published };
 struct UploadVerification {

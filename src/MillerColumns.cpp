@@ -168,7 +168,8 @@ public:
         left = 25;
       }
       const bool arrow = row->directory && !row->parent;
-      BString label(row->name.c_str());
+      BString label(row->transferState == 3 ? "Failed: " : "");
+      label << row->name.c_str();
       textFont.TruncateString(
           &label, B_TRUNCATE_MIDDLE,
           std::max(0.f, rect.right - left - (arrow ? 20 : 8)));

@@ -39,7 +39,7 @@ WRAPS = {
     "archive-move-faults": ['renameat'],
     "archive-editor-faults": ['rename', 'renameat', 'fsync', 'fs_stat_dev'],
     "archive-local-move-faults": ['renameat', 'unlink'],
-    "file-operation-faults": ['openat', 'write', 'unlinkat', 'stat', 'close', 'fsync', '_ZN5BNode10RemoveAttrEPKc'],
+    "file-operation-faults": ['fs_stat_dev', 'openat', 'write', 'unlinkat', 'stat', 'close', 'fsync', '_ZN5BNode10RemoveAttrEPKc'],
     "recovery-inventory": ["lstat", "access"],
     "copy-crash-recovery": ["openat", "renameat", "unlinkat", "fsync"],
     "message-store-faults": ["mkstemp", "write", "close", "fsync", "renameat"],

@@ -47,7 +47,7 @@ a network server. Unsupported actions are disabled.
 - **Selected files:** Open, applicable Open with/View/Edit, Copy/Cut, direct
   Copy/Move to the other panel, Rename, Duplicate, symbolic links, Trash or
   archive removal, archive actions and Properties as supported by the target.
-- **This folder:** Sort by, View, New folder, Paste here, Refresh, Terminal here
+- **This folder:** Sort by, View, New file (local), New folder, Paste here, Refresh, Terminal here
   and Properties where applicable.
 - **Select same file type:** replace the selection with visible ordinary files
   sharing the clicked file's case-insensitive extension. Folders and links are
@@ -129,12 +129,20 @@ in this alpha.
   that folder’s path. The shell stays open after the command finishes.
   Showing the field does not start a shell or run anything.
 - **Operations:** reopen the progress window after hiding it; pause/resume,
-  cancel and choose Replace/Skip/Abort when conflicts occur. For a local copy
+  cancel and choose Replace/Skip/Abort when conflicts occur. Replace and Skip
+  apply to just one collision unless you explicitly tick the repeat option. For a local copy
   between regular files, **Keep both** preserves the original and gives the
   incoming file the proposed numbered name. If another program claims that name
   first, the copy fails without replacing it. During publication the new name
   can be visible before the copy finishes. If interrupted, consult the job
   report and recovery inventory before using a partial copy.
+- A regular copy to FAT can ask **Copy without attributes**: the file bytes can
+  be copied, but the FAT volume cannot store the Haiku attributes on the source.
+  Consent applies only to this copy job on that volume; the original retains
+  its attributes either way. This exception never applies to Move.
+- After an ordinary successful copy the status line shows what went where.
+  **Details** retains the results. A **Failed** row marks an operation on that
+  entry, not damage to the original file.
 
 ### Custom workspaces
 

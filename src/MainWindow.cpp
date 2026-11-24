@@ -859,7 +859,7 @@ public:
     // after USB removal. Do not synchronously probe that stale mount on retry.
     const bool panelTransfer = m->what == kCopy || m->what == kMove;
     const bool writesHere = m->what == kClipboardPaste || m->what == kClipboardSaveText ||
-                           m->what == kClipboardSaveImage || m->what == kMkdir;
+                           m->what == kClipboardSaveImage || m->what == kMkdir || m->what == kNewFile;
     const Pane &destination = *panes[panelTransfer ? 1 - source : source];
     const bool needsOtherFolder = panelTransfer || m->what == kCreateLink ||
         m->what == kCreateArchive || m->what == kExtractArchive || m->what == kCompareFolders;

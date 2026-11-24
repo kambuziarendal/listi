@@ -10,6 +10,7 @@ class Pane;
 namespace Listi {
 
 class ClipboardFlow;
+class ReadWorker;
 enum class Action;
 
 // Owns the pane operation dialogs and submits the jobs frozen by those dialogs.
@@ -18,6 +19,7 @@ public:
   FileOperationFlow(InlineAction &actionArea, OperationQueue &queue,
                     ClipboardFlow &clipboard, BMessenger owner);
 
+  ~FileOperationFlow();
   void SubmitTransfer(Job job);
 
   // Completion messages submit their frozen job, never the current pane selection.
@@ -42,6 +44,8 @@ private:
   BMessenger owner;
   ArchiveActions archiveActions;
   BMessenger bulkRenameWindow;
+  ReadWorker *restoreProbe = nullptr;
+  int64 restoreRequest = 0;
 };
 
 } // namespace Listi

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "InlineAction.h"
 #include "NamedEntry.h"
+#include "AdaptiveScrollView.h"
 #include <StringView.h>
 #include "ConnectionView.h"
 #include "ExplicitSubmit.h"
@@ -75,7 +76,13 @@ bool InlineAction::Ask(const char *text, const char *button,
   explanation->SetHighUIColor(B_PANEL_TEXT_COLOR);
   explanation->SetExplicitMinSize(BSize(300, 35));
   explanation->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, 75));
-  AddChild(explanation);
+  if (accepted.HasString("preview") && accepted.HasMessage("restoreTarget")) {
+    auto *scroll = new Listi::AdaptiveScrollView("restore destinations", explanation, false);
+    scroll->SetExplicitMinSize(BSize(300, 58));
+    scroll->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, 100));
+    AddChild(scroll);
+  } else
+    AddChild(explanation);
   if (initial) {
     name = new BTextControl("Name:", initial, nullptr);
     AddChild(name);
@@ -98,7 +105,7 @@ bool InlineAction::Ask(const char *text, const char *button,
     options->ItemAt(0)->SetMarked(true);
     AddChild(new BMenuField("output format", "Format:", options));
   }
-  auto cancel = new BButton("Cancel", new BMessage(Event(kCancel)));
+  auto cancel = new BButton("Cancel", "Cancel", new BMessage(Event(kCancel)));
   auto accept = new BButton(button, new BMessage(Event(kAccept)));
   auto buttons = new BGroupView(B_HORIZONTAL, 8);
   BLayoutBuilder::Group<>(buttons, B_HORIZONTAL, 8)

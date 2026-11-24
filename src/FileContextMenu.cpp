@@ -61,6 +61,7 @@ void FolderActions(BMenu &menu, const ContextMenuOptions &options) {
   const bool local = options.folderLocal;
   const bool writable = local || options.folderArchive;
   menu.AddSeparatorItem();
+  add(menu, "New file…", kNewFile, local);
   add(menu, "New folder...", kMkdir, writable);
   add(menu, "Paste here", kClipboardPaste, writable);
   menu.AddSeparatorItem();

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "NamedEntry.h"
+#include "JobSnapshot.h"
 #include <Application.h>
 #include <Clipboard.h>
 #include <Node.h>
@@ -39,6 +40,14 @@ int main() {
   mkdir(a.c_str(),0755); mkdir(b.c_str(),0755);
   auto clipboard = be_clipboard->SystemCount();
   try {
+    Job create{Action::MakeFile, {}, b + "/new note"};
+    FreezeLocalJob(create, b);
+    Check(Run(create, {}).completed == 1 && Exists(create.destination) &&
+          Read(create.destination).empty(), "new file is empty and in the named folder");
+    Write(create.destination, "existing");
+    Check(!Run(create, {}).errors.empty() && Read(create.destination) == "existing",
+          "new file never overwrites another entry");
+    unlink(create.destination.c_str());
     const auto file = a + "/æ $' report.txt";
     Write(file,"original"); chmod(file.c_str(),0640);
     BNode node(file.c_str()); node.WriteAttr("user:note",B_STRING_TYPE,0,"retained",9);
