@@ -29,7 +29,7 @@
 namespace {
 constexpr uint32 kReady = 'arld', kGo = 'argo', kBrowse = 'arbr',
                  kFolder = 'arfo', kFormat = 'arfm', kOptions = 'arop',
-                 kShow = 'arsh', kFavorite = 'arfv', kProtect = 'aren';
+                 kPreferences = 'arpf', kShow = 'arsh', kFavorite = 'arfv', kProtect = 'aren';
 struct Loaded {
   std::mutex mutex;
   std::vector<Listi::ArchiveFormat> formats;
@@ -58,7 +58,7 @@ class ArchiveWindow : public BWindow {
   BCheckBox *ask, *favorite, *useDefault, *protect = nullptr,
                                           *encryptNames = nullptr;
   BButton *start, *change;
-  BGroupView *options;
+  BGroupView *options, *preferences;
   std::unique_ptr<BFilePanel> picker;
   std::shared_ptr<Loaded> loaded = std::make_shared<Loaded>();
   std::vector<Listi::ArchiveFormat> formats;
@@ -122,7 +122,6 @@ class ArchiveWindow : public BWindow {
     }
     extension = found->extension;
     name->SetText(text.c_str());
-    formatSummary->SetText(("Format: " + found->label).c_str());
     favorite->SetValue(Favorite(id));
     const int saved =
         std::max(0, std::min(9, settings.GetInt32(("level:" + id).c_str(), 6)));
@@ -143,6 +142,9 @@ class ArchiveWindow : public BWindow {
     if (!supported)
       protect->SetValue(B_CONTROL_OFF);
     const bool enabled = supported && protect->Value() == B_CONTROL_ON;
+    if (selected)
+      formatSummary->SetText(("Format: " + selected->label +
+                              (enabled ? " · encrypted" : "")).c_str());
     password->SetEnabled(enabled);
     confirm->SetEnabled(enabled);
     const bool names = enabled && selected->encryptedNames;
@@ -256,19 +258,21 @@ public:
       change = new BButton("Hide format options", new BMessage(kShow));
       change->SetEnabled(false);
       options = new BGroupView(B_VERTICAL, 8);
+      preferences = new BGroupView(B_VERTICAL, 4);
+      BLayoutBuilder::Group<>(preferences).Add(favorite).Add(useDefault).Add(ask);
+      preferences->Hide();
       BLayoutBuilder::Group<>(options)
           .Add(format)
           .Add(level)
-          .Add(favorite)
-          .Add(useDefault)
-          .Add(ask)
           .Add(protect)
           .Add(encryptNames)
           .Add(password)
           .Add(confirm)
           .Add(new BStringView(
               "archive password lifetime",
-              "Passwords are kept only in memory and are cleared after this window."));
+              "Passwords are kept only in memory and are cleared after this window."))
+          .Add(new BButton("Format preferences…", new BMessage(kPreferences)))
+          .Add(preferences);
       layout.AddGroup(B_HORIZONTAL, 8)
           .Add(formatSummary)
           .AddGlue()
@@ -337,7 +341,7 @@ public:
         if (std::none_of(formats.begin(), formats.end(),
                          [&](auto &f) { return f.id == def; }))
           def = formats.front().id;
-        ask->SetValue(settings.GetBool("ask", true));
+        ask->SetValue(settings.GetBool("ask", false));
         SelectFormat(def);
         change->SetEnabled(true);
         ShowOptions(ask->Value());
@@ -354,6 +358,12 @@ public:
         SelectFormat(m->GetString("format", ""));
         break;
       }
+      case kPreferences:
+        if (preferences->IsHidden(preferences))
+          preferences->Show();
+        else
+          preferences->Hide();
+        break;
       case kOptions:
         break;
       case kFavorite:

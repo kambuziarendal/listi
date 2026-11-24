@@ -482,13 +482,15 @@ int main(int argc, char **argv) {
   send(kPreviewOtherPanel);
   assert(right->Page(Page::Preview) == inspect &&
          right->Current() == Page::Preview);
-  auto *textPreview = inspect->FindView("preview scroll");
-  assert(textPreview);
-  waitFor([&] { return !textPreview->IsHidden(); });
+  auto textVisible = [&] {
+    auto *scroll = inspect->FindView("preview scroll");
+    return scroll && !scroll->IsHidden();
+  };
+  waitFor(textVisible);
   send(kSearch);
-  assert(left->Current() == Page::Search && textPreview->IsHidden());
+  assert(left->Current() == Page::Search && !textVisible());
   select(Page::Files);
-  waitFor([&] { return !textPreview->IsHidden(); });
+  waitFor(textVisible);
   BMessage focusPreview(Listi::kPanelPage);
   focusPreview.AddInt32("pane", 1);
   focusPreview.AddInt32("page", static_cast<int32>(Page::Preview));

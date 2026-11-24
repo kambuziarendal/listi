@@ -10,12 +10,13 @@
 #include <ScrollView.h>
 #include <StringItem.h>
 #include <TextControl.h>
+#include <TextView.h>
 #include <mutex>
 #include <stdexcept>
 
 namespace Listi {
 namespace {
-constexpr uint32 kAccept = 'wkac';
+constexpr uint32 kAccept = 'wkac', kPreviewSet = 'wkpr';
 std::mutex storeLock;
 
 BMessage ReadSets() {
@@ -35,6 +36,31 @@ class SetDialog : public BWindow {
   BTextControl *name = nullptr;
   BMessage saved;
 
+  BTextView *preview = nullptr;
+  void Preview() {
+    BMessage set, window;
+    std::string folders;
+    int32 count = 0;
+    if (list->CurrentSelection() >= 0 &&
+        saved.FindMessage("set", list->CurrentSelection(), &set) == B_OK) {
+      for (; set.FindMessage("window", count, &window) == B_OK; ++count) {
+        folders += "\n" + std::to_string(count + 1) + ".";
+        BMessage panel, tab;
+        for (int side = 0; window.FindMessage("panel", side, &panel) == B_OK; ++side) {
+          if (panel.FindMessage("tab", panel.GetInt32("active", 0), &tab) == B_OK) {
+            folders += side == 0 ? " " : "  |  ";
+            folders += tab.HasMessage("query") ? tab.GetString("label", "Search")
+                                            : tab.GetString("location", "Unknown folder");
+          }
+        }
+      }
+    }
+    const auto summary = count == 0 ? std::string("Select a saved working set.") :
+        "Opens " + std::to_string(count) + (count == 1 ? " new window." : " new windows.") +
+        " Your current windows stay open." + folders;
+    preview->SetText(summary.c_str());
+    preview->ScrollTo(0, 0);
+  }
   void Save() {
     std::string label(name->Text());
     auto first = label.find_first_not_of(" \t");
@@ -110,13 +136,27 @@ public:
     }
     auto *accept = new BButton(save ? "Save selected windows" : "Open windows", new BMessage(kAccept));
     accept->SetEnabled(list->CountItems() > 0);
-    group.Add(scroll).AddGroup(B_HORIZONTAL).AddGlue()
+    group.Add(scroll);
+    if (!save) {
+      preview = new BTextView("working set preview");
+      preview->MakeEditable(false);
+      auto *details = new BScrollView("saved panel folders", preview, 0, false, true);
+      details->SetExplicitMinSize(BSize(320, 70));
+      group.Add(details);
+      list->SetSelectionMessage(new BMessage(kPreviewSet));
+      Preview();
+    }
+    group.AddGroup(B_HORIZONTAL).AddGlue()
       .Add(new BButton("Cancel", new BMessage(B_QUIT_REQUESTED))).Add(accept).End();
     AddShortcut(B_ESCAPE, B_NO_COMMAND_KEY, new BMessage(B_QUIT_REQUESTED));
     CenterIn(owner.Frame());
     MoveOnScreen();
   }
   void MessageReceived(BMessage *m) override {
+    if (m->what == kPreviewSet && preview) {
+      Preview();
+      return;
+    }
     if (m->what != kAccept) {
       BWindow::MessageReceived(m);
       return;

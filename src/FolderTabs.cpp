@@ -172,7 +172,7 @@ bool FolderTabs::Change(uint32 cmd, int64 chosen) {
 void FolderTabs::SetShown(bool filesPage, bool always) {
   pageVisible = filesPage;
   pinned = always;
-  SetViewVisible(this, pageVisible && (pinned || Count() > 1));
+  SetViewVisible(this, pageVisible && (pinned || Count() > 1 || CanReopen()));
 }
 void FolderTabs::Rebuild() {
   while (auto *view = ChildAt(0)) {
@@ -201,6 +201,8 @@ void FolderTabs::Rebuild() {
   }
   if (first + 3 < tabs.size())
     add(kTabNext, "›");
+  if (CanReopen())
+    add(kTabReopen, "Reopen")->SetToolTip("Reopen the last closed tab in this pane");
   UpdateLabel();
   SetShown(pageVisible, pinned);
 }

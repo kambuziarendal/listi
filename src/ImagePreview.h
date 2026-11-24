@@ -41,6 +41,7 @@ private:
   void UpdateControls();
   void RemoveEditor();
   void LayoutControls();
+  void SetTextVisible(bool visible);
   BRect PhotoArea() const;
   void PhotoMenu();
   void ZoomPhoto(double factor, BPoint anchor);

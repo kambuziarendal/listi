@@ -118,8 +118,8 @@ void WorkspaceLayout::Archive(BMessage &m) const {
   m.AddInt32("workspace", static_cast<int32>(workspace));
   m.AddInt32("singlePane", singlePane);
   // Old versions have no column mode; use Details rather than a thumbnail alias.
-  m.AddInt32("leftMode", PaneMode(0) == MillerMode ? 0 : PaneMode(0));
-  m.AddInt32("rightMode", PaneMode(1) == MillerMode ? 0 : PaneMode(1));
+  m.AddInt32("leftMode", PaneMode(0) >= MillerMode ? 0 : PaneMode(0));
+  m.AddInt32("rightMode", PaneMode(1) >= MillerMode ? 0 : PaneMode(1));
   for (auto w : {Workspace::tviskipt, Workspace::einn, Workspace::askr,
                  Workspace::smidja}) {
     BMessage view;

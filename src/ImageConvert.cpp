@@ -3,6 +3,9 @@
 #include "LeafName.h"
 
 #include <DataIO.h>
+#include <Bitmap.h>
+#include <ByteOrder.h>
+#include <cmath>
 #include <Message.h>
 #include <MimeType.h>
 #include <TranslatorFormats.h>
@@ -165,6 +168,52 @@ translator_info Decode(BTranslatorRoster &roster, ConversionIO &input,
   if (!bitmap.Length())
     throw std::runtime_error("The image translator produced no bitmap.");
   return format;
+}
+
+// Convert only alpha-bearing translator bitmaps. Stream one scanline at a time
+// into a private scratch file; the user's original is never opened for writing.
+bool WhiteMatteForJPEG(ConversionIO &source, ConversionIO &matte, const Hooks &hooks) {
+  TranslatorBitmap header;
+  if (source.ReadAt(0, &header, sizeof(header)) != sizeof(header))
+    throw std::runtime_error("Incomplete decoded bitmap.");
+  const auto space = color_space(B_BENDIAN_TO_HOST_INT32(header.colors));
+  if (space != B_RGBA32 && space != B_RGBA32_BIG && space != B_CMAP8 &&
+      space != B_RGBA15 && space != B_RGBA15_BIG && space != B_RGBA64 &&
+      space != B_RGBA64_BIG)
+    return false;
+  const double width = double(B_BENDIAN_TO_HOST_FLOAT(header.bounds.right)) -
+                       B_BENDIAN_TO_HOST_FLOAT(header.bounds.left) + 1;
+  const double height = double(B_BENDIAN_TO_HOST_FLOAT(header.bounds.bottom)) -
+                        B_BENDIAN_TO_HOST_FLOAT(header.bounds.top) + 1;
+  const uint32 stride = B_BENDIAN_TO_HOST_INT32(header.rowBytes);
+  if (!(width >= 1 && height >= 1 && width == std::floor(width) &&
+        height == std::floor(height) && width * height * 4 <= kLimit - sizeof(header)) ||
+      stride == 0 || sizeof(header) + height * stride > source.Length())
+    throw std::runtime_error("Invalid or oversized decoded image.");
+  BBitmap row(BRect(0, 0, width - 1, 0), B_RGBA32);
+  Require(row.InitCheck(), "Could not allocate a conversion row");
+  std::vector<uint8> data(stride);
+  header.colors = color_space(B_HOST_TO_BENDIAN_INT32(B_RGB32));
+  header.rowBytes = B_HOST_TO_BENDIAN_INT32(row.BytesPerRow());
+  header.dataSize = B_HOST_TO_BENDIAN_INT32(uint32(height) * row.BytesPerRow());
+  if (matte.Write(&header, sizeof(header)) != sizeof(header))
+    throw std::runtime_error("Could not stage JPEG background.");
+  for (int32 y = 0; y < int32(height); ++y) {
+    Check(hooks);
+    if (source.ReadAt(sizeof(header) + off_t(y) * stride, data.data(), stride) != stride)
+      throw std::runtime_error("Could not read the decoded image row.");
+    Require(row.ImportBits(data.data(), stride, stride, 0, space),
+            "Could not convert transparent pixels");
+    auto *pixel = static_cast<uint8 *>(row.Bits());
+    for (int32 x = 0; x < int32(width); ++x, pixel += 4) {
+      for (int channel = 0; channel < 3; ++channel)
+        pixel[channel] = 255 - ((255 - pixel[channel]) * pixel[3] + 127) / 255;
+      pixel[3] = 255;
+    }
+    if (matte.Write(row.Bits(), row.BytesPerRow()) != row.BytesPerRow())
+      throw std::runtime_error("Could not stage JPEG pixels.");
+  }
+  return true;
 }
 
 bool ValidExtension(const std::string &extension) {
@@ -408,8 +457,17 @@ Result RunImageConversion(const Job &job, const Hooks &hooks) {
         });
     if (choice == choices.end())
       throw std::runtime_error("The chosen image output is no longer available.");
-    Require(bitmap.Seek(0, SEEK_SET), "Could not rewind the decoded image");
-    auto status = roster.Translate(choice->translator, &bitmap, nullptr,
+    std::unique_ptr<TempFile> matteFile;
+    std::unique_ptr<ConversionIO> matte;
+    ConversionIO *pixels = &bitmap;
+    if (job.imageMime == "image/jpeg") {
+      matteFile = std::make_unique<TempFile>();
+      matte = std::make_unique<ConversionIO>(matteFile->Descriptor(), hooks, 0, true);
+      if (WhiteMatteForJPEG(bitmap, *matte, hooks))
+        pixels = matte.get();
+    }
+    Require(pixels->Seek(0, SEEK_SET), "Could not rewind the decoded image");
+    auto status = roster.Translate(choice->translator, pixels, nullptr,
                                    &encoded, choice->output.type);
     Check(hooks);
     Require(status, "Could not encode the selected image format");

@@ -7,6 +7,7 @@
 #include "MainWindow.h"
 #include "WindowOverview.h"
 #include "FolderTabs.h"
+#include <Screen.h>
 #include "WorkingSets.h"
 #include <atomic>
 #include <MenuItem.h>
@@ -85,6 +86,8 @@ class MainWindow : public Listi::WorkingWindow {
   std::string titleLocation;
   std::array<std::string, 2> tabLocations, probedFolders;
   bool sessionLayout = false;
+  std::optional<bool> wasEinn;
+  BRect wideFrame, einnFrame;
   BrowserOpener openBrowser;
   Preferences prefs;
   BMessenger service;
@@ -194,11 +197,28 @@ class MainWindow : public Listi::WorkingWindow {
     toolbar.SetTransferTarget(source, available, folder ? target.Path() : nullptr);
   }
   void ApplyWorkspace() {
+    const bool einn = prefs.workspace == Workspace::einn;
+    const bool switchSize = !wasEinn || *wasEinn != einn;
+    if (wasEinn && switchSize)
+      (*wasEinn ? einnFrame : wideFrame) = Frame();
     for (int side = 0; side < 2; ++side)
       split->Panel(side).ShowFolderTabs(prefs.alwaysFolderTabs);
     toolbar.Arrange();
     split->ApplyWorkspace();
     queue.SetCompact(prefs.SinglePane());
+    if (switchSize) {
+      const auto saved = einn ? einnFrame : wideFrame;
+      if (saved.IsValid()) {
+        ResizeTo(saved.Width(), saved.Height());
+        MoveTo(saved.LeftTop());
+      } else {
+        const auto screen = BScreen(this).Frame();
+        ResizeTo(std::min(einn ? 540.f : 1140.f, screen.Width() - 32),
+                 std::min(einn ? 320.f : 650.f, screen.Height() - 56));
+      }
+      MoveOnScreen();
+      wasEinn = einn;
+    }
     UpdateTransferTarget();
     // Fit the buttons after the rest of the workspace has its final geometry.
     toolbar.ApplyVisibility(actionArea->Pending());
@@ -522,7 +542,6 @@ public:
     Apply();
     PublishPlaces();
     split->Focus();
-    ResizeTo(1140, 650);
     ++browserCount;
     if (request.workingSet) {
       const auto &savedWindow = *request.workingSet;
@@ -542,8 +561,10 @@ public:
         MoveOnScreen();
       }
     }
-    if (request.position)
+    if (request.position) {
       MoveTo(*request.position);
+      MoveOnScreen();
+    }
     if (request.detached)
       split->Panel(0).FolderBar().Adopt(std::move(*request.detached));
     else if (!request.path.empty())

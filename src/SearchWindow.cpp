@@ -32,6 +32,7 @@ constexpr uint32 kStart = 'ssrt', kStop = 'sstp', kHit = 'shit',
                  kClearFilters = 'sclr', kDeliveryCheck = 'sdck',
                  kSection = 'ssec', kOrder = 'sord';
 class SearchView : public BGroupView {
+  bool embedded;
   BPopUpMenu *sectionMenu = nullptr, *orderMenu;
   BGroupView *sections[3]{};
   int32 section = 0;
@@ -200,9 +201,9 @@ public:
   SearchView(BMessenger target, int32 which, const char *path,
              const BMessage &store, bool compact)
       : BGroupView("file search", B_VERTICAL, compact ? 4 : 8),
-        owner(target), pane(which),
+        embedded(compact), owner(target), pane(which),
         generation(std::make_shared<std::atomic<int64>>(0)) {
-    root = new BTextControl("search scope", "Folder:", path, nullptr);
+    root = new BTextControl("search scope", "Folder (including subfolders):", path, nullptr);
     expression =
         new BTextControl("search expression", "Name contains:", "", nullptr);
     root->TextView()->SetMaxBytes(B_PATH_NAME_LENGTH - 1);
@@ -270,59 +271,14 @@ public:
     name->SetModificationMessage(new BMessage(kName));
     save = new BButton("save search", "Save", new BMessage(kSave));
     forget = new BButton("forget search", "Forget", new BMessage(kForget));
-    if (compact)
-      BuildCompactLayout(orderField);
-    else {
-      BLayoutBuilder::Group<>(this, B_VERTICAL, 8)
-          .SetInsets(10)
-          .AddGroup(B_HORIZONTAL, 8)
-          .Add(savedField)
-          .Add(name)
-          .Add(save)
-          .Add(forget)
-          .End()
-          .Add(root)
-          .Add(expression)
-          .Add(Line(
-              "file filters hint",
-              "Optional file filters (regular files only): sizes in B / KiB / MiB / GiB; dates YYYY-MM-DD, local time."))
-          .AddGroup(B_HORIZONTAL, 8)
-          .Add(extension)
-          .Add(minimum)
-          .Add(maximum)
-          .End()
-          .AddGroup(B_HORIZONTAL, 8)
-          .Add(fromDate)
-          .Add(throughDate)
-          .Add(createdDate)
-          .Add(clearFilters)
-          .End()
-          .AddGroup(B_HORIZONTAL, 8)
-          .Add(predicate)
-          .Add(trash)
-          .Add(live)
-          .Add(orderField)
-          .AddGlue()
-          .Add(start)
-          .Add(stop)
-          .End()
-          .Add(hint)
-          .Add(scope)
-          .Add(results)
-          .Add(selected)
-          .AddGroup(B_HORIZONTAL, 8)
-          .Add(status)
-          .Add(openList)
-        .Add(show)
-          .End();
-    }
+    BuildSections(orderField);
     Store(store);
     Busy(false);
     show->SetEnabled(false);
     results->UpdateColors();
   }
 
-  void BuildCompactLayout(BMenuField *orderField) {
+  void BuildSections(BMenuField *orderField) {
     // Keep the everyday name search short. Criteria and saved searches use
     // the same controls and worker as the standalone form, on demand.
     sectionMenu = new BPopUpMenu("search section");
@@ -480,7 +436,7 @@ public:
         break;
       BMessage edit(kSearchEdit);
       // The owner addresses embedded searches by view, standalone by window.
-      edit.AddMessenger("searchEditor", sectionMenu ? BMessenger(this)
+      edit.AddMessenger("searchEditor", embedded ? BMessenger(this)
                                                   : BMessenger(Window()));
       edit.AddInt64("revision", storeRevision);
       edit.AddBool("remove", m->what == kForget);

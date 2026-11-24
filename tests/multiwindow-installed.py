@@ -84,7 +84,7 @@ def run(root, cleanup):
     paths(first, first, first)
     hey("set", "SourcePath", "of", "Window", index(first), "to", second)
     paths(first, first, second)
-    menu(index(second), "Detach to Einn window", "Folder tabs", "Window")
+    menu(index(second), "Detach tab to Einn window", "Window")
     paths(first, first, second, "/boot/home")
     menu(index("/boot/home"), "Close window")
     paths(first, first, second)
