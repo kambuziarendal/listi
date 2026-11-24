@@ -205,7 +205,7 @@ private:
     }
     operation = std::make_shared<Operation>();
     ++activeOperations;
-    status->SetToolTip(nullptr);
+    status->SetToolTip(static_cast<const char *>(nullptr));
     status->SetText(action == kSave ? "Creating history point…" :
         action == kRestore ? "Restoring copy…" : "Reading history…");
     UpdateControls();
