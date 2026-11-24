@@ -4,6 +4,7 @@
 #include <Messenger.h>
 #include <String.h>
 
+constexpr uint32 kReadHistoryConfig = 'fhcf';
 constexpr uint32 kImageDropProbe = 'dimg', kImageDropOutputs = 'dfmt';
 constexpr uint32 kServiceError = 'serr', kSavePreferences = 'save', kDrainServices = 'svdr';
 

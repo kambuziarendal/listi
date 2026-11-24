@@ -37,6 +37,7 @@ class App : public BApplication {
   std::mutex requestLock;
   std::vector<BrowserRequest> requests;
   bool ready = false;
+  std::vector<std::string> initialHistory;
 
   void Broadcast(BMessage *message) {
     for (auto &entry : browsers)
@@ -157,6 +158,9 @@ public:
     Drain();
     if (browsers.empty())
       Open({});
+    for (const auto &path : initialHistory)
+      Listi::OpenFolderHistory(path.c_str());
+    initialHistory.clear();
     auto &firstWindow = browsers.begin()->second;
     if (settingsError.empty() && settings.what == 'none') {
       BMessage guide(Listi::kShowLayoutGuide);
@@ -214,6 +218,14 @@ public:
            ArchiveEditorsAllowQuit() && BApplication::QuitRequested();
   }
   void MessageReceived(BMessage *m) override {
+    if (m->what == Listi::kFolderHistory) {
+      const auto *path = m->GetString("source", "");
+      if (*path == '/') {
+        if (ready) Listi::OpenFolderHistory(path);
+        else initialHistory.emplace_back(path);
+      }
+      return;
+    }
     if (m->what == kNewBrowser) {
       if (ready)
         Drain();

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "AutomaticHistory.h"
+#include "Common.h"
 #include "FolderHistory.h"
 #include "HistorySettings.h"
 #include "MessageStore.h"
@@ -15,6 +16,7 @@
 #include <LayoutBuilder.h>
 #include <MessageRunner.h>
 #include <Path.h>
+#include <Roster.h>
 #include <StringView.h>
 #include <TextControl.h>
 #include <Window.h>
@@ -31,7 +33,7 @@ namespace fs = std::filesystem;
 constexpr uint32 kEnable = 'aHen', kDisable = 'aHds', kRun = 'aHrn',
     kTick = 'aHtk', kFinished = 'aHfn', kState = 'aHst', kClosed = 'aHcl',
     kShow = 'aHsw', kHelp = 'aHhp',
-    kPick = 'aHpk', kPicked = 'aHpd';
+    kPick = 'aHpk', kPicked = 'aHpd', kVersions = 'aHvr', kEdited = 'aHed';
 constexpr bigtime_t kSecond = 1000000;
 constexpr bigtime_t kFirstDelay = 60 * kSecond, kInterval = 3600 * kSecond;
 
@@ -85,6 +87,21 @@ public:
     case kShow:
       Activate();
       break;
+    case kEdited:
+      UpdateVersions();
+      break;
+    case kVersions: {
+      const int32 i = message->GetInt32("pair", -1);
+      if (i < 0 || size_t(i) >= approved.size() || !MatchesApproved(i)) break;
+      BMessage request(kFolderHistory);
+      request.AddString("source", approved[i].GetString("path", 0, ""));
+      BMessenger listi(kSignature);
+      const status_t result = listi.IsValid() ? listi.SendMessage(&request) :
+          be_roster->Launch(kSignature, &request);
+      if (result != B_OK && result != B_ALREADY_RUNNING)
+        status->SetText("Could not open Listi to show saved versions.");
+      break;
+    }
     case kPick: {
       auto field = message->GetInt32("field", -1);
       if (field < 0 || size_t(field) >= browse.size() || !browse[field]->IsEnabled()) break;
@@ -108,6 +125,7 @@ public:
           message->FindRef("refs", &ref) == B_OK &&
           BEntry(&ref, true).GetPath(&path) == B_OK)
         Field(field)->SetText(path.Path());
+      UpdateVersions();
       break;
     }
     case kEnable: {
@@ -128,7 +146,7 @@ public:
           "history folder. Leave unused pairs blank.\n\n"
           "2. Click Enable. The clock icon in Deskbar opens these settings. Listi can be closed. "
           "The helper starts after one minute and checks about once per hour. Run now is optional.\n\n"
-          "3. In the source folder, click History to browse saved dates. Right-click the folder "
+          "3. Click Versions here or History in the source folder to browse saved dates. Right-click the folder "
           "background for a preview beside your files. In the history window, restore one file or the folder as a new copy. Disable stops future saves without deleting versions.\n\n"
           "Only changed trees get points. Automatic saves stop at the configured safety limits "
           "(including 24 points or about 512 MiB per history folder). Nothing is removed "
@@ -145,27 +163,49 @@ private:
     auto *pick = new BMessage(kPick);
     pick->AddInt32("field", field);
     browse[field] = new BButton("choose", "Choose…", pick);
-    layout.AddGroup(B_HORIZONTAL).Add(control).Add(browse[field]).End();
+    control->SetModificationMessage(new BMessage(kEdited));
+    auto row = layout.AddGroup(B_HORIZONTAL);
+    row.Add(control).Add(browse[field]);
+    if (field % 2 == 0) {
+      auto index = field / 2;
+      auto *open = new BMessage(kVersions);
+      open->AddInt32("pair", index);
+      versions[index] = new BButton("versions", "Versions…", open);
+      row.Add(versions[index]);
+    }
+    row.End();
   }
 
   BTextControl *Field(int32 field) {
     return field % 2 == 0 ? sources[field / 2] : stores[field / 2];
   }
 
+  bool MatchesApproved(size_t i) const {
+    return i < approved.size() &&
+        strcmp(sources[i]->Text(), approved[i].GetString("path", 0, "")) == 0 &&
+        strcmp(stores[i]->Text(), approved[i].GetString("path", 1, "")) == 0;
+  }
+
+  void UpdateVersions() {
+    for (size_t i = 0; i < versions.size(); ++i)
+      versions[i]->SetEnabled(MatchesApproved(i));
+  }
+
   void SetState(const BMessage &state, bool loadPaths) {
     const bool enabled = state.GetBool("enabled", false);
     const bool working = state.GetBool("working", false);
+    approved = HistoryPairs(state);
     if (loadPaths) {
-      auto pairs = HistoryPairs(state);
-      for (size_t i = 0; i < pairs.size(); ++i) {
-        sources[i]->SetText(pairs[i].GetString("path", 0, ""));
-        stores[i]->SetText(pairs[i].GetString("path", 1, ""));
+      for (size_t i = 0; i < approved.size(); ++i) {
+        sources[i]->SetText(approved[i].GetString("path", 0, ""));
+        stores[i]->SetText(approved[i].GetString("path", 1, ""));
       }
     }
     for (size_t i = 0; i < kHistoryPairLimit; ++i) {
       sources[i]->SetEnabled(!enabled && !working);
       stores[i]->SetEnabled(!enabled && !working);
     }
+    UpdateVersions();
     for (auto *button : browse) button->SetEnabled(!enabled && !working);
     enable->SetEnabled(!enabled && !working);
     disable->SetEnabled(enabled);
@@ -176,6 +216,8 @@ private:
   }
 
   std::array<BTextControl *, kHistoryPairLimit> sources{}, stores{};
+  std::array<BButton *, kHistoryPairLimit> versions{};
+  std::vector<BMessage> approved;
   const int64 id;
   std::array<BButton *, kHistoryPairLimit * 2> browse{};
   std::unique_ptr<BFilePanel> picker;

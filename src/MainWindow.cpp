@@ -14,7 +14,6 @@
 #include "FolderHistory.h"
 #include "AutomaticHistory.h"
 #include "HistorySettings.h"
-#include <thread>
 #include "FileListExportWindow.h"
 #include "RecoveryReviewWindow.h"
 #include "FlatView.h"
@@ -80,7 +79,6 @@ namespace {
 std::atomic<int> browserCount{0};
 class MainWindow : public Listi::WorkingWindow {
   BMessenger overview, guide;
-  static constexpr uint32 kHistoryConfigRead = 'fhcf';
   std::vector<BMessage> historyPairs;
   bool readingConfig = false, refreshConfig = false, automaticEnabled = false;
   std::string titleLocation;
@@ -575,20 +573,9 @@ public:
   }
   void ReadHistoryConfig() {
     if (readingConfig) { refreshConfig = true; return; }
-    readingConfig = true;
-    try {
-      std::thread([target = BMessenger(this)] {
-        BMessage result(kHistoryConfigRead);
-        try {
-          const auto config = Listi::ReadHistorySettings();
-          for (const auto &pair : Listi::HistoryPairs(config)) result.AddMessage("pair", &pair);
-          result.AddBool("enabled", config.GetBool("enabled", false));
-        } catch (const std::exception &) {
-          // Show no affordance on unreadable settings. Opening history explicitly reports the error.
-        }
-        target.SendMessage(&result);
-      }).detach();
-    } catch (const std::exception &) { readingConfig = false; }
+    BMessage query(kReadHistoryConfig);
+    query.AddMessenger("replyTo", BMessenger(this));
+    readingConfig = service.SendMessage(&query, (BHandler *)nullptr, 0) == B_OK;
   }
   void WindowActivated(bool active) override {
     BWindow::WindowActivated(active);
@@ -659,7 +646,7 @@ public:
     return true;
   }
   void MessageReceived(BMessage *m) override {
-    if (m->what == kHistoryConfigRead) {
+    if (m->what == kReadHistoryConfig) {
       readingConfig = false;
       historyPairs = Listi::HistoryPairs(*m);
       automaticEnabled = m->GetBool("enabled", false);

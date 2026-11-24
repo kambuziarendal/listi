@@ -700,7 +700,8 @@ reopen it to explicitly connect again.
    status tray. Click it for settings and the latest check result. The
    helper runs at low priority even when Listi is closed, starts after
    roughly one minute, and checks about hourly while Haiku is running.
-   **Run now** requests a check immediately.
+   **Run now** requests a check immediately. Click **Versions…** beside a
+   configured source to open its saved versions directly, even if Listi was closed.
 4. Open the configured source folder and click **History…** beside the pane
    status. No reconnection is needed after restarting Listi or Haiku. Or
    right-click the folder background and choose **Folder history → Preview in
