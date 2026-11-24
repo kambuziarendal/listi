@@ -128,7 +128,13 @@ public:
     int batchLimit = (icons || m->GetBool("firstScreen", false)) ? 8 : 80;
     bool deliveryFailed = false;
     auto send = [&]() {
+      if (delivery && !delivery->ReserveBatch(*generation, serial)) {
+        deliveryFailed = true;
+        return;
+      }
       if (!Send(batch, serial)) {
+        if (delivery)
+          delivery->ReleaseBatch();
         deliveryFailed = true;
         return;
       }

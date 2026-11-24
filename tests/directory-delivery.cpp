@@ -83,6 +83,16 @@ public:
     else BLooper::MessageReceived(m);
   }
 };
+class PacedReceiver : public Receiver {
+public:
+  sem_id batch = create_sem(0, "pane handled a row batch");
+  ~PacedReceiver() { delete_sem(batch); }
+  void MessageReceived(BMessage *message) override {
+    Receiver::MessageReceived(message);
+    if (message->what == kRows)
+      release_sem(batch);
+  }
+};
 void clean(const std::string &p){BDirectory d(p.c_str());BEntry e;while(d.GetNextEntry(&e,false)==B_OK){struct stat s;e.GetStat(&s);if(S_ISDIR(s.st_mode)){BPath path;e.GetPath(&path);clean(path.Path());}e.Remove();}rmdir(p.c_str());}
 int main() {
  BApplication app("application/x-vnd.Listi-DirectoryDeliveryTest");
@@ -113,6 +123,44 @@ int main() {
   status=acquire_sem_etc(receiver->done,1,B_RELATIVE_TIMEOUT,10000000);
   receiver->Lock();check(status==B_OK&&receiver->error.empty()&&receiver->count==160&&receiver->names.size()==160,label+" next scan recovers");receiver->Unlock();
   generation->store(4);if(scan->Lock())scan->Quit();if(receiver->Lock())receiver->Quit();
+ }
+ // A successful port send is not a UI receipt. Keep only one batch in flight
+ // for this fixture; retiring an unacknowledged scan must not join the pane.
+ {
+   auto *receiver = new PacedReceiver;
+   receiver->Run();
+   auto epoch = std::make_shared<std::atomic<int64>>(1);
+   auto delivery = std::make_shared<DirectoryScanDelivery>(1);
+   auto *reader = CreateDirectoryScanner(BMessenger(receiver), epoch, delivery);
+   reader->Run();
+   BMessage request(kScan);
+   request.AddString("path", folder.c_str());
+   request.AddBool("icons", false);
+   request.AddInt64("serial", 1);
+   reader->PostMessage(&request);
+   auto receive = [&] {
+     return acquire_sem_etc(receiver->batch, 1, B_RELATIVE_TIMEOUT, 2000000) == B_OK;
+   };
+   check(receive(), "paced scan delivers its first batch immediately");
+   check(acquire_sem_etc(receiver->batch, 1, B_RELATIVE_TIMEOUT, 150000) == B_TIMED_OUT,
+         "next batch waits for a pane receipt");
+   delivery->ReleaseBatch();
+   check(receive(), "pane receipt releases the next batch");
+   delivery->ReleaseBatch();
+   check(receive(), "final partial batch is delivered");
+   delivery->ReleaseBatch();
+   check(acquire_sem_etc(receiver->done, 1, B_RELATIVE_TIMEOUT, 2000000) == B_OK &&
+         receiver->count == 160 && receiver->names.size() == 160,
+         "paced scan retains every row and completion");
+   request.ReplaceInt64("serial", 2);
+   epoch->store(2);
+   reader->PostMessage(&request);
+   check(receive(), "second paced scan starts");
+   epoch->store(3);
+   const bool cancelled = reader->LockWithTimeout(2000000) == B_OK;
+   check(cancelled, "obsolete paced scan exits without a UI receipt");
+   if (cancelled) reader->Quit();
+   if (receiver->Lock()) receiver->Quit();
  }
  // Exercise the actual pane's out-of-band completion recovery, not just the
  // producer. All view changes are made under the owning window lock.

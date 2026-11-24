@@ -226,7 +226,7 @@ void Pane::AttachedToWindow() {
   Navigate(path);
 }
 void Pane::StartDirectoryReader() {
-  scanDelivery = std::make_shared<DirectoryScanDelivery>();
+  scanDelivery = std::make_shared<DirectoryScanDelivery>(4);
   if (!directoryWatch)
     directoryWatch = std::make_shared<DirectoryWatch>();
   scanner = CreateDirectoryScanner(BMessenger(this), generation, scanDelivery, directoryWatch);
@@ -1230,6 +1230,7 @@ void Pane::MessageReceived(BMessage *m) {
   case kRows: {
     if (!scanning || m->GetInt64("serial", -1) != serial)
       break;
+    scanDelivery->ReleaseBatch();
     BMessage e;
     const size_t first = entries.Visible().size();
     for (int i = 0; m->FindMessage("entry", i, &e) == B_OK; i++) {

@@ -6,13 +6,45 @@
 #include <mutex>
 #include <optional>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <memory>
 // Out-of-band terminal failure: even a failed completion message must release
 // the pane from its reading state. The owning pane polls this while scanning.
 inline constexpr uint32 kReadVisibleIcon = 'rvic';
 inline constexpr uint32 kVisibleIconReady = 'ivir';
 struct DirectoryScanDelivery {
+  explicit DirectoryScanDelivery(int maxPending = 0) : limit(maxPending) {}
   std::atomic<int64> failedSerial{0};
+
+  // The window port can empty into a much larger looper queue. Limit rows
+  // waiting on the pane itself so user input need not wait behind a full scan.
+  bool ReserveBatch(const std::atomic<int64> &generation, int64 serial) {
+    if (!limit)
+      return true;
+    std::unique_lock<std::mutex> guard(lock);
+    while (pending >= limit && generation.load() == serial)
+      room.wait_for(guard, std::chrono::milliseconds(50));
+    if (generation.load() != serial)
+      return false;
+    ++pending;
+    return true;
+  }
+  void ReleaseBatch() {
+    if (!limit)
+      return;
+    std::lock_guard<std::mutex> guard(lock);
+    if (pending > 0) {
+      --pending;
+      room.notify_one();
+    }
+  }
+
+private:
+  const int limit;
+  std::mutex lock;
+  std::condition_variable room;
+  int pending = 0;
 };
 // The pane and its retired scanner may briefly coexist. Register against the
 // opened directory, but never install a stale reader's watch after navigation.
