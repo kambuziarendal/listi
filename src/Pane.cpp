@@ -226,7 +226,9 @@ void Pane::AttachedToWindow() {
   Navigate(path);
 }
 void Pane::StartDirectoryReader() {
-  scanDelivery = std::make_shared<DirectoryScanDelivery>(4);
+  // About 2,560 ordinary rows: enough for fast grid scans to batch paints
+  // without letting a large Details scan fill the UI queue for seconds.
+  scanDelivery = std::make_shared<DirectoryScanDelivery>(32);
   if (!directoryWatch)
     directoryWatch = std::make_shared<DirectoryWatch>();
   scanner = CreateDirectoryScanner(BMessenger(this), generation, scanDelivery, directoryWatch);
