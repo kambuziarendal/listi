@@ -125,6 +125,9 @@ RecoveryRecord::RecoveryRecord(const std::string &kind, const std::string &folde
     stage += ".part";
     Field(message->AddString("backup", backup.c_str()));
   } else {
+    // Haiku FAT rejects a leading-dot filename without an extension.
+    if (kind == "copy")
+      stage += ".tmp";
     IdentifyParent(*message, stage);
   }
   Field(message->AddString("kind", kind.c_str()));
