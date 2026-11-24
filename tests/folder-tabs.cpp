@@ -154,7 +154,10 @@ int main() {
   Command(*detached, kTabDuplicate);
   Ready(*detached);
   Check(moved.FolderBar().Count() == 2, "surviving Einn window still accepts tab operations");
-  moved.Files().OpenSearchList({"Saved search", {b.string(), "two", false}, false});
+  BMessage openSearch(kOpenSearchList);
+  SavedSearch search{"Saved search", {b.string(), "two", false}, false};
+  search.WriteTo(openSearch);
+  moved.Files().MessageReceived(&openSearch);
   Ready(*detached);
   Check(moved.Files().IsSearchList(), "working-set fixture opens a search");
   detached->Unlock();
