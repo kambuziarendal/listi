@@ -13,6 +13,7 @@
 #include <fcntl.h>
 #include <fs_attr.h>
 #include <sys/stat.h>
+#include <sys/file.h>
 namespace fs=std::filesystem;
 using Listi::HistoryStore;
 namespace {
@@ -156,4 +157,48 @@ int main() {
   assert(count()==5);
   history.Restore(first,base/"after",cancel);
   std::cout << "PASS prior points available after cancellation, errors and replacement" << std::endl;
+
+  const auto approved = history.FolderIdentity();
+  assert(!history.SaveAutomatically(cancel, approved) && count() == 5);
+  make(source/"future", "later");
+  assert(history.SaveAutomatically(cancel, approved) && count() == 6);
+  assert(!history.SaveAutomatically(cancel, approved) && count() == 6);
+  history.Restore(latest(), base/"automatic", cancel);
+  assert(fs::exists(base/"automatic/future"));
+  std::cout << "PASS automatic saves only changed trees and uses the manual restore format" << std::endl;
+
+  int otherWriter = open(store.c_str(), O_RDONLY | O_DIRECTORY);
+  assert(otherWriter >= 0 && flock(otherWriter, LOCK_EX | LOCK_NB) == 0);
+  reject([&]{ history.Save(cancel); }, "another writer holds the folder");
+  reject([&]{ history.SaveAutomatically(cancel, approved); }, "automatic respects writer lock");
+  close(otherWriter);
+  assert(count() == 6);
+
+  fs::rename(source, base/"formerly-approved");
+  fs::create_directory(source);
+  make(source/"private", "never approved");
+  HistoryStore replacement(source,store);
+  reject([&]{ replacement.SaveAutomatically(cancel, approved); }, "replacement source not approved");
+  assert(count() == 6);
+
+  fs::remove_all(source);
+  fs::rename(base/"formerly-approved", source);
+
+  const auto wide = source/"too-many-entries";
+  fs::create_directory(wide);
+  for (int i = 0; i < 2049; ++i)
+    make(wide/std::to_string(i), "");
+  const int beforeOversize = objects();
+  reject([&]{ history.SaveAutomatically(cancel, approved); }, "automatic entry budget");
+  assert(count() == 6 && objects() == beforeOversize);
+  fs::remove_all(wide);
+
+  const auto saved = store/latest();
+  for (int i = 0; i < 18; ++i)
+    fs::copy_file(saved, store/("point-1-" + std::to_string(i)));
+  reject([&]{ history.SaveAutomatically(cancel, approved); }, "automatic point cap");
+  assert(count() == 24);
+  history.Save(cancel);
+  assert(count() == 25);
+  std::cout << "PASS automatic does not delete points or restrict explicit manual saves" << std::endl;
 }

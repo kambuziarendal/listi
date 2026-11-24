@@ -656,8 +656,8 @@ folder does not, then click **Restore as copy**. The app will not merge with
 an existing folder or restore into the original tree.
 
 Use a quiet source and a trusted store. This is not an atomic live filesystem
-snapshot, an automatic backup service, or an in-place rollback. Identical file
-bytes share an object independently of the name and BFS attributes. The store
+snapshot or an in-place rollback. For optional scheduled points, see below.
+Identical file bytes share an object independently of the name and BFS attributes. The store
 is not encrypted, and the old standalone F12 SQLite prototype is not compatible
 with this store. This version preserves typed BFS attributes, symlink text,
 file/folder modification times and ordinary permission bits; not symlink
@@ -678,3 +678,34 @@ stops before it is written, only the empty destination directory may remain.
 Use a destination parent that other processes do not edit. When a
 connected history folder is gone or replaced, close the history window and
 reopen it to explicitly connect again.
+
+### Automatic folder history (optional)
+
+1. In Listi, choose **Files → Automatic history settings…**. It starts off
+   and nothing is monitored until you enable it.
+2. Set up to three source/history pairs. Use **Choose…** or enter absolute
+   paths. Each source and each existing, dedicated history folder must be
+   on local BFS and separate from all other selected folders. Use an empty
+   history folder or one already connected to that source in Listi.
+3. Click **Enable automatic history**. A small clock appears in Deskbar’s
+   status tray. Click it for settings and the latest check result. The
+   helper runs at low priority even when Listi is closed, starts after
+   roughly one minute, and checks about hourly while Haiku is running.
+   **Run now** requests a check immediately.
+4. To browse and restore, open the corresponding source in Listi and choose
+   **Files → Folder history…**. Connect to the same history folder.
+5. Click **Disable** to stop the helper and remove its Deskbar icon. The
+   selected paths and saved points are kept, and manual history is unchanged.
+   Disable before editing or reconfirming the selection.
+
+Unchanged trees do not create points. The helper processes folders one at a
+time. It refuses to follow a replaced directory, cross mounted volumes, or
+automatically write past 24 total points or about 512 MiB per history folder.
+Each check also has bounds on entries (2,048), reads (256 MiB, including
+copying), metadata (4 MiB) and active work (90 seconds per folder; a blocked
+filesystem call can take longer); it leaves a target-volume reserve of about
+512 MiB. Manual points and unused blobs count towards the automatic limits.
+If a limit is reached, review the result in Deskbar. To continue with new
+points without touching old ones, disable and choose a new empty history
+folder. There is no automatic deletion, rotation or catching up for time the
+computer was off. Folder history is not an independent backup.

@@ -13,6 +13,8 @@ stage=$(mktemp -d build/package.XXXXXX)
 trap 'rm -rf "$stage"' EXIT HUP INT TERM
 mkdir -p "$stage/apps" "$stage/data/licenses" "$stage/data/deskbar/menu/Applications" "$stage/documentation/packages/listi"
 cp "$1" "$stage/apps/Listi"
+mkdir -p "$stage/lib/listi"
+cp "${1%/*}/ListiHistory" "$stage/lib/listi/ListiHistory"
 cp PackageInfo "$stage/.PackageInfo"
 cp LICENSE "$stage/data/licenses/MIT"
 cp src/vendor/p7zip/copying.txt "$stage/data/licenses/LGPL-2.1"

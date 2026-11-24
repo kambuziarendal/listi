@@ -12,6 +12,7 @@
 #include <MenuItem.h>
 #include "LayoutIntroduction.h"
 #include "FolderHistory.h"
+#include "AutomaticHistory.h"
 #include "FileListExportWindow.h"
 #include "RecoveryReviewWindow.h"
 #include "FlatView.h"
@@ -684,6 +685,11 @@ public:
           PostMainWindowNotice(error.what());
         }
       }
+      return;
+    }
+    if (m->what == Listi::kAutomaticHistorySettings) {
+      if (Listi::LaunchHistoryHelper(true) != B_OK)
+        PostMainWindowNotice("Could not open automatic history. Install the complete Listi package.");
       return;
     }
     if (m->what == Listi::kFolderHistory) {

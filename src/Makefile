@@ -8,7 +8,7 @@ SRCS += ArchiveJobPreparation.cpp ArchiveJobChecks.cpp RecoveryInventory.cpp Rec
 SRCS += FlatView.cpp WorkspaceLayout.cpp WorkspaceEditor.cpp WorkspaceSplit.cpp PanelTools.cpp FolderTabs.cpp InspectorContent.cpp InspectorDocument.cpp InspectorEditor.cpp InspectorPhoto.cpp
 SRCS += InspectorTextView.cpp SearchResultsView.cpp ReadWorker.cpp
 SRCS += FileListExportWindow.cpp FileListExport.cpp
-SRCS += FolderHistory.cpp FolderHistoryWindow.cpp
+SRCS += FolderHistory.cpp FolderHistoryWindow.cpp AutomaticHistoryLaunch.cpp
 SRCS += TerminalDock.cpp TerminalPanel.cpp TerminalSession.cpp $(wildcard vendor/libvterm/src/*.c)
 LOCAL_INCLUDE_PATHS += vendor/libvterm/include
 LIBS = shared translation textencoding media be columnlistview tracker sqlite3 $(STDCPPLIBS)
@@ -19,6 +19,19 @@ COMPILER_FLAGS = -std=c++17 -Wno-multichar
 SYSTEM_INCLUDE_PATHS = /boot/system/develop/headers/samba-4.0 /boot/system/develop/headers/private/interface /boot/system/develop/headers/private/shared
 DEVEL_DIRECTORY := $(shell findpaths -r makefile_engine B_FIND_PATH_DEVELOP_DIRECTORY)
 include $(DEVEL_DIRECTORY)/etc/makefile-engine
+
+HISTORY_HELPER_OBJECTS := $(addprefix $(OBJ_DIR)/, AutomaticHistoryHelper.o \
+	AutomaticHistoryTile.o AutomaticHistoryLaunch.o FolderHistory.o \
+	DirectoryFinalization.o RemovableCopy.o MessageStore.o Sha256.o)
+HISTORY_HELPER := $(OBJ_DIR)/ListiHistory
+default: $(HISTORY_HELPER)
+$(HISTORY_HELPER_OBJECTS) $(OBJ_DIR)/AutomaticHistoryHelper.rsrc: | $(OBJ_DIR)
+-include $(OBJ_DIR)/AutomaticHistoryHelper.d $(OBJ_DIR)/AutomaticHistoryTile.d
+$(HISTORY_HELPER): $(HISTORY_HELPER_OBJECTS) $(OBJ_DIR)/AutomaticHistoryHelper.rsrc
+	$(C++) -Wl,--export-dynamic -o "$@" $(HISTORY_HELPER_OBJECTS) -ltracker -lbe
+	$(XRES) -o "$@" $(OBJ_DIR)/AutomaticHistoryHelper.rsrc
+	$(MIMESET) -f "$@"
+
 
 .PHONY: listi-self-test listi-audit-config
 listi-self-test: $(TARGET)
