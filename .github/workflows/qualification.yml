@@ -56,7 +56,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/haiku-log"
-          { sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends acl qemu-system-x86 qemu-utils zstd; } 2>&1 | tee "$RUNNER_TEMP/haiku-log/host-tools.log"
+          { sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils zstd; } 2>&1 | tee "$RUNNER_TEMP/haiku-log/host-tools.log"
       - name: Download and verify the disposable test fixtures
         env:
           IMAGE_URL: ${{ vars.LISTI_CI_IMAGE_URL }}
@@ -73,10 +73,13 @@ jobs:
           test -z "$(git status --porcelain)"
           flags=()
           [[ ! -f "$RUNNER_TEMP/provision-public-fixture" ]] || flags+=(--provision-public-fixture)
-          if [[ -c /dev/kvm ]] && sudo setfacl -m "u:$(id -un):rw" /dev/kvm && [[ -r /dev/kvm && -w /dev/kvm ]]; then
+          runner=()
+          # Keep KVM group access across both boots, even if the device is recreated.
+          if [[ -c /dev/kvm ]] && sudo -n runuser -u "$(id -un)" -g kvm -- test -w /dev/kvm; then
+            runner=(sudo -n runuser -u "$(id -un)" -g kvm --)
             flags+=(--accel kvm)
           fi
-          python3 tests/run-ephemeral-audit.py "${flags[@]}" --base "$RUNNER_TEMP/haiku.qcow2" \
+          "${runner[@]}" python3 tests/run-ephemeral-audit.py "${flags[@]}" --base "$RUNNER_TEMP/haiku.qcow2" \
             --key "$RUNNER_TEMP/guest-identity" --output "$RUNNER_TEMP/haiku-log/native" --qualify-package
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
