@@ -157,6 +157,9 @@ class MainWindow : public Listi::WorkingWindow {
           }
       }
       panes[side]->SetHistoryHint(known, automaticEnabled, versions);
+      // A store may return or receive new points while its source is not displayed.
+      if (!known && probedFolders[side] != pane->Path())
+        probedFolders[side].clear();
       if (known && probedFolders[side] != pane->Path() && !readingConfig)
         ReadHistoryConfig();
       if (tabLocations[side] != panes[side]->Path()) {

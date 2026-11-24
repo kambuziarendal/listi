@@ -366,3 +366,14 @@ For the optional host-driven network interruption matrix, set
 `network-interruptions` test in the Haiku guest. Set
 `LISTI_NETWORK_KNOWN_HOSTS` to the guest's known-hosts file for the disposable
 SFTP fixture. This avoids testing a binary left by an older checkout.
+
+### Folder history through a store disconnect
+
+In a disposable Haiku guest, configure a test source, save at least two versions
+and confirm the source pane shows their count. With the history browser closed,
+temporarily take only the test store offline. Leave and revisit the source
+without restarting Listi: the badge must say unavailable, not zero versions.
+Open it to check the explanation. Return the same store, navigate to an
+unconfigured folder and back in the same window: its count must recover without
+switching applications. In the neighbouring preview, step to the older version
+and back; closing it must return the previous folder without writing either one.

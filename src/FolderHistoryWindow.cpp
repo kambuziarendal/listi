@@ -327,7 +327,11 @@ private:
                 work->manual = true;
                 throw std::runtime_error("Choose the folder where versions are stored.");
               }
-              history = std::make_shared<HistoryStore>(source, destination);
+              try {
+                history = std::make_shared<HistoryStore>(source, destination);
+              } catch (const fs::filesystem_error &) {
+                throw std::runtime_error("History folder is unavailable. Check that it is connected: " + destination);
+              }
               if (pair.HasString("path") && !history->FolderIdentity().HasSameData(pair))
                 throw std::runtime_error("Configured folders changed. Check automatic history settings.");
             }
