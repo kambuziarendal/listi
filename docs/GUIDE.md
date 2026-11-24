@@ -21,10 +21,16 @@ layouts and folder tabs. Opening a set does not close other windows, launch
 shells, repeat file operations or overwrite the saved set. If a folder is
 unavailable, reconnect its volume and reload, or enter another location.
 
-On a fresh installation, the optional layout introduction describes **Einn**,
-**Askr**, **Tvískipt** and **Smiðja**. Selecting an option previews its
-description; only **Use this layout** switches the file window. **Skip** or
-**Cancel** keeps the current layout. Reopen it through **Help > Layout
+Select local files and choose **Files > Copy to window…** to copy to the
+active file panel of another window. The chooser shows each window's name,
+ID and current writable local folder. Navigation after ordering the copy
+does not redirect it. Search results and virtual locations are not destinations.
+
+On a fresh installation, the optional setup previews **Einn**, **Askr**,
+**Tvískipt** and **Smiðja**. Choose visible tools and whether explicit external
+folder requests should open windows, add tabs or ask each time. Navigation
+within a panel is unchanged. **Apply setup** saves the choices; **Skip** or
+**Cancel** keeps the current settings. Reopen the setup through **Help > Layout
 introduction…**. Existing preferences are not reset on upgrade.
 
 ## Small features at a glance
