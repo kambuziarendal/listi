@@ -120,8 +120,32 @@ std::string MoveToTrash(const std::string &path, const NodeIdentity *expected) {
     CheckIdentity(entry, *expected);
   return Join(trash, name);
 }
+namespace {
+std::string ReadOriginalPath(BNode &node, const std::string &path, const std::string &trash) {
+  BString original;
+  Require(node.ReadAttrString(kOriginalPath, &original), path);
+  std::string target = original.String();
+  if (target.empty() || target[0] != '/' || Leaf(target).empty() ||
+      Leaf(target) == "." || Leaf(target) == ".." || Within(target, trash))
+    throw std::runtime_error(
+        path + ": invalid original path; entry retained in Trash.");
+  return target;
+}
+}
+std::string OriginalTrashPath(const std::string &path, const NodeIdentity &expected) {
+  BEntry entry(path.c_str(), false);
+  CheckIdentity(entry, expected);
+  BNode node(&entry);
+  BEntry parent;
+  Require(entry.GetParent(&parent), path);
+  auto trash = TrashDirectory(path, false);
+  if (EntryPath(parent) != trash)
+    throw std::runtime_error("Not a top-level Trash entry");
+  return ReadOriginalPath(node, path, trash);
+}
 std::string RestoreFromTrash(const std::string &path, std::string *warning,
-                             const NodeIdentity *expected) {
+                             const NodeIdentity *expected,
+                             const std::string *confirmedTarget) {
   BEntry entry(path.c_str(), false);
   if (expected)
     CheckIdentity(entry, *expected);
@@ -139,13 +163,9 @@ std::string RestoreFromTrash(const std::string &path, std::string *warning,
   if (expected && (opened.device != expected->device ||
                    opened.inode != expected->inode))
     throw std::runtime_error(current + ": selected entry changed; not restored.");
-  BString original;
-  Require(node.ReadAttrString(kOriginalPath, &original), current);
-  std::string target = original.String();
-  if (target.empty() || target[0] != '/' || Leaf(target).empty() ||
-      Leaf(target) == "." || Leaf(target) == ".." || Within(target, trash))
-    throw std::runtime_error(
-        path + ": invalid original path; entry retained in Trash.");
+  auto target = ReadOriginalPath(node, current, trash);
+  if (confirmedTarget && target != *confirmedTarget)
+    throw std::runtime_error(path + ": restore destination changed; select Restore again.");
   std::string parentPath = target.substr(0, target.find_last_of('/'));
   if (parentPath.empty())
     parentPath = "/";

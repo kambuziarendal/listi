@@ -194,7 +194,7 @@ bool WorkspaceSplit::AllowsCommand(uint32 action) const {
   case kFileTypeIcon: case kFilePanelFavorite:
   case kOpenWith: case kProperties:
   case kDelete: case kRestore: case kPermanentDelete: case kRename:
-  case kBulkRename: case kMkdir: case kAddArchive: case kRemoveArchive:
+  case kBulkRename: case kNewFile: case kMkdir: case kAddArchive: case kRemoveArchive:
   case kSelectType: case kSelectPattern:
   case Listi::kApplyPattern: case kNetwork:
     return Panel(source).Current() == PanelPage::Files;

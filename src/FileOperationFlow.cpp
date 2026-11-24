@@ -15,6 +15,10 @@
 #include "Pane.h"
 #include "TransferCommand.h"
 #include "VirtualFile.h"
+#include "Trash.h"
+#include "ReadWorker.h"
+#include <cerrno>
+#include <sys/stat.h>
 #include <exception>
 #include <utility>
 
@@ -22,7 +26,51 @@ namespace Listi {
 namespace {
 constexpr uint32 kNamedEntryAccepted = 'nacc', kConfirm = 'cfir';
 constexpr char kPendingQuestion[] = "Finish or cancel the open question first.";
+constexpr uint32 kInspectRestore = 'trpr', kRestoreReady = 'trpv';
+
+std::string SelectedLabel(const Job &job) {
+  if (job.sources.size() == 1)
+    return "“" + LocationLeaf(job.sources.front()) + "”";
+  return std::to_string(job.sources.size()) + " selected items";
+}
+
+class RestoreProbe : public ReadWorker {
+  BMessenger owner;
+  Job job;
+  int64 request;
+public:
+  RestoreProbe(BMessenger owner, Job job, int64 request)
+      : ReadWorker("Trash destination reader"), owner(owner), job(std::move(job)), request(request) {}
+  void MessageReceived(BMessage *message) override {
+    if (message->what != kInspectRestore) {
+      ReadWorker::MessageReceived(message);
+      return;
+    }
+    std::string preview = "Restore " + SelectedLabel(job) + "? Existing files will not be overwritten.";
+    for (const auto &source : job.sources) {
+      auto &target = job.restoreTargets[source];
+      preview += "\n" + LocationLeaf(source) + " → ";
+      try {
+        target = OriginalTrashPath(source, job.expectedSources.at(source));
+        preview += target;
+        struct stat st;
+        if (lstat(target.c_str(), &st) == 0)
+          preview += " (already exists)";
+        else if (errno != ENOENT)
+          preview += " (cannot check destination)";
+      } catch (const std::exception &) {
+        preview += "Original location unavailable; will stay in Trash.";
+      }
+    }
+    BMessage reply = EncodeJob(job, kRestoreReady);
+    reply.AddInt64("request", request);
+    reply.AddString("preview", preview.c_str());
+    owner.SendMessage(&reply, static_cast<BHandler *>(nullptr), 50000);
+  }
+};
 } // namespace
+
+FileOperationFlow::~FileOperationFlow() { RetireReadWorker(restoreProbe); }
 
 FileOperationFlow::FileOperationFlow(InlineAction &actionArea,
                                      OperationQueue &queue,
@@ -113,7 +161,8 @@ void FileOperationFlow::BeginOperation(Action action, const Pane &source,
   }
   Job job;
   job.action = action;
-  if (action != Action::MakeDirectory) {
+  const bool create = action == Action::MakeDirectory || action == Action::MakeFile;
+  if (!create) {
     job.sources = source.Selected();
     job.expectedSources = source.SelectedLocalIdentities();
   }
@@ -124,18 +173,19 @@ void FileOperationFlow::BeginOperation(Action action, const Pane &source,
     ShowArchive(kRemoveArchive, source, target);
     return;
   }
-  if (action != Action::MakeDirectory && job.sources.empty()) {
+  if (!create && job.sources.empty()) {
     PostMainWindowNotice("Select one or more files in the active panel first.");
     return;
   }
   const bool rename = action == Action::Rename;
-  if (rename || action == Action::MakeDirectory) {
+  if (rename || create) {
     if (rename && job.sources.size() > 1) {
       ShowBulkRename(source);
       return;
     }
     job.destination = source.Path();
-    if (job.destination == "@disks") {
+    if (job.destination == "@disks" ||
+        (action == Action::MakeFile && IsVirtual(job.destination))) {
       PostMainWindowNotice("Open a folder first.");
       return;
     }
@@ -145,10 +195,14 @@ void FileOperationFlow::BeginOperation(Action action, const Pane &source,
     if (destination.Archive())
       PrepareArchiveEditTarget(destination.archive);
     auto accepted = EncodeJob(job, kNameAccepted);
-    const auto name = rename ? LocationLeaf(job.sources.front()) : "New folder";
-    AskInline(rename ? "Rename selected entry"
-                     : "Create a folder in the active panel",
-              rename ? "Rename" : "Create folder", accepted, name.c_str());
+    const bool file = action == Action::MakeFile;
+    const auto name = rename ? LocationLeaf(job.sources.front()) : file ? "New file" : "New folder";
+    std::string question = rename ? "Rename: " + job.sources.front()
+                                  : "Create in: " + job.destination;
+    if (file)
+      accepted.AddString("newEntryIn", job.destination.c_str());
+    AskInline(question.c_str(), rename ? "Rename" : file ? "Create file" : "Create folder",
+              accepted, name.c_str());
     return;
   }
   if (isTransfer) {
@@ -158,26 +212,23 @@ void FileOperationFlow::BeginOperation(Action action, const Pane &source,
   FreezeLocalJob(job);
   FreezeArchiveTargets(job);
   auto accepted = EncodeJob(job, kConfirm);
-  BString text;
-  const char *button;
-  if (action == Action::Trash) {
-    button = "Move to Trash";
-    text << "Move " << int32(job.sources.size())
-         << " selected entries to this volume's Trash?\n\nYou can restore "
-            "them from Trash.\n"
-         << job.sources[0].c_str();
-  } else if (action == Action::Restore) {
-    button = "Restore";
-    text << "Restore " << int32(job.sources.size())
-         << " selected entries to their original folders?\n\nExisting files "
-            "will not be overwritten.";
-  } else {
-    button = "Delete permanently";
-    text << "Permanently delete " << int32(job.sources.size())
-         << " selected entries?\n\nThis cannot be undone.\n"
-         << job.sources[0].c_str();
+  if (action == Action::Restore) {
+    RetireReadWorker(restoreProbe);
+    restoreProbe = new RestoreProbe(owner, std::move(job), ++restoreRequest);
+    if (!StartReadWorker(restoreProbe) || restoreProbe->PostMessage(kInspectRestore) != B_OK) {
+      RetireReadWorker(restoreProbe);
+      throw std::runtime_error("Cannot read Trash destinations. Try again.");
+    }
+    return;
   }
-  AskInline(text.String(), button, accepted);
+  const auto label = SelectedLabel(job);
+  if (action == Action::Trash) {
+    const auto text = "Move " + label + " to Trash?\nYou can restore from Trash.";
+    AskInline(text.c_str(), "Move to Trash", accepted);
+  } else {
+    const auto text = "Permanently delete " + label + "?\nThis cannot be undone.";
+    AskInline(text.c_str(), "Delete permanently", accepted);
+  }
 }
 
 bool FileOperationFlow::Handle(const BMessage &message, const Pane &source,
@@ -257,9 +308,21 @@ bool FileOperationFlow::Handle(const BMessage &message, const Pane &source,
         queue.Enqueue(*job);
       break;
     }
+    case kNewFile:
+      BeginOperation(Action::MakeFile, source, target, singlePane);
+      break;
     case kMkdir:
       BeginOperation(Action::MakeDirectory, source, target, singlePane);
       break;
+    case kRestoreReady: {
+      if (!restoreProbe || message.IsSourceRemote() || message.GetInt64("request", -1) != restoreRequest)
+        break;
+      RetireReadWorker(restoreProbe);
+      auto accepted = message;
+      accepted.what = kConfirm;
+      AskInline(message.GetString("preview", ""), "Restore", accepted);
+      break;
+    }
     case kConfirm: {
       auto job = DecodeSubmittedJob(
           message, {Action::Trash, Action::Restore, Action::Delete});
@@ -269,7 +332,7 @@ bool FileOperationFlow::Handle(const BMessage &message, const Pane &source,
     }
     case kNameAccepted: {
       auto job =
-          DecodeSubmittedJob(message, {Action::Rename, Action::MakeDirectory});
+          DecodeSubmittedJob(message, {Action::Rename, Action::MakeDirectory, Action::MakeFile});
       if (!job)
         break;
       job->destination =

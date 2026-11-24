@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <cstdarg>
 #include <fs_attr.h>
+#include <fs_info.h>
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
@@ -26,7 +27,7 @@ bool denyTrashCleanup = false;
 bool failStageClose = false, failDirectorySync = false;
 int stageForClose = -1;
 ino_t directoryForSync = -1;
-bool deviceGone = false;
+bool deviceGone = false, reportFat = false;
 int failures = 0;
 
 void Check(bool ok, const char *label) {
@@ -96,6 +97,13 @@ extern "C" int __wrap_close(int fd) {
       return -1;
     }
   }
+  return status;
+}
+extern "C" int __real_fs_stat_dev(dev_t, fs_info *);
+extern "C" int __wrap_fs_stat_dev(dev_t device, fs_info *info) {
+  const int status = __real_fs_stat_dev(device, info);
+  if (!status && reportFat)
+    strcpy(info->fsh_name, "fat");
   return status;
 }
 extern "C" int __real_fsync(int);
@@ -190,6 +198,48 @@ int main() {
           "keep both preserves contents and reports the actual published path");
     for (const auto &path : {incoming, existing, occupied, candidate})
       fs::remove(path);
+  }
+  // Substitute only the filesystem identification; exercise production staging,
+  // publication and typed attributes on an isolated disposable directory.
+  {
+    const auto image = root / "screen.png", output = out / "screen.png";
+    std::ofstream(image) << payload;
+    BNode node(image.c_str());
+    int32 width = 640;
+    Check(node.WriteAttr("Media:Width", B_INT32_TYPE, 0, &width, sizeof(width)) == sizeof(width),
+          "fixture has screenshot width metadata");
+    reportFat = true;
+    Job copy{Action::Copy, {image.string()}, out.string()};
+    Hooks consent;
+    bool allow = false;
+    int prompts = 0;
+    consent.confirmFatCopy = [&](const std::string &src, const std::string &dst) {
+      ++prompts;
+      Check(src == image.string() && dst == out.string(), "metadata choice identifies both endpoints");
+      return allow;
+    };
+    const auto refused = Run(copy, consent);
+    Check(refused.cancelled && prompts == 1 && !fs::exists(output) && Read(image) == payload,
+          "declining metadata loss leaves source intact and no destination file");
+    allow = true;
+    const auto copied = Run(copy, consent);
+    BNode destination(output.c_str());
+    attr_info attr{};
+    Check(copied.completed == 1 && copied.errors.empty() && copied.copyLimitations &&
+              prompts == 2 && Read(output) == payload && Read(image) == payload &&
+              node.GetAttrInfo("Media:Width", &attr) == B_OK &&
+              destination.GetAttrInfo("Media:Width", &attr) != B_OK,
+          "explicit FAT copy publishes bytes and reports omitted attributes");
+    std::ofstream(output) << "existing";
+    consent.conflict = [](const auto &) { return Decision::Replace; };
+    copy.action = Action::Move;
+    const auto moved = Run(copy, consent);
+    BNode movedNode(output.c_str());
+    Check(moved.errors.empty() && moved.completed == 1 && prompts == 2 &&
+              movedNode.GetAttrInfo("Media:Width", &attr) == B_OK,
+          "copy waiver never applies to Move");
+    reportFat = false;
+    fs::remove(output);
   }
   Hooks replace;
   replace.conflict = [](const std::string &) { return Decision::Replace; };

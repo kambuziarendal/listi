@@ -77,6 +77,10 @@ static void CheckFunctionButtons() {
   button(0, kCopy, "Copy");
   button(1, kNone, "None");
   button(2, kEdit, "Edit");
+  bank.SetDestination("←", "/boot/home/Downloads");
+  button(0, kCopy, "Copy ← Downloads");
+  bank.SetDestination("→", "/other/Downloads");
+  button(0, kCopy, "Copy → Downloads");
   bank.SetActions({}, true);
   assert(grid() && grid()->CountChildren() == 0 && fallback->CountItems() == 0);
 }

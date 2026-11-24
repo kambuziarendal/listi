@@ -69,6 +69,12 @@ BMessage EncodeJob(const Job &job, uint32 what) {
     item.AddInt64("node", entry.second.inode);
     m.AddMessage("identity", &item);
   }
+  for (const auto &[source, target] : job.restoreTargets) {
+    BMessage item;
+    item.AddString("source", source.c_str());
+    item.AddString("target", target.c_str());
+    m.AddMessage("restoreTarget", &item);
+  }
   for (const auto &entry : job.expectedArchiveSets) {
     BMessage item;
     item.AddString("path", entry.first.c_str());
@@ -108,6 +114,8 @@ Job DecodeJob(const BMessage &m) {
   for (int32 i = 0; m.FindMessage("archiveSet", i, &item) == B_OK; ++i)
     job.expectedArchiveSets[item.GetString("path", "")] =
         item.GetString("fingerprint", "");
+  for (int32 i = 0; m.FindMessage("restoreTarget", i, &item) == B_OK; ++i)
+    job.restoreTargets[item.GetString("source", "")] = item.GetString("target", "");
   return job;
 }
 std::optional<Job> DecodeSubmittedJob(const BMessage &message,

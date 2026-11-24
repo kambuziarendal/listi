@@ -523,7 +523,8 @@ public:
       }
       SetHighUIColor(selected ? B_LIST_SELECTED_ITEM_TEXT_COLOR
                               : B_DOCUMENT_TEXT_COLOR);
-      BString label(row->name.c_str());
+      BString label(row->transferState == 3 ? "Failed: " : "");
+      label << row->name.c_str();
       TruncateString(&label, B_TRUNCATE_MIDDLE, cell.Width() - 8);
       DrawString(label,
                  BPoint(cell.left + (cell.Width() - StringWidth(label)) / 2,

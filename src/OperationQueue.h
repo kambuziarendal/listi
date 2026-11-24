@@ -55,7 +55,8 @@ private:
   bool CancelOne(int64 operation, bool waitingOnly);
   void PublishCancelled(const QueuedJob &);
   bool Proceed();
-  Listi::Decision Ask(const std::string &, const Listi::CopyConflict * = nullptr);
+  Listi::Decision Ask(const std::string &, const Listi::CopyConflict * = nullptr,
+                      const std::string *fatDestination = nullptr);
   class ProgressView *view;
   BMessenger main, display;
   std::thread thread;
@@ -71,6 +72,6 @@ private:
   int answer = -1;
   int64 conflictSerial = 0, operationSerial = 0;
   int64 runningOperation = 0;
-  bool allowKeepBoth = false;
+  bool allowKeepBoth = false, askingFat = false;
   bool awaitingAnswer = false;
 };

@@ -32,6 +32,7 @@
 #include <map>
 #include <memory>
 #include <stdexcept>
+#include <set>
 #include <strings.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -87,12 +88,13 @@ struct Runner {
   bool replaceAll = false, skipAll = false;
   Result result;
   const Job *guardedJob = nullptr;
+  std::set<dev_t> approvedFatVolumes;
   std::string guardedSource;
   std::map<std::string, size_t> outcomeIndex;
   struct BackingDevice {
     std::string path, mount;
     NodeIdentity node;
-    bool removable = false, ntfs = false, attributes = false;
+    bool removable = false, ntfs = false, fat = false, attributes = false;
   };
   std::map<dev_t, BackingDevice> backingDevices;
   std::string interruptedFolder;
@@ -104,6 +106,7 @@ struct Runner {
         throw std::runtime_error(folder + ": volume is no longer available.");
       BackingDevice backing;
       backing.ntfs = strcasecmp(info.fsh_name, "ntfs") == 0;
+      backing.fat = strcasecmp(info.fsh_name, "fat") == 0;
       backing.attributes = (info.flags & B_FS_HAS_ATTR) != 0;
       if (strncmp(info.device_name, "/dev/disk/", 10) == 0) {
         backing.path = info.device_name;
@@ -147,6 +150,9 @@ struct Runner {
   bool PlainCopy() const {
     return guardedJob->action == Action::Copy && !deferCompletion &&
            !guardedJob->copyForArchiveMove && !h.privateStaging;
+  }
+  bool FatCopy(dev_t volume) const {
+    return PlainCopy() && backingDevices.at(volume).fat;
   }
   bool NtfsCopy(dev_t volume) const {
     return PlainCopy() && backingDevices.at(volume).ntfs;
@@ -317,7 +323,7 @@ struct Runner {
   }
   void Attributes(const std::string &src, const std::string &dst,
                   bool verifyMerge = false, int destinationFD = -1,
-                  bool destinationAttributesUnavailable = false) {
+                  bool destinationAttributesUnavailable = false, dev_t fatVolume = -1) {
     BNode from(src.c_str()), to;
     if (destinationFD < 0)
       to.SetTo(dst.c_str());
@@ -330,6 +336,19 @@ struct Runner {
     bool omitted = false;
     while ((status = from.GetNextAttrName(name)) == B_OK) {
       Check();
+      if (fatVolume >= 0) {
+        if (!approvedFatVolumes.count(fatVolume)) {
+          if (!h.confirmFatCopy)
+            throw std::runtime_error(src + ": FAT cannot preserve Haiku attributes.");
+          if (!h.confirmFatCopy(src, guardedJob->destination))
+            throw Cancelled();
+          CheckDestinationDevice(fatVolume);
+          Guard();
+          approvedFatVolumes.insert(fatVolume);
+        }
+        omitted = true;
+        continue;
+      }
       if (destinationAttributesUnavailable) {
         omitted = true;
         continue;
@@ -368,7 +387,9 @@ struct Runner {
     if (status != B_ENTRY_NOT_FOUND)
       throw std::runtime_error(src + ": could not enumerate attributes");
     if (omitted)
-      CopyNotice(src, "Haiku cannot write attributes on this NTFS destination; source attributes were not copied.");
+      CopyNotice(src, fatVolume >= 0
+          ? "Copied without Haiku attributes on FAT by request."
+          : "Haiku cannot write attributes on this NTFS destination; source attributes were not copied.");
   }
   bool OrdinaryAttributes(const std::string &src, const std::string &dst,
                           int in, int out, dev_t sourceVolume, dev_t targetVolume) {
@@ -377,7 +398,8 @@ struct Runner {
       return false;
     }
     Attributes(src, dst, false, out,
-               NtfsAttributesUnavailable(out, targetVolume, dst));
+               NtfsAttributesUnavailable(out, targetVolume, dst),
+               FatCopy(targetVolume) ? targetVolume : -1);
     return true;
   }
   bool SetCopyMode(int fd, mode_t mode, dev_t volume, const std::string &path) {
@@ -770,7 +792,7 @@ struct Runner {
       Guard();
       if (!existed) {
         bool useSourceMode = true;
-        if (NtfsCopy(st.st_dev) || ntfsDirectory)
+        if (NtfsCopy(st.st_dev) || ntfsDirectory || FatCopy(before.st_dev))
           useSourceMode = OrdinaryAttributes(src, dst, dirfd(dir.get()),
                                              directory.Descriptor(), st.st_dev, before.st_dev);
         else
@@ -884,7 +906,7 @@ struct Runner {
             !SameEntry(opened, st))
           throw std::runtime_error(src + ": source changed before copying");
         auto copyAttributes = [&] {
-          if (NtfsCopy(st.st_dev) || ntfsTarget)
+          if (NtfsCopy(st.st_dev) || ntfsTarget || FatCopy(stagingIdentity.st_dev))
             return OrdinaryAttributes(src, tmp, in.n, out.n, st.st_dev, stagingIdentity.st_dev);
           Attributes(src, tmp);
           return true;
@@ -1095,6 +1117,27 @@ struct Runner {
             "Named entry operations require one guarded local source and destination.");
       ValidateNewEntryName(job.destination, job.entryName);
     }
+    if (job.action == Action::MakeFile) {
+      const auto &folder = job.destinationFolder;
+      const auto leaf = Leaf(job.destination);
+      if (job.expectedDestination.device < 0 || folder.empty() || leaf.empty() ||
+          job.destination != Join(folder, leaf) || leaf == "." || leaf == "..")
+        throw std::runtime_error("Choose an available local folder and one filename.");
+      Check();
+      PinnedDirectory directory(folder, job.expectedDestination.device,
+                                job.expectedDestination.inode, true);
+      FD created(openat(directory.Descriptor(), leaf.c_str(),
+                        O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0666));
+      if (created.n < 0)
+        Fail(job.destination);
+      Outcome("", job.destination).status = "created";
+      if (fsync(created.n))
+        Fail(job.destination + " created but not flushed");
+      directory.Flush();
+      result.completed++;
+      Outcome("").status = "completed";
+      return;
+    }
     if (job.action == Action::MakeDirectory) {
       Outcome("", job.destination);
       Check();
@@ -1168,10 +1211,15 @@ struct Runner {
           const NodeIdentity observed{sourceStat.st_dev, sourceStat.st_ino};
           const NodeIdentity &expected =
               frozen == job.expectedSources.end() ? observed : frozen->second;
+          const auto confirmed = job.restoreTargets.find(source);
+          if (!job.restoreTargets.empty() &&
+              (confirmed == job.restoreTargets.end() || confirmed->second.empty()))
+            throw std::runtime_error(source + ": original location unavailable at confirmation; retained in Trash.");
           const std::string destination =
               job.action == Action::Trash
                   ? MoveToTrash(source, &expected)
-                  : RestoreFromTrash(source, &warning, &expected);
+                  : RestoreFromTrash(source, &warning, &expected, confirmed == job.restoreTargets.end()
+                        ? nullptr : &confirmed->second);
           auto &row = Outcome(source, destination);
           row.status = "moved";
           if (!warning.empty()) {

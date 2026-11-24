@@ -74,6 +74,7 @@ enum : uint32 {
   kRestore = 'rest',
   kTrashFolder = 'trsh',
   kMkdir = 'mkdr',
+  kNewFile = 'nefl',
   kRename = 'rnam',
   kBulkRename = 'brnm',
   kBulkRenameAccepted = 'brac',
