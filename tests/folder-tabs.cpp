@@ -154,6 +154,35 @@ int main() {
   Command(*detached, kTabDuplicate);
   Ready(*detached);
   Check(moved.FolderBar().Count() == 2, "surviving Einn window still accepts tab operations");
+  moved.Files().OpenSearchList({"Saved search", {b.string(), "two", false}, false});
+  Ready(*detached);
+  Check(moved.Files().IsSearchList(), "working-set fixture opens a search");
+  detached->Unlock();
+  BMessage searchSnapshot;
+  Check(BMessenger(detached).SendMessage(&capture, &searchSnapshot, 1000000, 1000000) == B_OK,
+        "save working set with a search");
+  BrowserRequest restoreSearch;
+  restoreSearch.localLayout = true;
+  restoreSearch.workingSet = searchSnapshot;
+  auto *searchWindow = CreateMainWindow(prefs, {}, {}, false, {}, false, std::move(restoreSearch));
+  searchWindow->Show();
+  searchWindow->Lock();
+  Ready(*searchWindow);
+  auto &restoredSearch = Panel(*searchWindow).Files();
+  auto state = restoredSearch.CaptureNavigation();
+  Check(restoredSearch.IsSearchList() && restoredSearch.LocationValid() &&
+        state.location.rfind("@set-query:", 0) == 0 && state.history.RecentFolders().empty(),
+        "restored working-set search never enters Recent folders");
+  restoredSearch.Navigate(a.c_str());
+  Ready(*searchWindow);
+  BMessage back(kBack);
+  restoredSearch.MessageReceived(&back);
+  Ready(*searchWindow);
+  Check(restoredSearch.IsSearchList() && restoredSearch.LocationValid() &&
+        restoredSearch.CaptureNavigation().history.RecentFolders() == std::vector<std::string>{a.string()},
+        "Back reaches restored search while Recent keeps only the visited folder");
+  searchWindow->Quit();
+  detached->Lock();
   detached->Quit();
   fs::remove_all(root);
 }

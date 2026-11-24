@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "Common.h"
+#include "FileOperation.h"
+#include "ReadWorker.h"
 #include "ImagePreview.h"
 #include "MainWindow.h"
 #include "SavedPlaces.h"
@@ -11,13 +13,42 @@
 #include <MenuBar.h>
 #include <MenuItem.h>
 #include <RadioButton.h>
+#include <PopUpMenu.h>
 #include <StringItem.h>
 #include <TextControl.h>
 #include <TextView.h>
 #include <Window.h>
 #include <cstdlib>
+#include <atomic>
+#include <fstream>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <cstring>
 #include <iostream>
+
+namespace {
+std::string copyFolder;
+std::atomic<bool> holdNextStat{false}, chooseDestination{false};
+sem_id statEntered, releaseStat;
+}
+extern "C" int __real_stat(const char *, struct stat *);
+extern "C" int __wrap_stat(const char *path, struct stat *info) {
+  if (holdNextStat.load() && path == copyFolder && holdNextStat.exchange(false)) {
+    release_sem(statEntered);
+    acquire_sem_etc(releaseStat, 1, B_RELATIVE_TIMEOUT, 8000000);
+  }
+  return __real_stat(path, info);
+}
+extern "C" BMenuItem *__real__ZN10BPopUpMenu2GoE6BPointbbb(BPopUpMenu *, BPoint, bool, bool, bool);
+extern "C" BMenuItem *__wrap__ZN10BPopUpMenu2GoE6BPointbbb(
+    BPopUpMenu *menu, BPoint at, bool deliver, bool open, bool asynchronous) {
+  if (std::strcmp(menu->Name(), "Copy to window") != 0)
+    return __real__ZN10BPopUpMenu2GoE6BPointbbb(menu, at, deliver, open, asynchronous);
+  if (chooseDestination.exchange(false))
+    menu->ItemAt(0)->Invoke();
+  delete menu;
+  return nullptr;
+}
 
 using namespace Listi;
 namespace {
@@ -81,6 +112,103 @@ std::string Property(BMessenger target, const char *name, const char *set = null
     return {};
   return reply.GetString("result", "");
 }
+class CopySource : public WorkingWindow {
+public:
+  std::atomic<int> dispatches{0}, offered{0}, accepted{0}, rejected{0};
+  Listi::Job original;
+  explicit CopySource(const std::string &source)
+      : WorkingWindow(BRect(0, 0, 300, 200), "Copy source", "test", 0) {
+    original.sources = {source};
+  }
+  void MessageReceived(BMessage *m) override {
+    try {
+      Job job;
+      if (m->what == kCopyToWindow) {
+        PickCopyFolder(original);
+        ++offered;
+      } else if (m->what == 'ping') {
+        ++dispatches;
+      } else if (HandleCopyFolder(*m, job)) {
+        if (job.checkDestinationWindow)
+          ++accepted;
+      } else {
+        WorkingWindow::MessageReceived(m);
+      }
+    } catch (const std::exception &) {
+      ++rejected;
+    }
+  }
+};
+
+void CheckCopyWindows() {
+  char temp[] = "/boot/home/Listi-copy-window-XXXXXX";
+  Check(mkdtemp(temp), "create disposable copy-window fixture");
+  const std::string root(temp);
+  const auto source = root + "/source";
+  copyFolder = root + "/target";
+  std::ofstream(source) << "selected";
+  statEntered = create_sem(0, "target stat entered");
+  releaseStat = create_sem(0, "release target stat");
+  auto *owner = new CopySource(source);
+  owner->Show();
+  BMessenger requester(owner);
+  int requests = 0, rejections = 0;
+  for (int scenario = 0; scenario < 4; ++scenario) {
+    Check(mkdir(copyFolder.c_str(), 0700) == 0, "create destination directory");
+    struct stat original{};
+    Check(stat(copyFolder.c_str(), &original) == 0, "capture directory scan identity");
+    auto *target = new WorkingWindow(BRect(0, 0, 300, 200), "Copy target", "test", 0);
+    target->SetCopyFolder(copyFolder, {int32_t(original.st_dev), int64_t(original.st_ino)});
+    target->Show();
+    BMessenger destination(target);
+    chooseDestination = true;
+    holdNextStat = true;
+    requester.SendMessage(kCopyToWindow);
+    ++requests;
+    Check(acquire_sem_etc(statEntered, 1, B_RELATIVE_TIMEOUT, 3000000) == B_OK,
+          "selected destination reaches a blocked stat");
+    requester.SendMessage('ping');
+    Check(Wait([&] { return owner->dispatches > scenario; }),
+          "source dispatches while destination stat is blocked");
+    if (scenario == 0) {
+      requester.SendMessage(kCopyToWindow); // Simulate dismissal of the replacement chooser.
+      ++requests;
+      Check(Wait([&] { return owner->offered == requests; }),
+            "replacement chooser can be dismissed while the old probe is blocked");
+    } else if (scenario == 1) {
+      destination.SendMessage(B_QUIT_REQUESTED);
+      Check(Wait([&] { return !destination.IsValid(); }), "destination closes before probe returns");
+    } else if (scenario == 2) {
+      Check(With(destination, [&](BWindow &window) {
+        static_cast<WorkingWindow &>(window).SetCopyFolder(root, {});
+        return true;
+      }), "destination changes location before probe returns");
+    } else {
+      Check(rename(copyFolder.c_str(), (root + "/retired").c_str()) == 0 &&
+            mkdir(copyFolder.c_str(), 0700) == 0, "replace destination directory identity");
+    }
+    release_sem(releaseStat);
+    if (scenario != 0) {
+      ++rejections;
+      Check(Wait([&] { return owner->rejected == rejections; }), "stale destination is rejected");
+    }
+    Check(DrainReadWorkers(2000000), "retired destination probe exits after release");
+    Check(owner->accepted == 0, "retired probe never returns a job");
+    if (destination.IsValid()) {
+      destination.SendMessage(B_QUIT_REQUESTED);
+      Check(Wait([&] { return !destination.IsValid(); }), "fixture destination closes");
+    }
+    rmdir(copyFolder.c_str());
+  }
+  requester.SendMessage(B_QUIT_REQUESTED);
+  Check(Wait([&] { return !requester.IsValid(); }), "fixture copy source closes");
+  delete_sem(statEntered);
+  delete_sem(releaseStat);
+  unlink(source.c_str());
+  rmdir((root + "/retired").c_str());
+  rmdir(root.c_str());
+}
+
 }
 
 int main() {
@@ -163,4 +291,5 @@ int main() {
         "confirmed choice applies through the normal workspace controller");
   main->Lock();
   main->Quit();
+  CheckCopyWindows();
 }

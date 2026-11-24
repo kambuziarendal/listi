@@ -32,6 +32,7 @@ audit-io theme-text connection-defaults ssh-key-format
 """.split()
 
 WRAPS = {
+    "working-windows": ["stat", "_ZN10BPopUpMenu2GoE6BPointbbb"],
     "removable-copy": ["fsync", "write", "read"],
     "directory-finalization": ["fsync", "fs_stat_dev"],
     "archive-move-faults": ['renameat'],

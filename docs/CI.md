@@ -9,7 +9,7 @@ hardware passed. Keep the outcome for each separate lane.
 In a clean checkout with Git, Bash, Python 3, Make and a C++17 compiler with
 ASan/UBSan, run `bash ci/portable.sh BASE`, replacing BASE with the commit on
 which the change is based. This checks changed-line whitespace, Python syntax,
-the native test inventory, deliberate runner failures, the POSIX transfer
+the native test inventory, deliberate runner failures, the F12 history tests, the POSIX transfer
 fault suite and seeded parser/digest tests. On GitHub a PR tests the merge SHA
 against its base SHA. Logs record the checkout SHA, not just a branch name.
 For changed C++ lines also see the clang-format review in CONTRIBUTING.md.
@@ -69,16 +69,18 @@ This exports committed source, compares the source-file SHA-256 manifest in
 the guest, builds and runs the full native audit with its built-in self-test,
 rejects explicit skipped cases, builds a new HPKG, installs it *in the overlay*,
 compares both installed package and executable byte-for-byte with the build,
-and reruns the installed self-test. Keep source.txt (host, QEMU, commit and source archive digest), source.sha256,
-verify.log, audit.log, installed.log and result.txt. The wrapper requires one
+reruns the installed self-test, and runs normal installed startup and relaunch
+through the multiwindow test (including detach and closing the last window).
+Keep source.txt (host, QEMU, commit and source archive digest), source.sha256,
+verify.log, audit.log, installed.log, installed-multiwindow.log, the tested HPKG
+and result.txt. The wrapper requires one
 completion per selected program, rejects failed/skipped receipts and checks the
 built and installed self-test counts against the PASS lines (at least 58 each).
 A missing, incomplete, failed, focused or preflight result is not an installed
 package pass. Preserve the process exit status as well as those logs. A timed-out GitHub job is not green. For local automation wrap
 the command in an appropriate process-group timeout (e.g. GNU timeout 150m).
 Focused or preflight-only runs are not accepted for package qualification.
-No release assets are uploaded by the workflow; only short-lived logs are
-requested. Power-loss and physical USB behavior are not tested here.
+Qualification artifacts are retained for 14 days and are not published as releases. Power-loss and physical USB behavior are not tested here.
 
 ## Extended (explicitly configured disposable environment only)
 
