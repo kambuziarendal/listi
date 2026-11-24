@@ -2,6 +2,9 @@
 #include "FileClipboard.h"
 #include "Pane.h"
 #include "Shelf.h"
+#include "SearchWorker.h"
+#include "WrappedLabel.h"
+#include <MessageFilter.h>
 #include <Application.h>
 #include <LayoutBuilder.h>
 #include <Window.h>
@@ -11,6 +14,25 @@
 #include <set>
 #include <sys/stat.h>
 #include <unistd.h>
+
+namespace {
+class QueryReplies : public BMessageFilter {
+public:
+  int completed = 0;
+  enum Mode { Healthy, Skipped, Limited } next = Healthy;
+  explicit QueryReplies() : BMessageFilter(Listi::kSearchDone) {}
+  filter_result Filter(BMessage *message, BHandler **) override {
+    ++completed;
+    if (next != Healthy) {
+      message->SetBool("live", false);
+      message->SetInt64("skipped", next == Skipped ? 1 : 0);
+      message->SetBool("limited", next == Limited);
+      next = Healthy;
+    }
+    return B_DISPATCH_MESSAGE;
+  }
+};
+}
 
 int main() {
   using namespace Listi;
@@ -34,6 +56,8 @@ int main() {
   auto *pane = new Pane(0, prefs);
   auto *w = new BWindow(BRect(0, 0, 720, 480), "Search list", B_TITLED_WINDOW, 0);
   BLayoutBuilder::Group<>(w, B_VERTICAL).Add(pane);
+  auto *replies = new QueryReplies();
+  w->AddCommonFilter(replies);
   w->Show();
   w->Lock();
   auto await = [&](auto done, bigtime_t timeout = 10000000) {
@@ -75,6 +99,29 @@ int main() {
     check(false, "copy and Shelf");
   }
   const auto selected = pane->CaptureNavigation();
+  auto *status = static_cast<WrappedLabel *>(pane->FindView("status"));
+  auto nextCompletion = [&] {
+    const int before = replies->completed;
+    return await([&] { return replies->completed > before; }, 12000000);
+  };
+  check(nextCompletion() && pane->Selected().size() == 2 &&
+        pane->CaptureNavigation().focused == selected.focused &&
+        pane->CaptureNavigation().scroll == selected.scroll,
+        "identical healthy live results preserve selection, focus and scroll");
+  for (auto partial : {QueryReplies::Skipped, QueryReplies::Limited}) {
+    replies->next = partial;
+    check(nextCompletion() && status && std::string(status->Text()).find("Partial search") == 0,
+          partial == QueryReplies::Skipped ? "identical skipped result shows partial status" :
+                                            "identical limited result shows partial status");
+    const int before = replies->completed;
+    check(!await([&] { return replies->completed > before; }, 4000000),
+          "stopped identical result retires the live reader");
+    pane->Reload();
+    pane->Reload(); // Queue a refresh while the first reload is still scanning.
+    check(await([&] { return ready() && replies->completed >= before + 2; }, 15000000),
+          "Reload starts another reader and preserves a pending refresh");
+  }
+
   std::ofstream(a + "/extra.live") << "extra";
   check(matches(3) && pane->Selected().size() == 2 &&
         pane->CaptureNavigation().focused == selected.focused,
