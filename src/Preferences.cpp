@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "Common.h"
+#include "ScrollableForm.h"
 #include "WrappedLabel.h"
 #include "WorkspaceEditor.h"
 #include <Alert.h>
@@ -182,58 +183,6 @@ constexpr int32 kAppearancePage = 1;
 
 // Clip to a fixed viewport, but give the page enough height for every
 // control. The scroll bar moves the viewport rather than shrinking the page.
-class SettingsPage : public BScrollView {
-  BView *content;
-
-public:
-  explicit SettingsPage(BView *page)
-      : BScrollView("settings page scroll",
-                    new BView("settings viewport", B_SCROLL_VIEW_AWARE),
-                    0, false, true, B_NO_BORDER),
-        content(page) {
-    Target()->AddChild(content);
-  }
-
-  BSize MinSize() override {
-    const auto bar = ScrollBar(B_VERTICAL);
-    return {content->MinSize().width + bar->PreferredSize().width + 1,
-            std::max(64.f, bar->MinSize().height)};
-  }
-
-  void DoLayout() override {
-    BScrollView::DoLayout();
-    const BRect bounds = Target()->Bounds();
-    if (!bounds.IsValid())
-      return;
-    float minimum = content->MinSize().height;
-    if (content->HasHeightForWidth())
-      content->GetHeightForWidth(bounds.Width(), &minimum, nullptr, nullptr);
-    const float height = std::max(bounds.Height(), minimum);
-    content->ResizeTo(bounds.Width(), height);
-
-    auto bar = ScrollBar(B_VERTICAL);
-    bar->SetRange(0, height - bounds.Height());
-    bar->SetProportion((bounds.Height() + 1) / (height + 1));
-    bar->SetSteps(be_plain_font->Size() * 1.33f, bounds.Height());
-  }
-
-  void Reveal(BView *view) {
-    BView *ancestor = view;
-    while (ancestor && ancestor != content)
-      ancestor = ancestor->Parent();
-    if (!ancestor)
-      return;
-    const BRect bounds = Target()->Bounds();
-    const BRect field =
-        Target()->ConvertFromScreen(view->ConvertToScreen(view->Bounds()));
-    const float top = bounds.top;
-    if (field.top < top)
-      ScrollBar(B_VERTICAL)->SetValue(field.top);
-    else if (field.bottom > bounds.bottom)
-      ScrollBar(B_VERTICAL)->SetValue(top + field.bottom - bounds.bottom);
-  }
-};
-
 class PreferencesWindow : public BWindow {
   BMessenger target;
   Preferences prefs;
@@ -249,7 +198,7 @@ class PreferencesWindow : public BWindow {
     auto choose = new BMessage(kSettingsCategory);
     choose->AddInt32("page", categories->CountItems());
     categories->AddItem(new BMenuItem(page->Name(), choose));
-    pages->AddChild(new SettingsPage(page));
+    pages->AddChild(new Listi::ScrollableForm(page));
   }
 
   void SelectPage(int32 index) {
@@ -263,7 +212,7 @@ class PreferencesWindow : public BWindow {
   void Reveal(BView *view) {
     auto item = pages->CardLayout()->VisibleItem();
     if (item)
-      static_cast<SettingsPage *>(item->View())->Reveal(view);
+      static_cast<Listi::ScrollableForm *>(item->View())->Reveal(view);
   }
 
   void ShowInputError(BTextControl *control, const char *error) {

@@ -2,6 +2,8 @@
 #include "LayoutIntroduction.h"
 #include "WrappedLabel.h"
 #include "Common.h"
+#include "ScrollableForm.h"
+#include <Screen.h>
 #include <Button.h>
 #include <CheckBox.h>
 #include <MenuField.h>
@@ -101,7 +103,8 @@ public:
     sidebarField = new BMenuField("sidebar", "Sidebar:", sidebar);
     RefreshTools();
     auto *apply = new BButton("apply layout", "Apply setup", new BMessage(kUse));
-    BLayoutBuilder::Group<>(this, B_VERTICAL)
+    auto *form = new BGroupView("setup choices", B_VERTICAL);
+    BLayoutBuilder::Group<>(form, B_VERTICAL)
         .SetInsets(B_USE_WINDOW_SPACING)
         .Add(new WrappedLabel("layout help", "Choose how to browse files. You can switch later in View > Workspace."))
         .Add(options).Add(map).Add(sample)
@@ -109,12 +112,18 @@ public:
         .Add(new WrappedLabel("windows help", "Normal folder navigation stays unchanged. With independent windows, use Haiku Stack & Tile to group them."))
         .Add(sidebarField)
         .AddGroup(B_HORIZONTAL).Add(preview).Add(command).Add(buttons).End()
-        .AddGlue()
+        .AddGlue();
+    BLayoutBuilder::Group<>(this, B_VERTICAL)
+        .SetInsets(B_USE_WINDOW_SPACING)
+        .Add(new ScrollableForm(form))
         .AddGroup(B_HORIZONTAL).AddGlue()
         .Add(new BButton("skip layout", fresh ? "Skip" : "Cancel", new BMessage(kSkip)))
         .Add(apply).End();
     AddShortcut(B_ESCAPE, B_NO_COMMAND_KEY, new BMessage(kSkip));
     apply->MakeDefault(true);
+    const BRect screen = BScreen(&window).Frame();
+    ResizeTo(std::min(screen.Width() - 40, 550.0f),
+             std::min(screen.Height() - 90, 555.0f));
     CenterIn(window.Frame());
     MoveOnScreen();
   }
