@@ -2,7 +2,6 @@
 #include "ApplicationServices.h"
 #include "Common.h"
 #include "ImageConvert.h"
-#include "HistorySettings.h"
 #include "JobSnapshot.h"
 #include "MessageStore.h"
 #include "SavedPlaces.h"
@@ -39,22 +38,6 @@ public:
     if (m->what == kDrainServices) {
       BMessage reply(B_REPLY);
       m->SendReply(&reply);
-      return;
-    }
-    if (m->what == kReadHistoryConfig) {
-      BMessenger target;
-      if (m->FindMessenger("replyTo", &target) != B_OK)
-        return;
-      BMessage reply(kReadHistoryConfig);
-      try {
-        auto config = Listi::ReadHistorySettings();
-        for (const auto &pair : Listi::HistoryPairs(config))
-          reply.AddMessage("pair", &pair);
-        reply.AddBool("enabled", config.GetBool("enabled", false));
-      } catch (const std::exception &) {
-        // No badge for unreadable settings. Opening history reports the reason.
-      }
-      target.SendMessage(&reply, (BHandler *)nullptr, 500000);
       return;
     }
     if (m->what == kImageDropProbe) {

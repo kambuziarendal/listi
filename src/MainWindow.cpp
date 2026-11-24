@@ -14,6 +14,7 @@
 #include "FolderHistory.h"
 #include "AutomaticHistory.h"
 #include "HistorySettings.h"
+#include "HistoryPaneHint.h"
 #include "FileListExportWindow.h"
 #include "RecoveryReviewWindow.h"
 #include "FlatView.h"
@@ -82,7 +83,7 @@ class MainWindow : public Listi::WorkingWindow {
   std::vector<BMessage> historyPairs;
   bool readingConfig = false, refreshConfig = false, automaticEnabled = false;
   std::string titleLocation;
-  std::array<std::string, 2> tabLocations;
+  std::array<std::string, 2> tabLocations, probedFolders;
   bool sessionLayout = false;
   BrowserOpener openBrowser;
   Preferences prefs;
@@ -144,14 +145,20 @@ class MainWindow : public Listi::WorkingWindow {
     for (int side = 0; side < 2; ++side) {
       const auto *pane = panes[side];
       bool known = false;
+      int32 versions = Listi::kUnknownVersions;
       if (pane->LocationValid() && !pane->IsSearchList()) {
         const auto [device, node] = pane->FolderIdentity();
         for (const auto &pair : historyPairs)
           if (strcmp(pane->Path(), pair.GetString("path", 0, "")) == 0 &&
-              device == pair.GetInt64("node", 0, -1) && node == pair.GetInt64("node", 1, -1))
+              device == pair.GetInt64("node", 0, -1) && node == pair.GetInt64("node", 1, -1)) {
             known = true;
+            versions = pair.GetInt32("versions", Listi::kUnknownVersions);
+            break;
+          }
       }
-      panes[side]->SetHistoryHint(known, automaticEnabled);
+      panes[side]->SetHistoryHint(known, automaticEnabled, versions);
+      if (known && probedFolders[side] != pane->Path() && !readingConfig)
+        ReadHistoryConfig();
       if (tabLocations[side] != panes[side]->Path()) {
         tabLocations[side] = panes[side]->Path();
         split->Panel(side).FolderBar().UpdateLabel();
@@ -573,9 +580,8 @@ public:
   }
   void ReadHistoryConfig() {
     if (readingConfig) { refreshConfig = true; return; }
-    BMessage query(kReadHistoryConfig);
-    query.AddMessenger("replyTo", BMessenger(this));
-    readingConfig = service.SendMessage(&query, (BHandler *)nullptr, 0) == B_OK;
+    probedFolders = {panes[0]->Path(), panes[1]->Path()};
+    readingConfig = Listi::RequestHistoryConfig(BMessenger(this), probedFolders);
   }
   void WindowActivated(bool active) override {
     BWindow::WindowActivated(active);
@@ -646,7 +652,7 @@ public:
     return true;
   }
   void MessageReceived(BMessage *m) override {
-    if (m->what == kReadHistoryConfig) {
+    if (m->what == Listi::kReadHistoryConfig) {
       readingConfig = false;
       historyPairs = Listi::HistoryPairs(*m);
       automaticEnabled = m->GetBool("enabled", false);

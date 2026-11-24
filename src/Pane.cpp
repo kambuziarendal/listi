@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "Pane.h"
+#include "HistoryPaneHint.h"
 #include "SearchWorker.h"
 #include "AdaptiveScrollView.h"
 #include "FlatView.h"
@@ -218,9 +219,16 @@ Pane::~Pane() {
   Listi::RetireReadWorker(iconReader);
 }
 bool Pane::HasHistoryHint() const { return !historyButton->IsHidden(historyButton); }
-void Pane::SetHistoryHint(bool visible, bool enabled) {
-  if (visible && (!HasHistoryHint() || historyEnabled != enabled)) {
+void Pane::SetHistoryHint(bool visible, bool enabled, int32 versions) {
+  if (visible && (!HasHistoryHint() || historyEnabled != enabled || historyVersions != versions)) {
     historyEnabled = enabled;
+    historyVersions = versions;
+    std::string label = "History";
+    if (versions > 0) label += " (" + std::to_string(versions) + ")";
+    else if (versions == 0) label += " · No versions yet";
+    else if (versions == Listi::kUnavailableVersions) label += " · Unavailable";
+    label += "…";
+    historyButton->SetLabel(label.c_str());
     historyButton->SetToolTip(enabled ? "Automatic history enabled · Browse versions"
                                      : "Automatic saving paused · Browse history");
   }

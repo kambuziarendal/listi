@@ -96,8 +96,14 @@ public:
       BMessage request(kFolderHistory);
       request.AddString("source", approved[i].GetString("path", 0, ""));
       BMessenger listi(kSignature);
-      const status_t result = listi.IsValid() ? listi.SendMessage(&request) :
-          be_roster->Launch(kSignature, &request);
+      status_t result;
+      if (listi.IsValid()) result = listi.SendMessage(&request);
+      else {
+        // Roster signature lookup can pick an old development copy instead.
+        entry_ref installed;
+        result = get_ref_for_path("/boot/system/apps/Listi", &installed);
+        if (result == B_OK) result = be_roster->Launch(&installed, &request);
+      }
       if (result != B_OK && result != B_ALREADY_RUNNING)
         status->SetText("Could not open Listi to show saved versions.");
       break;

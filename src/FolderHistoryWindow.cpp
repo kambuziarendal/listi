@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "FolderHistory.h"
 #include "HistorySettings.h"
+#include "AutomaticHistory.h"
 #include "FolderHistoryListing.h"
 #include "PanelTools.h"
 #include "ViewVisibility.h"
@@ -16,6 +17,7 @@
 #include <ScrollView.h>
 #include <Slider.h>
 #include <StringView.h>
+#include <TextControl.h>
 #include <Window.h>
 #include <algorithm>
 #include <cstdlib>
@@ -34,7 +36,7 @@ namespace fs = std::filesystem;
 constexpr uint32 kOpen = 'fbop', kChoose = 'fbch', kChosen = 'fbcn', kSave = 'fbsv',
     kLoad = 'fbld', kOlder = 'fbol', kNewer = 'fbnw', kSelect = 'fbse',
     kPickFile = 'fbpf', kPickFolder = 'fbpd', kRestore = 'fbrs', kDone = 'fbdn',
-    kCancel = 'fbca', kRefresh = 'fbrf';
+    kCancel = 'fbca', kRefresh = 'fbrf', kSuggest = 'fbsu', kConfirm = 'fbcf', kBack = 'fbbk';
 std::atomic_int active{0};
 
 std::string PointDate(const std::string &id) {
@@ -44,6 +46,18 @@ std::string PointDate(const std::string &id) {
   if (localtime_r(&seconds, &local) && strftime(text, sizeof(text), "%Y-%m-%d %H:%M:%S", &local))
     return text;
   return "Unknown date";
+}
+
+// A suggestion is not a reservation. Restore still creates the result exclusively.
+std::string SuggestCopy(const fs::path &parent, const std::string &name) {
+  const fs::path base(name);
+  for (unsigned i = 1; i <= 1000; ++i) {
+    auto proposal = i == 1 ? base : fs::path(base.stem().string() + " (" +
+        std::to_string(i) + ")" + base.extension().string());
+    auto path = parent / proposal;
+    if (!fs::exists(fs::symlink_status(path))) return path.string();
+  }
+  throw std::runtime_error("Choose another containing folder: no unused copy name was found.");
 }
 
 class Timeline : public BSlider {
@@ -72,7 +86,7 @@ struct Task {
   std::shared_ptr<HistoryStore> store;
   std::vector<std::string> points;
   HistoryRows rows;
-  std::string notice;
+  std::string notice, suggestion, file;
   bool manual = false, failed = false;
 };
 
@@ -117,6 +131,13 @@ public:
       one = Button("Restore file…", kPickFile);
       all = Button("Restore folder…", kPickFolder);
       cancel = Button("Cancel", kCancel);
+      confirmRow = new BGroupView(B_HORIZONTAL);
+      copyPath = new BTextControl("restore path", "New copy:", "", nullptr);
+      confirm = Button("Restore copy", kConfirm);
+      back = Button("Cancel", kBack);
+      BLayoutBuilder::Group<>(confirmRow, B_HORIZONTAL).Add(copyPath).Add(back).Add(confirm);
+      controls.Add(confirmRow);
+      SetViewVisible(confirmRow, false);
       controls.AddGroup(B_HORIZONTAL).Add(save).Add(cancel).AddGlue().Add(one).Add(all).End();
     }
     SetViewVisible(choose, false);
@@ -133,7 +154,7 @@ public:
 
   void AttachedToWindow() override {
     BGroupView::AttachedToWindow();
-    for (auto *button : {older, newer, choose, refresh, save, cancel, one, all})
+    for (auto *button : {older, newer, choose, refresh, save, cancel, one, all, confirm, back})
       if (button) button->SetTarget(this);
     list->SetTarget(this);
     timeline->SetTarget(this);
@@ -144,7 +165,11 @@ public:
   void MessageReceived(BMessage *m) override {
     switch (m->what) {
     case kRefresh: Start(store ? kRefresh : kOpen); break;
-    case kChoose: Pick(false, {}); break;
+    case kChoose:
+      if (configuredUnavailable) {
+        if (LaunchHistoryHelper(true) != B_OK) Status("Could not open automatic history settings.");
+      } else Pick(false, {});
+      break;
     case kChosen: {
       entry_ref ref;
       BPath path;
@@ -165,6 +190,7 @@ public:
       timeline->SetValue(timeline->Value() + (m->what == kOlder ? -1 : 1));
       // fall through
     case kLoad:
+      EndConfirmation();
       if (Wanted() != loaded) {
         Clear();
         if (!task) Start(kLoad);
@@ -177,21 +203,29 @@ public:
           (m->what == kPickFolder || SelectedFile()))
         Pick(true, m->what == kPickFolder ? "" : SelectedFile()->path);
       break;
-    case kRestore: {
+    case kSuggest: {
       entry_ref ref;
       BPath path;
-      const char *name = m->GetString("name", "");
-      if (!task && m->FindRef("directory", &ref) == B_OK && *name &&
+      if (!task && m->FindRef("refs", &ref) == B_OK &&
           BEntry(&ref, true).GetPath(&path) == B_OK) {
         auto version = std::string(m->GetString("point", ""));
         if (version != loaded || version != Wanted()) {
           Status("The version changed. Choose Restore again.");
           break;
         }
-        Start(kRestore, (fs::path(path.Path()) / name).string(), m->GetString("file", ""));
+        Start(kSuggest, path.Path(), m->GetString("file", ""));
       }
       break;
     }
+    case kConfirm:
+      if (!task && !pendingPoint.empty() && loaded == pendingPoint && loaded == Wanted()) {
+        std::string destination = copyPath->Text();
+        auto file = pendingFile;
+        EndConfirmation();
+        Start(kRestore, destination, file);
+      }
+      break;
+    case kBack: EndConfirmation(); Status("Restore canceled."); Update(); break;
     case kDone:
       Finish();
       break;
@@ -233,6 +267,9 @@ private:
     refresh->SetEnabled(!task);
     choose->SetEnabled(!task);
     if (save) {
+      SetViewVisible(one, pendingPoint.empty());
+      SetViewVisible(all, pendingPoint.empty());
+      SetViewVisible(save, pendingPoint.empty());
       save->SetEnabled(!task && bool(store));
       SetViewVisible(cancel, Writing());
       cancel->SetEnabled(task && !task->cancel);
@@ -242,18 +279,19 @@ private:
   }
   void Pick(bool restore, const std::string &file) {
     BMessenger target(this);
-    BMessage selected(restore ? kRestore : kChosen);
+    BMessage selected(restore ? kSuggest : kChosen);
     selected.AddString("point", loaded.c_str());
     selected.AddString("file", file.c_str());
-    picker = std::make_unique<BFilePanel>(restore ? B_SAVE_PANEL : B_OPEN_PANEL,
-        &target, nullptr, restore ? B_FILE_NODE : B_DIRECTORY_NODE, false, &selected);
-    if (restore) {
-      auto proposed = file.empty() ? fs::path(source).filename().string() + " restored"
-                                   : fs::path(file).filename().string();
-      picker->SetSaveText(proposed.c_str());
-      picker->SetButtonLabel(B_DEFAULT_BUTTON, "Restore copy");
-    }
+    picker = std::make_unique<BFilePanel>(B_OPEN_PANEL,
+        &target, nullptr, B_DIRECTORY_NODE, false, &selected);
+    picker->SetButtonLabel(B_DEFAULT_BUTTON, restore ? "Choose destination folder" : "Choose history folder");
     picker->Show();
+  }
+
+  void EndConfirmation() {
+    pendingPoint.clear();
+    pendingFile.clear();
+    if (confirmRow) SetViewVisible(confirmRow, false);
   }
 
   void Start(uint32 action, std::string path = {}, std::string file = {}) {
@@ -266,6 +304,7 @@ private:
       Status("History readers are busy. Try Refresh shortly.");
       return;
     }
+    EndConfirmation();
     kind = action;
     loading = id;
     task = std::move(work);
@@ -300,6 +339,12 @@ private:
               work->store = std::move(history);
             } else if (action == kLoad) {
               work->rows = DescribeVersion(*history, id, previous, work->notice, work->cancel);
+            } else if (action == kSuggest) {
+              auto name = file.empty() ? fs::path(source).filename().string() + " restored" :
+                  fs::path(file).filename().string();
+              work->suggestion = SuggestCopy(path, name);
+              work->file = file;
+              work->notice = "Review the new copy. Existing files will not be replaced.";
             } else {
               history->Restore(id, path, work->cancel, file);
               work->notice = "Restored copy: " + path;
@@ -336,6 +381,12 @@ private:
       timeline->SetValue(points.empty() ? 0 : int32(points.size()) - 1);
       if (points.empty()) Status("No versions saved yet.");
       else Start(kLoad);
+    } else if (kind == kSuggest && !work->failed && loading == Wanted()) {
+      pendingPoint = loading;
+      pendingFile = std::move(work->file);
+      copyPath->SetText(work->suggestion.c_str());
+      copyPath->SetToolTip(work->suggestion.c_str());
+      SetViewVisible(confirmRow, true);
     } else if (kind == kLoad) {
       if (Wanted() != loading) Start(kLoad);
       else if (!work->failed) {
@@ -349,7 +400,11 @@ private:
         }
         loaded = loading;
       }
-    } else if (kind == kOpen) SetViewVisible(choose, work->manual || manual);
+    } else if (kind == kOpen) {
+      configuredUnavailable = !work->manual && !manual;
+      choose->SetLabel(configuredUnavailable ? "Automatic history settings…" : "Choose history folder…");
+      SetViewVisible(choose, true);
+    }
     manual |= work->manual;
     Update();
   }
@@ -365,7 +420,11 @@ private:
   std::shared_ptr<HistoryStore> store;
   std::shared_ptr<Task> task;
   uint32 kind = 0;
-  bool manual = false;
+  bool manual = false, configuredUnavailable = false;
+  std::string pendingPoint, pendingFile;
+  BGroupView *confirmRow = nullptr;
+  BTextControl *copyPath = nullptr;
+  BButton *confirm = nullptr, *back = nullptr;
   std::vector<std::string> points;
   std::vector<HistoryRow> rows;
   std::string loaded, loading;

@@ -703,11 +703,13 @@ reopen it to explicitly connect again.
    **Run now** requests a check immediately. Click **Versions…** beside a
    configured source to open its saved versions directly, even if Listi was closed.
 4. Open the configured source folder and click **History…** beside the pane
-   status. No reconnection is needed after restarting Listi or Haiku. Or
+   status. The indicator shows the saved version count, no versions yet, or
+   an unavailable store. No reconnection is needed after restarting Listi or Haiku. Or
    right-click the folder background and choose **Folder history → Preview in
    other panel** in a two-panel workspace. The opposite folder is kept intact;
    close the preview with **×** to return to it. **Open in window** also
-   provides restore actions. If the store identity changes, review the
+   provides restore actions. Pick a containing folder, check the suggested
+   unused path, then choose **Restore copy**. If the store identity changes, review the
    automatic settings instead of silently opening the replacement.
 5. Click **Disable** to stop the helper and remove its Deskbar icon. The
    selected paths and saved points are kept, and manual history is unchanged.
