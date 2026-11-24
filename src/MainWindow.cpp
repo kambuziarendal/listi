@@ -518,6 +518,12 @@ public:
   }
 
   bool QuitRequested() override {
+    if (PreferencesOpenFor(BMessenger(this))) {
+      queue.ErrorInfo("Apply or close this window's preferences first.");
+      return false;
+    }
+    if (browserCount > 1 && !InspectorEditorsAllowQuit(this))
+      return false;
     if (browserCount == 1 && (!InspectorEditorsAllowQuit() || !FilePropertiesAllowQuit() ||
         !OpenWithAllowQuit() || !ArchiveEditorsAllowQuit()))
       return false;

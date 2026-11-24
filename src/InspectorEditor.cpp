@@ -752,7 +752,7 @@ bool HandleInspectorEditorKey(BView *focus, const BMessage &key) {
   return false;
 }
 
-bool InspectorEditorsAllowQuit() {
+bool InspectorEditorsAllowQuit(BWindow *owner) {
   std::vector<BMessenger> targets;
   {
     std::lock_guard<std::mutex> lock(editorsLock);
@@ -761,6 +761,10 @@ bool InspectorEditorsAllowQuit() {
   }
   for (auto &target : targets) {
     if (!target.IsValid())
+      continue;
+    BLooper *registeredLooper = nullptr;
+    target.Target(&registeredLooper);
+    if (owner && registeredLooper != owner)
       continue;
     // Quit can originate in the same window that owns an embedded editor.
     // Lock the target (recursive for that window) rather than send and wait.

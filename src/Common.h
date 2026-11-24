@@ -136,4 +136,5 @@ struct Preferences : WorkspaceLayout {
   void ApplyDialog(const BMessage &);
   BMessage Save() const;
 };
+bool PreferencesOpenFor(BMessenger owner);
 void OpenPreferences(BMessenger target, const Preferences &);

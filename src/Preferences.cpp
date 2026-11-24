@@ -300,7 +300,7 @@ public:
     auto customize = new BButton("workspace layout",
                                  "Customize current workspace layout…", openLayout);
     customize->SetTarget(target);
-    separateWindows = new BCheckBox("Open folders in separate windows", nullptr);
+    separateWindows = new BCheckBox("Open a new window when launching Listi again", nullptr);
     separateWindows->SetValue(p.separateWindows);
     views.End()
         .Add(separateWindows)
@@ -470,21 +470,35 @@ public:
     Quit();
   }
 };
+std::mutex preferencesLock;
+std::vector<std::pair<BMessenger, BMessenger>> preferencesWindows;
 } // namespace
+
+bool PreferencesOpenFor(BMessenger owner) {
+  std::lock_guard<std::mutex> lock(preferencesLock);
+  for (const auto &entry : preferencesWindows)
+    if (entry.first == owner && entry.second.IsValid())
+      return true;
+  return false;
+}
+
 void OpenPreferences(BMessenger target, const Preferences &prefs) {
-  // The main window is the only caller. A messenger remains safe if the
-  // settings window has already closed.
-  static std::mutex mutex;
-  std::lock_guard<std::mutex> lock(mutex);
-  static BMessenger openWindow;
-  if (openWindow.LockTarget()) {
-    BLooper *looper = nullptr;
-    openWindow.Target(&looper);
-    static_cast<BWindow *>(looper)->Activate();
-    looper->Unlock();
-    return;
+  std::lock_guard<std::mutex> lock(preferencesLock);
+  for (auto it = preferencesWindows.begin(); it != preferencesWindows.end();) {
+    if (!it->second.IsValid()) {
+      it = preferencesWindows.erase(it);
+      continue;
+    }
+    if (it->first == target && it->second.LockTarget()) {
+      BLooper *looper = nullptr;
+      it->second.Target(&looper);
+      static_cast<BWindow *>(looper)->Activate();
+      looper->Unlock();
+      return;
+    }
+    ++it;
   }
   auto window = new PreferencesWindow(target, prefs);
-  openWindow = BMessenger(window);
+  preferencesWindows.emplace_back(target, BMessenger(window));
   window->Show();
 }
