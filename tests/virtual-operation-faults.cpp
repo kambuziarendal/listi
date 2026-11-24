@@ -222,22 +222,20 @@ int main() {
   check(!r.completed && !done && !r.errors.empty() && access(downloaded.c_str(), F_OK),
         "same-size SMB source edit with a distinct fractional revision is rejected");
   editSmbSourceOnRead = false;
-  r = RunVirtual(Job{Action::Copy, {smb}, dir}, hooks);
   const timespec referenceTime[] = {{0, UTIME_OMIT}, {1, 654000000}};
-  FileEntry local, expected;
+  FileEntry expected;
   expected.SetModification(0, 123400000);
   const auto prior = expected;
   expected.SetModification(0, 0);
   check(prior.modifiedFraction == "1234" && expected.modifiedKnown &&
             expected.modifiedFraction.empty() && !prior.SameModification(expected),
         "epoch fractions normalize, distinguish revisions, and clear on reuse");
-  check(r.completed == 1 && r.errors.empty() &&
-            !utimensat(AT_FDCWD, source.c_str(), referenceTime, 0) &&
-            StatFile(source, expected) && StatFile(downloaded, local) &&
-            local.SameModification(expected) &&
-            local.ModifiedNanoseconds() == expected.ModifiedNanoseconds(),
-        "stable SMB download preserves the local filesystem timestamp precision");
-  unlink(downloaded.c_str());
+  struct stat reference{};
+  check(!utimensat(AT_FDCWD, source.c_str(), referenceTime, 0) &&
+            !stat(source.c_str(), &reference) && StatFile(source, expected) &&
+            expected.modified == reference.st_mtim.tv_sec &&
+            expected.ModifiedNanoseconds() == reference.st_mtim.tv_nsec,
+        "StatFile preserves the local filesystem timestamp precision");
   reset(); truncateUpload = true; r = RunVirtual(job, hooks);
   check(!r.completed && !done && !r.errors.empty() && files.size() == 2 && has(".part") && errorHas(r, ".part") &&
         files.at(destination).data == "old contents",

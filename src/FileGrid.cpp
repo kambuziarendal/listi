@@ -181,7 +181,8 @@ public:
     Listi::RetireReadWorker(loader);
   }
   void AttachedToWindow() override {
-    nextReaderAttempt = 0;
+    loader = new ThumbnailLoader(BMessenger(this), generation, replies, terminal);
+    nextReaderAttempt = Listi::StartReadWorker(loader) ? 0 : system_time() + 250000;
     Update();
   }
   void DetachedFromWindow() override {

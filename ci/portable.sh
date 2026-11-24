@@ -16,7 +16,7 @@ files = subprocess.check_output(["git", "ls-files", "-z", "*.py"]).decode().spli
 for name in filter(None, files):
     ast.parse(Path(name).read_bytes(), filename=name)
 PY
-python3 prototypes/f12/test_history.py
+PYTHONDONTWRITEBYTECODE=1 python3 prototypes/f12/test_history.py
 python3 ci/native-inventory.py
 python3 ci/test-native-gate.py
 bash ci/test-public-fixtures.sh
