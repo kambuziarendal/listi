@@ -32,6 +32,28 @@ encoding and line endings if known. For a photo issue, use a synthetic or
 openly licensed example without personal GPS tags. See the
 [testing guide](docs/VERIFICATION.md).
 
+### Bug hunts: test the transition, not just the feature
+
+For each affected user journey, use the installed application and follow at
+least one realistic sequence **without resetting the window between steps**.
+Include the relevant non-happy path (for example Discard, conflicting files
+or unsupported metadata), then perform the next ordinary action. Verify both
+the resulting data and what the user actually sees. A successful exit, a
+correct filename or a responsive window does not prove the preview rendered.
+
+- For Inspector: capture the initial text preview, edit and discard, select a
+  known PNG, switch back to the same text and hide/show Inspector. Compare
+  content, margins and scrollbars at the same panel width, and verify the file
+  on disk did not change. Use real menu/pointer/keyboard input for the path
+  being evaluated; scripting that bypasses the control is not UI evidence.
+- For removable media: use representative files **with** native attributes,
+  not just plain bytes. Check the source, destination and visible job outcome,
+  including a successful job after a failed one. Distinguish VM coverage from
+  physical hardware and explicitly list any untested combination.
+- When a user finds something a hunt missed, retain the shortest sequence and
+  a failure criterion in the relevant regression set. Report which steps were
+  actually observed; do not extrapolate from an isolated feature test.
+
 ## Public documentation
 
 - Write documentation, issue summaries and release notes in English. Product
