@@ -655,7 +655,7 @@ Connecting does not write. **Save version** records the current tree.
 Slide left to go back in time, right for newer versions, or use the arrows
 for one step at a time. Scrolling over the timeline also steps between versions. The date identifies the saved folder, not the live
 folder. Added and removed paths and changes to file bytes, link targets or
-mode are relative to the preceding version. The listing is read-only and is
+saved metadata (attributes, mode and modification time) are relative to the preceding version. The listing is read-only and is
 limited to 2,048 entries per version. Changes are not annotated when truncated.
 **Refresh** reloads saved versions.
 

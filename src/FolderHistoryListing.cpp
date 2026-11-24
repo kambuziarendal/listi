@@ -1,11 +1,42 @@
 // SPDX-License-Identifier: MIT
 #include "FolderHistoryListing.h"
 #include "FolderHistory.h"
+#include "Sha256.h"
+#include <cstring>
 #include <stdexcept>
 
 namespace Listi {
 namespace {
 constexpr size_t kDisplayLimit = 2048;
+// Compare only saved metadata, never the live file or its content object.
+std::string Revision(const BMessage &entry, const std::atomic_bool &cancel) {
+  Sha256 revision;
+  const auto seconds = entry.GetInt64("sec", 0);
+  const auto fraction = entry.GetInt32("ns", 0);
+  revision.Update(&seconds, sizeof(seconds));
+  revision.Update(&fraction, sizeof(fraction));
+  const char *content = entry.GetString("digest", entry.GetString("target", ""));
+  revision.Update(content, strlen(content) + 1);
+  // Filesystem attribute enumeration order is not part of the revision.
+  std::map<std::string, std::string> attributes;
+  BMessage attr;
+  for (int32 i = 0; entry.FindMessage("attr", i, &attr) == B_OK; ++i) {
+    if (cancel) throw std::runtime_error("Canceled.");
+    Sha256 value;
+    const auto type = attr.GetUInt32("type", 0);
+    value.Update(&type, sizeof(type));
+    const void *bytes = nullptr;
+    ssize_t length = 0;
+    if (attr.FindData("value", B_RAW_TYPE, &bytes, &length) == B_OK)
+      value.Update(bytes, length);
+    attributes.emplace(attr.GetString("name", ""), value.Finish());
+  }
+  for (const auto &[name, value] : attributes) {
+    revision.Update(name.c_str(), name.size() + 1);
+    revision.Update(value.data(), value.size());
+  }
+  return revision.Finish();
+}
 void Collect(const BMessage &dir, const std::string &prefix, HistoryRows &rows, unsigned depth,
              bool &truncated, const std::atomic_bool &cancel) {
   BMessage child;
@@ -17,8 +48,7 @@ void Collect(const BMessage &dir, const std::string &prefix, HistoryRows &rows, 
       throw std::runtime_error("Invalid name in saved version.");
     auto path = prefix + name;
     mode_t mode = child.GetInt32("mode", 0);
-    auto revision = std::string(child.GetString("digest", child.GetString("target", "")));
-    rows.emplace(path, HistoryRow{path, std::move(revision), {}, mode});
+    rows.emplace(path, HistoryRow{path, Revision(child, cancel), {}, mode});
     if (S_ISDIR(mode)) Collect(child, path + "/", rows, depth + 1, truncated, cancel);
     if (truncated) return;
   }

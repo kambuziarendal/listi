@@ -115,6 +115,8 @@ int main() {
   assert(count()==5 && objects()==2);
   std::cout << "PASS first/next, metadata/rename and identical contents share one object; changed bytes add one; deletion saved" << std::endl;
   std::string status;
+  auto attrRows = Listi::DescribeVersion(history, metadata, first, status, cancel);
+  assert(attrRows.at("dir/note").change == "Changed" && attrRows.at("same").change.empty());
   auto movedRows = Listi::DescribeVersion(history, renamed, metadata, status, cancel);
   assert(movedRows.at("dir/note").change == "Removed" && movedRows.at("dir/note").mode == 0);
   assert(movedRows.at("dir/renamed").change == "Added");
