@@ -70,6 +70,7 @@ void MainWindowMenu::AddFilesMenu() {
   AddCommand(files, "View", kView, 'V', B_SHIFT_KEY);
   AddCommand(files, "Edit", kEdit, 'E');
   AddCommand(files, "Edit in external editor", kEditExternally);
+  AddCommand(files, "Copy to window…", kCopyToWindow);
   AddCommand(files, "Copy to other panel", kCopy, 'C', B_SHIFT_KEY);
   AddCommand(files, "Move to other panel", kMove, 'M');
   AddCommand(files, "Rename", kRename, 'R');

@@ -66,6 +66,7 @@ enum : uint32 {
   kExtractArchive = 'arex',
   kAddArchive = 'arad',
   kRemoveArchive = 'arrm',
+  kCopyToWindow = 'cpwi',
   kCopy = 'copy',
   kMove = 'move',
   kDelete = 'dele',

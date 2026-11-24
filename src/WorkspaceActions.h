@@ -27,6 +27,7 @@ inline constexpr WorkspaceAction kWorkspaceActions[] = {
     {"Terminal", "Terminal here", kTerminal, "T"},
     {"Operations", "Operations", kShowJobs, "O"},
     {"CLI window", "CLI in its own window", Listi::kShowFloatingTerminal,
-     "Shift+T"}};
+     "Shift+T"},
+    {"Copy to window…", "Copy to window…", kCopyToWindow, ""}};
 inline const std::vector<int32> kCompactWorkspaceActions = {0, 2, 3, 4, 9};
 static_assert(std::size(kWorkspaceActions) == WorkspaceLayout::ActionButtonCount);

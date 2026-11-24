@@ -144,6 +144,9 @@ class MainWindow : public Listi::WorkingWindow {
     }
     const int source = split->Source();
     const char *current = panes[source]->Path();
+    const bool copyTarget = split->Panel(source).Current() == PanelPage::Files &&
+        panes[source]->LocationValid() && !panes[source]->IsSearchList() && current[0] == '/';
+    SetCopyFolder(copyTarget ? current : "");
     if (titleLocation != current) {
       titleLocation = current;
       const auto last = titleLocation.find_last_not_of('/');
@@ -559,6 +562,7 @@ public:
     const bool flat = page == PanelPage::Flat;
     const auto &bar = split->Panel(split->Source()).FolderBar();
     const bool filePage = page == PanelPage::Files;
+    menu->FindItem(kCopyToWindow)->SetEnabled(filePage || flat);
     for (uint32 cmd : {Listi::kTabNew, Listi::kTabDuplicate, Listi::kTabRename,
                        Listi::kTabDetach, Listi::kTabAlways})
       menu->FindItem(cmd)->SetEnabled(filePage);
@@ -702,6 +706,31 @@ public:
       return;
     }
     const int source = split->Source();
+    if (m->what == kCopyToWindow) {
+      if (PromptBlocksCommand())
+        return;
+      try {
+        auto &panel = split->Panel(source);
+        Listi::Job job;
+        if (panel.Current() == PanelPage::Flat)
+          job = Listi::FlatSelection(*panel.Page(PanelPage::Flat));
+        else if (panel.Current() == PanelPage::Files) {
+          job.sources = panes[source]->Selected();
+          job.expectedSources = panes[source]->SelectedLocalIdentities();
+        }
+        if (job.sources.empty())
+          throw std::runtime_error("Select one or more local entries first.");
+        for (const auto &path : job.sources)
+          if (path.empty() || path.front() != '/' || Listi::IsVirtual(path))
+            throw std::runtime_error("Copy to window supports local entries only.");
+        job.action = Listi::Action::Copy;
+        if (PickCopyFolder(job))
+          fileOperations.SubmitTransfer(std::move(job));
+      } catch (const std::exception &error) {
+        PostMainWindowNotice(error.what());
+      }
+      return;
+    }
     if (Listi::HandleWindowScript(*m, prefs.workspace, *panes[source],
                                   *panes[1 - source], queue))
       return;

@@ -38,13 +38,13 @@ void FunctionButtonBank::SetActions(const std::vector<int32> &actions,
     const auto &action = kWorkspaceActions[id];
     fMenu.AddFunctionAction(action);
     BString label(action.label);
-    if (!compact && action.message != kNone)
+    if (!compact && action.message != kNone && *action.shortcut)
       label << " [" << action.shortcut << "]";
     auto button = new BButton(label, new BMessage(action.message));
     BString hint("Command+");
     hint << action.shortcut
          << " (normally Alt). File shortcuts apply outside text fields.";
-    button->SetToolTip(hint);
+    button->SetToolTip(*action.shortcut ? hint.String() : action.description);
     button->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
     fGrid->GridLayout()->AddView(button, index % columns, index / columns);
     ++index;

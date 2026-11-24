@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: MIT
 #include "WindowOverview.h"
 #include "WrappedLabel.h"
+#include "FileOperation.h"
+#include <PopUpMenu.h>
+#include <stdexcept>
+#include <MenuItem.h>
+#include <Volume.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <Button.h>
 #include <LayoutBuilder.h>
 #include <ListView.h>
@@ -27,6 +34,7 @@ struct WindowInfo {
   std::string title, kind, location;
   bool named;
   std::string setName;
+  std::string copyFolder;
 };
 std::mutex registryLock;
 std::atomic<int64> nextId{0};
@@ -211,6 +219,67 @@ void WorkingWindow::Describe(const std::string &title, const std::string &path, 
   modified = dirty;
   Publish();
 }
+void WorkingWindow::SetCopyFolder(const std::string &path) {
+  if (copyFolder != path) {
+    copyFolder = path;
+    Publish();
+  }
+}
+
+static bool WritableLocalFolder(const std::string &path, NodeIdentity &node) {
+  struct stat st;
+  if (stat(path.c_str(), &st) || !S_ISDIR(st.st_mode))
+    return false;
+  BVolume volume(st.st_dev);
+  if (volume.InitCheck() != B_OK || volume.IsShared() || volume.IsReadOnly() ||
+      access(path.c_str(), W_OK | X_OK))
+    return false;
+  node = {int32_t(st.st_dev), int64_t(st.st_ino)};
+  return true;
+}
+
+bool WorkingWindow::PickCopyFolder(Job &job) {
+  std::vector<WindowInfo> snapshot;
+  {
+    std::lock_guard<std::mutex> guard(registryLock);
+    for (const auto &item : windows)
+      if (item.first != id && !item.second.copyFolder.empty())
+        snapshot.push_back(item.second);
+  }
+  BPopUpMenu choices("Copy to window", false, false);
+  std::vector<NodeIdentity> nodes;
+  std::vector<WindowInfo> targets;
+  for (const auto &row : snapshot) {
+    NodeIdentity node;
+    if (!WritableLocalFolder(row.copyFolder, node))
+      continue;
+    auto label = row.title + "  ·  #" + std::to_string(row.id) + "  ·  " + row.copyFolder;
+    choices.AddItem(new BMenuItem(label.c_str(), nullptr));
+    nodes.push_back(node);
+    targets.push_back(row);
+  }
+  if (targets.empty())
+    throw std::runtime_error("Open another window on a writable local folder first.");
+  auto choice = choices.Go(BPoint(Frame().left + 24, Frame().top + 36), false, true, false);
+  if (!choice)
+    return false;
+  const auto index = choices.IndexOf(choice);
+  const auto &selected = targets.at(index);
+  NodeIdentity current;
+  if (!WritableLocalFolder(selected.copyFolder, current) ||
+      current.device != nodes[index].device || current.inode != nodes[index].inode)
+    throw std::runtime_error("The destination folder changed or is no longer writable.");
+  {
+    std::lock_guard<std::mutex> guard(registryLock);
+    auto found = windows.find(selected.id);
+    if (found == windows.end() || found->second.copyFolder != selected.copyFolder)
+      throw std::runtime_error("The destination window closed or changed folders. Choose again.");
+  }
+  job.destination = selected.copyFolder;
+  job.expectedDestination = current;
+  return true;
+}
+
 void WorkingWindow::Publish() {
   std::string title = alias.empty() ? automatic : alias + " · Listi";
   if (modified)
@@ -218,7 +287,7 @@ void WorkingWindow::Publish() {
   if (title != Title())
     SetTitle(title.c_str());
   std::lock_guard<std::mutex> guard(registryLock);
-  windows[id] = {id, BMessenger(this), title, kind, location, !alias.empty(), setName};
+  windows[id] = {id, BMessenger(this), title, kind, location, !alias.empty(), setName, copyFolder};
   ++revision;
 }
 bool WorkingWindow::HandleWindowAction(BMessage *m) {
