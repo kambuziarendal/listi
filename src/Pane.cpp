@@ -344,6 +344,8 @@ int32 Pane::LocationMode() const {
     return 0;
   if (attributeDetails && path[0] == '/' && !Listi::IsVirtual(path.String()))
     return 0;
+  if (workingSetView >= 0)
+    return workingSetView;
   auto remembered = prefs.folderModes.find(path.String());
   return remembered == prefs.folderModes.end() ? (restoredView >= 0 ? restoredView : prefs.PaneMode(id))
                                                : remembered->second;
@@ -556,7 +558,11 @@ void Pane::StartNavigation(const std::string &request, int target, bool trash, b
     history.SavePosition(CaptureVisit());
   pendingVisit = restore ? restoring->pendingVisit
                          : target >= 0 ? history.PositionAt(target) : std::nullopt;
-  if (!restore) restoring.reset();
+  if (!restore) {
+    restoring.reset();
+    if (path != request.c_str())
+      workingSetView = -1;
+  }
   const bool wasQuery = IsSearchList();
   Listi::RetireReadWorker(queryWorker);
   queryRows.clear();
@@ -981,6 +987,7 @@ void Pane::MessageReceived(BMessage *m) {
       SetStatus("Search results use Details to show original folders.");
       break;
     }
+    workingSetView = -1;
     restoredView = -1;
     attributeDetails = false;
     prefs.SetPaneMode(id, requestedMode);
@@ -1009,6 +1016,7 @@ void Pane::MessageReceived(BMessage *m) {
     PublishDisplay(true);
     break;
   case kForgetView:
+    workingSetView = -1;
     attributeDetails = false;
     prefs.folderModes.erase(path.String());
     SetDisplayMode(LocationMode());

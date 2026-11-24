@@ -27,6 +27,62 @@ FolderTab FolderTabs::Snapshot() {
   tabs[active].state = pane.CaptureNavigation();
   return tabs[active];
 }
+BMessage FolderTabs::ArchiveTabs() {
+  Snapshot();
+  BMessage result;
+  result.AddInt32("active", active);
+  for (const auto &tab : tabs) {
+    BMessage item;
+    const auto &state = tab.state;
+    item.AddString("alias", tab.alias.c_str());
+    item.AddString("location", state.location.c_str());
+    item.AddString("label", state.displayLabel.c_str());
+    item.AddString("filter", state.filter.c_str());
+    item.AddPoint("scroll", state.scroll);
+    item.AddInt32("view", state.view);
+    item.AddInt32("folderView", state.folderView);
+    item.AddInt32("sort", state.sorting.column);
+    item.AddBool("ascending", state.sorting.ascending);
+    auto found = state.queries.find(state.location);
+    if (found != state.queries.end()) {
+      BMessage query;
+      found->second.WriteTo(query);
+      item.AddMessage("query", &query);
+    }
+    result.AddMessage("tab", &item);
+  }
+  return result;
+}
+
+void FolderTabs::RestoreTabs(const BMessage &archive) {
+  std::vector<FolderTab> restored;
+  BMessage item;
+  for (int32 i = 0; archive.FindMessage("tab", i, &item) == B_OK; ++i) {
+    FolderTab tab{++nextTab, item.GetString("alias", ""), {}};
+    auto &state = tab.state;
+    state.location = item.GetString("location", "/boot/home");
+    state.displayLabel = item.GetString("label", "");
+    state.filter = item.GetString("filter", "");
+    state.workingSetView = true;
+    state.view = item.GetInt32("view", -1);
+    state.folderView = item.GetInt32("folderView", -1);
+    state.sorting = {item.GetInt32("sort", 0), item.GetBool("ascending", true)};
+    item.FindPoint("scroll", &state.scroll);
+    BMessage query;
+    if (item.FindMessage("query", &query) == B_OK) {
+      state.location = "@set-query:" + std::to_string(tab.id);
+      state.queries.emplace(state.location, SavedSearch::FromMessage(query));
+    }
+    restored.push_back(std::move(tab));
+  }
+  if (!restored.empty()) {
+    tabs = std::move(restored);
+    active = std::min(size_t(archive.GetInt32("active", 0)), tabs.size() - 1);
+    closed.reset();
+    Restore();
+  }
+}
+
 void FolderTabs::Adopt(FolderTab tab) {
   tabs[active] = std::move(tab);
   Restore();

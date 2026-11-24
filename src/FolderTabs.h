@@ -24,6 +24,8 @@ public:
   FolderTabs(int32 side, Pane &);
   bool Change(uint32 command, int64 chosen = -1);
   FolderTab Snapshot();
+  BMessage ArchiveTabs();
+  void RestoreTabs(const BMessage &);
   void Adopt(FolderTab tab);
   void AfterDetach();
   void Rename(const std::string &);

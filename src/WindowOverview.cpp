@@ -26,6 +26,7 @@ struct WindowInfo {
   BMessenger target;
   std::string title, kind, location;
   bool named;
+  std::string setName;
 };
 std::mutex registryLock;
 std::atomic<int64> nextId{0};
@@ -134,6 +135,8 @@ class Overview : public BWindow {
     for (size_t i = 0; i < rows.size(); ++i) {
       const auto &row = rows[i];
       auto label = "#" + std::to_string(row.id) + "  " + row.title + "  ·  " + row.kind + "  ·  " + row.location;
+      if (!row.setName.empty())
+        label += "  ·  Set: " + row.setName;
       list->AddItem(new BStringItem(label.c_str()));
       if (row.id == wanted)
         list->Select(i);
@@ -215,7 +218,7 @@ void WorkingWindow::Publish() {
   if (title != Title())
     SetTitle(title.c_str());
   std::lock_guard<std::mutex> guard(registryLock);
-  windows[id] = {id, BMessenger(this), title, kind, location, !alias.empty()};
+  windows[id] = {id, BMessenger(this), title, kind, location, !alias.empty(), setName};
   ++revision;
 }
 bool WorkingWindow::HandleWindowAction(BMessage *m) {
@@ -245,6 +248,17 @@ bool WorkingWindow::HandleWindowAction(BMessage *m) {
 void WorkingWindow::MessageReceived(BMessage *m) {
   if (!HandleWindowAction(m))
     BWindow::MessageReceived(m);
+}
+std::vector<BrowserChoice> WorkingSetChoices() {
+  std::lock_guard<std::mutex> guard(registryLock);
+  std::vector<BrowserChoice> choices;
+  for (const auto &entry : windows) {
+    const auto &w = entry.second;
+    if (w.kind == "File manager")
+      choices.push_back({"#" + std::to_string(w.id) + "  " + w.title + "  ·  " + w.location,
+                         w.target, w.id});
+  }
+  return choices;
 }
 BMessenger OpenWindowOverview(WorkingWindow &owner, BMessenger previous) {
   if (RaiseExisting(previous))

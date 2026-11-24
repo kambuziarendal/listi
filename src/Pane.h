@@ -142,6 +142,7 @@ private:
   Listi::NavigationHistory history;
   std::map<std::string, Listi::SavedSearch> queries;
   std::optional<Listi::PaneNavigationState> restoring;
+  int workingSetView = -1;
   int restoredView = -1;
   Listi::ReadWorker *queryWorker = nullptr;
   std::shared_ptr<std::atomic<int64>> queryFailure = std::make_shared<std::atomic<int64>>(-1);

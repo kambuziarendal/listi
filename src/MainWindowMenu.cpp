@@ -9,6 +9,7 @@
 #include "WorkspaceActions.h"
 #include "WorkspaceEditor.h"
 #include "WindowOverview.h"
+#include "WorkingSets.h"
 #include <MenuItem.h>
 
 namespace {
@@ -29,6 +30,8 @@ MainWindowMenu::MainWindowMenu() : BMenuBar("menu") {
   AddCommand(windows, "Name window…", Listi::kNameWindow);
   AddCommand(windows, "Use folder name", Listi::kUseFolderName);
   windows->AddSeparatorItem();
+  AddCommand(windows, "Save working set…", Listi::kSaveWorkingSet);
+  AddCommand(windows, "Open working set…", Listi::kOpenWorkingSet);
   AddCommand(windows, "Open windows…", Listi::kOpenWindowOverview);
   auto *tabs = new BMenu("Folder tabs");
   AddCommand(tabs, "New tab here or in selected folder", Listi::kTabNew);

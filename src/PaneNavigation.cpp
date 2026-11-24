@@ -100,6 +100,7 @@ Listi::PaneNavigationState Pane::CaptureNavigation() {
   state.queries = queries;
   state.filter = filter->Text();
   state.view = mode;
+  state.workingSetView = workingSetView >= 0;
   state.folderView = restoredView >= 0 ? restoredView : prefs.PaneMode(id);
   state.sorting = Sorting();
   state.scroll = ScrollPosition();
@@ -120,6 +121,7 @@ void Pane::RestoreNavigation(const Listi::PaneNavigationState &state) {
   history = state.history;
   queries = state.queries;
   restoredView = state.folderView >= 0 ? state.folderView : state.view;
+  workingSetView = state.workingSetView ? state.view : -1;
   restoring = state;
   const int index = history.PendingTarget() >= 0 ? history.PendingTarget() : history.Position();
   StartNavigation(state.location, index >= 0 && history.At(index) == state.location ? index : -1,

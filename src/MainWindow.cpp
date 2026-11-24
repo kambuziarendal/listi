@@ -7,6 +7,7 @@
 #include "MainWindow.h"
 #include "WindowOverview.h"
 #include "FolderTabs.h"
+#include "WorkingSets.h"
 #include <atomic>
 #include <MenuItem.h>
 #include "LayoutIntroduction.h"
@@ -464,7 +465,7 @@ public:
              const Listi::SavedSearches &queries, bool queriesWritable, BrowserRequest request, BrowserOpener open)
       : Listi::WorkingWindow(BRect(70, 70, 1170, 710), "Listi", "File manager",
                 B_AUTO_UPDATE_SIZE_LIMITS),
-        sessionLayout(request.localLayout || request.detached.has_value()), openBrowser(std::move(open)), prefs(p), service(svc),
+        sessionLayout(request.localLayout || request.detached.has_value() || request.workingSet.has_value()), openBrowser(std::move(open)), prefs(p), service(svc),
         savedNavigation(svc, saved, writable, queries, queriesWritable, BMessenger(this)) {
     panes[0] = new Pane(0, prefs, shelf.Model());
     panes[1] = new Pane(1, prefs, shelf.Model());
@@ -493,6 +494,24 @@ public:
     split->Focus();
     ResizeTo(1140, 650);
     ++browserCount;
+    if (request.workingSet) {
+      const auto &savedWindow = *request.workingSet;
+      SetWorkingSetName(savedWindow.GetString("workingSetName", ""));
+      SetAlias(savedWindow.GetString("alias", ""));
+      for (int side = 0; side < 2; ++side) {
+        BMessage panel;
+        if (savedWindow.FindMessage("panel", side, &panel) == B_OK)
+          split->Panel(side).FolderBar().RestoreTabs(panel);
+      }
+      split->SetSource(savedWindow.GetInt32("source", 0) == 1 ? 1 : 0);
+      split->Focus();
+      BRect frame;
+      if (savedWindow.FindRect("frame", &frame) == B_OK && frame.IsValid()) {
+        ResizeTo(frame.Width(), frame.Height());
+        MoveTo(frame.LeftTop());
+        MoveOnScreen();
+      }
+    }
     if (request.position)
       MoveTo(*request.position);
     if (request.detached)
@@ -601,6 +620,25 @@ public:
       std::string path = m->what == kNewBrowser ? pane.SearchRoot() : pane.SelectedFolder();
       if (!path.empty() && openBrowser)
         openBrowser({path, {}, Frame().LeftTop() + BPoint(24, 24)});
+      return;
+    }
+    if (m->what == Listi::kCaptureWorkingWindow) {
+      BMessage snapshot(Listi::kCaptureWorkingWindow);
+      WorkspaceLayout savedLayout = prefs;
+      split->RememberWeights(savedLayout, split->QuickView());
+      savedLayout.Archive(snapshot);
+      snapshot.AddInt32("source", split->Source());
+      snapshot.AddString("alias", Alias().c_str());
+      snapshot.AddRect("frame", Frame());
+      for (int side = 0; side < 2; ++side) {
+        auto panel = split->Panel(side).FolderBar().ArchiveTabs();
+        snapshot.AddMessage("panel", &panel);
+      }
+      m->SendReply(&snapshot);
+      return;
+    }
+    if (m->what == Listi::kOpenWorkingSet || m->what == Listi::kSaveWorkingSet) {
+      Listi::ShowWorkingSets(*this, m->what == Listi::kSaveWorkingSet, openBrowser);
       return;
     }
     if (HandleFolderTab(*m) || HandleWindowAction(m))
@@ -893,6 +931,8 @@ BWindow *CreateMainWindow(const Preferences &prefs, BMessenger service,
                           const Listi::SavedPlaces &places, bool placesWritable,
                           const Listi::SavedSearches &searches, bool searchesWritable, BrowserRequest request, BrowserOpener open) {
   auto layout = prefs;
+  if (request.workingSet)
+    layout.WorkspaceLayout::Load(*request.workingSet);
   if (request.detached) {
     layout.workspace = Workspace::einn;
     layout.singlePane = 0;

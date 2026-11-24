@@ -20,6 +20,7 @@ struct BrowserRequest {
   std::optional<Listi::FolderTab> detached;
   std::optional<BPoint> position;
   bool localLayout = false;
+  std::optional<BMessage> workingSet = {};
 };
 using BrowserOpener = std::function<bool(BrowserRequest)>;
 bool BrowserAllowsQuit(BWindow *);

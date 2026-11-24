@@ -14,7 +14,12 @@ and standalone previews. Select a row to see its full location, rename it or
 activate it. Equal names are allowed; the number identifies that open window.
 A CLI shows where its shell started, not the shell’s current directory. Docking
 a CLI removes its floating window from the list without stopping the shell.
-Names last for the life of the window; they do not save a working set.
+Names normally last for the life of the window. To reuse a layout, choose
+**Window > Save working set…**, name it and select the file windows to include.
+**Open working set…** adds new windows with their saved names, positions,
+layouts and folder tabs. Opening a set does not close other windows, launch
+shells, repeat file operations or overwrite the saved set. If a folder is
+unavailable, reconnect its volume and reload, or enter another location.
 
 On a fresh installation, the optional layout introduction describes **Einn**,
 **Askr**, **Tvískipt** and **Smiðja**. Selecting an option previews its

@@ -2,6 +2,7 @@
 #include "Common.h"
 #include "FolderTabs.h"
 #include "MainWindow.h"
+#include "WorkingSets.h"
 #include "PanelTools.h"
 #include "Pane.h"
 #include "SavedPlaces.h"
@@ -101,6 +102,26 @@ int main() {
   Ready(*window);
   Check(bar.ActiveId() == copy && bar.Snapshot().alias == "Work" &&
         files.SelectedPath() == (b/"two").string(), "reopening preserves name, ID and selected file");
+  const auto savedIndex = bar.Index();
+  window->Unlock();
+  BMessage capture(kCaptureWorkingWindow), snapshot;
+  Check(BMessenger(window).SendMessage(&capture, &snapshot, 1000000, 1000000) == B_OK &&
+        snapshot.what == kCaptureWorkingWindow, "capture working set window");
+  BrowserRequest restore;
+  restore.localLayout = true;
+  restore.workingSet = snapshot;
+  auto *restored = CreateMainWindow(prefs, {}, {}, false, {}, false, std::move(restore));
+  restored->Show();
+  restored->Lock();
+  Ready(*restored);
+  auto &restoredTabs = Panel(*restored).FolderBar();
+  Check(restoredTabs.Count() == 2 && restoredTabs.Index() == savedIndex &&
+        restoredTabs.ActiveId() != copy && restoredTabs.Snapshot().alias == "Work" &&
+        restoredTabs.Snapshot().state.location == b.string() &&
+        Panel(*restored, 1).Files().CaptureNavigation().location == c.string(),
+        "working set restores both panels and active named tab with fresh identity");
+  restored->Quit();
+  window->Lock();
   Command(*window, kTabDetach);
   Ready(*window);
   Check(bar.Count() == 1 && bar.ActiveId() == first, "detach leaves original tab active");
