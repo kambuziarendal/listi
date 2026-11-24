@@ -32,7 +32,7 @@ class ExportWindow : public BWindow {
       if (++n <= 3)
         sample += row.csv;
     }
-    count->SetText((std::to_string(n) + " rows").c_str());
+    count->SetText((std::to_string(n) + (n == 1 ? " row" : " rows")).c_str());
     preview->SetText(sample.c_str());
     save->SetEnabled(n != 0);
   }

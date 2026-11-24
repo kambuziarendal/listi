@@ -282,7 +282,7 @@ class MainWindow : public Listi::WorkingWindow {
             AskInline("That favorite name is in use. Choose another:", "Add favorite",
                       retry, name.c_str());
           } else {
-            PostMainWindowNotice(result == Listi::FavoriteResult::Added
+            panes[source]->ShowStatus(result == Listi::FavoriteResult::Added
                 ? "Added to Haiku file panel favorites." : "This folder is already a favorite.");
           }
         }
