@@ -204,6 +204,15 @@ echo "TEST installed Listi --self-test"
         if installed.count(marker) != 1:
             raise RuntimeError("Missing installed self-test start")
         receipts["validate_checks"](installed[installed.index(marker) + 1:])
+        version = next(line.split()[1] for line in Path("PackageInfo").read_text().splitlines()
+                       if line.startswith("version "))
+        name = f"listi-{version}-x86_64.hpkg"
+        guest_path = f"/boot/system/packages/{name}"
+        with (output / name).open("wb") as package_file:
+            subprocess.run([*ssh, "cat " + shlex.quote(guest_path)], stdout=package_file, check=True)
+        digest = hashlib.sha256((output / name).read_bytes()).hexdigest()
+        if f"{digest}  {guest_path}" not in installed:
+            raise RuntimeError("Exported package differs from the installed artifact")
     if args.extended_fixture:
         # Host dependencies are opt-in. Nothing here uses a production service.
         helper = Path(__file__).resolve().parents[1] / "ci/run-extended.py"
