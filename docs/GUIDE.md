@@ -604,7 +604,7 @@ attributes. Use Find files' volume query mode to search an indexed attribute.
 
 ### Use a local search as a file list
 
-In **View > Find files…**, choose the search folder and criteria, or load a
+In **Listi > Find files…**, choose the search folder and criteria, or load a
 saved search, then choose **Open as file list**. The query replaces the file
 list in the originating pane; **Back** returns to the previous location.
 Each row refers to its original file and shows its original folder in Details.
