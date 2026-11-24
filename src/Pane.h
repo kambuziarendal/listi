@@ -134,7 +134,7 @@ private:
   float contentSplitterSize = 0;
   BMenuField *display;
   int32 mode = 0;
-  void SetDisplayMode(int32);
+  void SetDisplayMode(int32, bool appendedDetails = false);
   int32 LocationMode() const;
   void PublishDisplay(bool folder = false, bool forget = false);
   bool locationValid = false;

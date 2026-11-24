@@ -350,7 +350,7 @@ int32 Pane::LocationMode() const {
   return remembered == prefs.folderModes.end() ? (restoredView >= 0 ? restoredView : prefs.PaneMode(id))
                                                : remembered->second;
 }
-void Pane::SetDisplayMode(int32 value) {
+void Pane::SetDisplayMode(int32 value, bool appendedDetails) {
   auto focus = Window() ? Window()->CurrentFocus() : nullptr;
   while (focus && focus != cards)
     focus = focus->Parent();
@@ -361,9 +361,10 @@ void Pane::SetDisplayMode(int32 value) {
                                       : mode == MillerMode ? 2
                                                            : 1);
   columns->SetEnabled(mode == MillerMode);
-  if (mode == 0)
-    list->Refresh();
-  else if (mode == MillerMode) {
+  if (mode == 0) {
+    if (!appendedDetails)
+      list->Refresh();
+  } else if (mode == MillerMode) {
     columns->SetLocation(path.String());
     columns->Refresh();
   } else {
@@ -1292,13 +1293,9 @@ void Pane::MessageReceived(BMessage *m) {
     history.Complete(serial, path.String(), locationValid);
     UpdateNavigation();
     const int32 finalMode = LocationMode();
-    if (mode == 0 && finalMode == mode && locationValid) {
-      // Each batch already added its rows to the details view. Keep the model
-      // sorted for navigation, without rebuilding the native row index.
-      entries.Sort(list->Sorting());
-    } else {
-      SetDisplayMode(finalMode);
-    }
+    // Native details rows were already appended by the scan. Keep the
+    // final location, menu and model updates without revisiting every row.
+    SetDisplayMode(finalMode, mode == 0 && finalMode == mode && locationValid);
     edit->SetText(LocationLabel().c_str());
     sidebar->UpdateLocation();
     const char *error;
