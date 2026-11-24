@@ -16,13 +16,19 @@ public:
   std::string folder;
 };
 
-// Takes ownership of both descriptors. The I/O worker only sees an already
+enum class StagingPermissions { Preserve, PreserveIfSupported, KeepCreationMode };
+
+// Takes ownership of both descriptors. Returns false if chmod was unsupported
+// and the caller explicitly allowed keeping the destination mode. The I/O worker only sees an already
 // opened source and a private staging inode. Only the caller can publish it.
-void WriteRemovableStagingFile(int source, int staging,
+bool WriteRemovableStagingFile(int source, int staging,
                                const struct stat &before,
                                const std::function<void(size_t)> &checkpoint,
-                               bool privateStaging = false);
+                               bool privateStaging = false,
+                               StagingPermissions permissions = StagingPermissions::Preserve,
+                               bool flushBeforeTimes = false);
 // Takes ownership. After cancellation the worker can only flush and close.
 int FlushRemovableDirectory(int descriptor,
-                            const std::function<void()> &checkpoint);
+                            const std::function<void()> &checkpoint,
+                            int &closeError);
 } // namespace Listi

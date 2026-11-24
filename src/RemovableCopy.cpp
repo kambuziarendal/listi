@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT
 #include "RemovableCopy.h"
 #include "StagingSpace.h"
+#ifdef __HAIKU__
+#include <Errors.h>
+#endif
 #include <array>
 #include <atomic>
 #include <cerrno>
@@ -34,7 +37,8 @@ struct Transfer {
   bool permit = true, finished = false;
   std::atomic<bool> stop{false};
   size_t bytes = 0;
-  int error = 0;
+  int error = 0, closeError = 0;
+  bool modeUnsupported = false;
 
   bool Next() {
     std::unique_lock<std::mutex> lock(mutex);
@@ -51,7 +55,7 @@ struct Transfer {
 };
 
 int Stream(const Descriptors &fd, const struct stat &before, Transfer &state,
-           bool privateStaging) {
+           bool privateStaging, StagingPermissions permissions, bool flushBeforeTimes) {
   auto &buffer = state.buffer;
   while (state.Next()) {
     ssize_t count;
@@ -66,7 +70,20 @@ int Stream(const Descriptors &fd, const struct stat &before, Transfer &state,
       const struct timespec times[] = {before.st_atim, before.st_mtim};
       if (state.stop)
         return ECANCELED;
-      if (fchmod(fd.staging, before.st_mode & 07777))
+      if (permissions != StagingPermissions::KeepCreationMode &&
+          fchmod(fd.staging, before.st_mode & 07777)) {
+#ifdef __HAIKU__
+        if (permissions != StagingPermissions::PreserveIfSupported || errno != B_UNSUPPORTED)
+          return errno;
+#else
+        return errno;
+#endif
+        state.modeUnsupported = true;
+      }
+      if (state.stop)
+        return ECANCELED;
+      // Haiku NTFS updates mtime when dirty data pages are written.
+      if (flushBeforeTimes && fsync(fd.staging))
         return errno;
       if (state.stop)
         return ECANCELED;
@@ -136,18 +153,19 @@ void AwaitIO(std::thread &io, const std::shared_ptr<Transfer> &state,
 }
 } // namespace
 
-void WriteRemovableStagingFile(int source, int staging, const struct stat &before,
+bool WriteRemovableStagingFile(int source, int staging, const struct stat &before,
                                const std::function<void(size_t)> &checkpoint,
-                               bool privateStaging) {
+                               bool privateStaging, StagingPermissions permissions,
+                               bool flushBeforeTimes) {
   // Allocate ownership before starting the thread. Even a spawn failure closes
   // both descriptors. A blocked close belongs to the I/O worker too.
   Descriptors owned{source, staging};
   auto state = std::make_shared<Transfer>();
-  std::thread io([source, staging, before, state, privateStaging] {
+  std::thread io([source, staging, before, state, privateStaging, permissions, flushBeforeTimes] {
     int error;
     {
       Descriptors fd{source, staging};
-      error = Stream(fd, before, *state, privateStaging);
+      error = Stream(fd, before, *state, privateStaging, permissions, flushBeforeTimes);
       if (close(fd.staging) && !error)
         error = errno;
       fd.staging = -1;
@@ -171,8 +189,10 @@ void WriteRemovableStagingFile(int source, int staging, const struct stat &befor
   if (state->error)
     throw std::runtime_error(std::string("Transfer involving removable disk: ") +
                              strerror(state->error));
+  return !state->modeUnsupported;
 }
-int FlushRemovableDirectory(int descriptor, const std::function<void()> &checkpoint) {
+int FlushRemovableDirectory(int descriptor, const std::function<void()> &checkpoint,
+                            int &closeError) {
   Descriptors owned{-1, descriptor};
   const std::function<void(size_t)> poll = [&](size_t) { checkpoint(); };
   auto state = std::make_shared<Transfer>();
@@ -180,7 +200,8 @@ int FlushRemovableDirectory(int descriptor, const std::function<void()> &checkpo
     const int syncError = fsync(descriptor) ? errno : 0;
     const int closeError = close(descriptor) ? errno : 0;
     std::lock_guard<std::mutex> lock(state->mutex);
-    state->error = syncError ? syncError : closeError;
+    state->error = syncError;
+    state->closeError = closeError;
     state->finished = true;
     state->changed.notify_one();
   });
@@ -188,6 +209,7 @@ int FlushRemovableDirectory(int descriptor, const std::function<void()> &checkpo
   AwaitIO(io, state, poll,
           "Directory flush interrupted; disk I/O is still pending. "
           "Durability after restart is unknown. Check both locations after reconnecting.");
+  closeError = state->closeError;
   return state->error;
 }
 } // namespace Listi

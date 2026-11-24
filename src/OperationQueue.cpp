@@ -852,6 +852,8 @@ void OperationQueue::Loop() {
                                            : ". Cancelled; completed entries kept.");
     else if (renameBatch && result.completed && !undoAvailable)
       summary << ". Undo unavailable: contents could not be verified.";
+    if (result.copyLimitations)
+      summary << ". NTFS copy limitations: see operation details. Safely eject removable disks.";
     if (result.recoverableMoves)
       summary << ". Cross-volume originals kept in source Trash.";
     if (details.Incomplete())

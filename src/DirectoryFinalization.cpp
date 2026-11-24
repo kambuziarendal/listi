@@ -11,6 +11,7 @@
 #include <Path.h>
 #include <Volume.h>
 #include <fs_info.h>
+#include <strings.h>
 #endif
 #include <unistd.h>
 
@@ -38,16 +39,20 @@ void PinnedDirectory::Verify() const {
     throw std::runtime_error(path + ": destination directory changed.");
 }
 
-void PinnedDirectory::Flush(const std::function<void()> &checkpoint) const {
+bool PinnedDirectory::Flush(const std::function<void()> &checkpoint,
+                            bool allowUnsupportedNtfs) const {
   if (checkpoint)
     checkpoint();
   Verify();
   int error;
+  int closeError = 0;
+  bool ntfs = false;
 #ifdef __HAIKU__
   fs_info info{};
   if (fs_stat_dev(device, &info))
     throw std::runtime_error(path +
                              ": cannot identify volume for directory flush.");
+  ntfs = strcasecmp(info.fsh_name, "ntfs") == 0;
   const bool removable = strncmp(info.device_name, "/dev/disk/", 10) == 0 &&
                          ((info.flags & B_FS_IS_REMOVABLE) ||
                           strncmp(info.device_name, "/dev/disk/usb/", 14) == 0);
@@ -82,21 +87,28 @@ void PinnedDirectory::Flush(const std::function<void()> &checkpoint) const {
       throw std::runtime_error(
           path + ": cannot duplicate directory flush descriptor.");
     try {
-      error = FlushRemovableDirectory(worker, check);
+      error = FlushRemovableDirectory(worker, check, closeError);
     } catch (const RemovableCopyInterrupted &failure) {
       throw interruption(failure.what());
     }
-    if (error == EIO || error == ENODEV || error == ENXIO)
+    if (error == EIO || error == ENODEV || error == ENXIO ||
+        closeError == EIO || closeError == ENODEV || closeError == ENXIO)
       throw interruption(
           "Removable directory flush failed. Durability after restart is unknown.");
   } else
 #endif
     error = fsync(fd) ? errno : 0;
-  if (error)
+  // Haiku's NTFS fsync calls file_cache_sync on a null directory cache.
+  // EINVAL here is not a durability acknowledgment. Do not suppress a
+  // separate close error, or relax any caller that requires a real flush.
+  const bool unsupported = allowUnsupportedNtfs && ntfs && !closeError &&
+                           (error == EINVAL || error == ENOTSUP);
+  if ((error || closeError) && !unsupported)
     throw std::runtime_error(
-        path + ": directory flush failed: " + strerror(error) +
+        path + ": directory flush failed: " + strerror(error ? error : closeError) +
         ". Durability after restart is unknown; source retained.");
   Verify();
+  return !unsupported;
 }
 
 void PinnedDirectory::FlushAfterCleanup(

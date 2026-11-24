@@ -32,6 +32,7 @@
 #include <map>
 #include <memory>
 #include <stdexcept>
+#include <strings.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <utility>
@@ -91,7 +92,7 @@ struct Runner {
   struct BackingDevice {
     std::string path, mount;
     NodeIdentity node;
-    bool removable = false;
+    bool removable = false, ntfs = false, attributes = false;
   };
   std::map<dev_t, BackingDevice> backingDevices;
   std::string interruptedFolder;
@@ -102,6 +103,8 @@ struct Runner {
       if (fs_stat_dev(volume, &info))
         throw std::runtime_error(folder + ": volume is no longer available.");
       BackingDevice backing;
+      backing.ntfs = strcasecmp(info.fsh_name, "ntfs") == 0;
+      backing.attributes = (info.flags & B_FS_HAS_ATTR) != 0;
       if (strncmp(info.device_name, "/dev/disk/", 10) == 0) {
         backing.path = info.device_name;
         backing.removable = (info.flags & B_FS_IS_REMOVABLE) ||
@@ -141,21 +144,30 @@ struct Runner {
   void CheckDestinationDevice(dev_t volume) {
     CheckDevice(volume, guardedJob->destination);
   }
-  void FlushDestination(const PinnedDirectory &directory, dev_t volume,
-                        bool cleanup = false) {
+  bool PlainCopy() const {
+    return guardedJob->action == Action::Copy && !deferCompletion &&
+           !guardedJob->copyForArchiveMove && !h.privateStaging;
+  }
+  bool NtfsCopy(dev_t volume) const {
+    return PlainCopy() && backingDevices.at(volume).ntfs;
+  }
+  bool FlushDestination(const PinnedDirectory &directory, dev_t volume,
+                        bool cleanup = false, bool allowUnsupportedNtfs = false) {
     const auto &backing = backingDevices.at(volume);
     const auto previous = interruptedFolder;
     if (backing.removable)
       interruptedFolder = backing.mount.empty() ? guardedJob->destination
                                                  : backing.mount;
+    bool flushed = true;
     if (cleanup)
       directory.FlushAfterCleanup([&] { CheckDestinationDevice(volume); });
     else
-      directory.Flush([&] {
+      flushed = directory.Flush([&] {
         CheckDestinationDevice(volume);
         Check();
-      });
+      }, allowUnsupportedNtfs);
     interruptedFolder = previous;
+    return flushed;
   }
   void CheckSourceDevice(dev_t volume) {
     CheckDevice(volume, ParentLocation(guardedSource));
@@ -279,8 +291,31 @@ struct Runner {
     if (h.progress)
       h.progress(p, n);
   }
+  bool NtfsAttributesUnavailable(int fd, dev_t volume, const std::string &path) {
+    if (!NtfsCopy(volume) || backingDevices.at(volume).attributes)
+      return false;
+    // BNode collapses open_attr_dir failures into B_FILE_ERROR. Probe the
+    // opened inode to distinguish missing support from a genuine failure.
+    DIR *directory = fs_fopen_attr_dir(fd);
+    if (!directory) {
+      if (errno == B_UNSUPPORTED)
+        return true;
+      Fail(path);
+    }
+    if (fs_close_attr_dir(directory))
+      Fail(path);
+    return false;
+  }
+  void CopyNotice(const std::string &src, const char *notice) {
+    auto &detail = Outcome(src).detail;
+    if (!detail.empty())
+      detail += " ";
+    detail += notice;
+    result.copyLimitations = true;
+  }
   void Attributes(const std::string &src, const std::string &dst,
-                  bool verifyMerge = false, int destinationFD = -1) {
+                  bool verifyMerge = false, int destinationFD = -1,
+                  bool destinationAttributesUnavailable = false) {
     BNode from(src.c_str()), to;
     if (destinationFD < 0)
       to.SetTo(dst.c_str());
@@ -290,8 +325,13 @@ struct Runner {
     status_t status;
     std::vector<char> buf(65536);
     std::vector<char> existing(verifyMerge ? buf.size() : 0);
+    bool omitted = false;
     while ((status = from.GetNextAttrName(name)) == B_OK) {
       Check();
+      if (destinationAttributesUnavailable) {
+        omitted = true;
+        continue;
+      }
       attr_info info;
       if (from.GetAttrInfo(name, &info) != B_OK)
         throw std::runtime_error(src + ": attribute changed during copy");
@@ -325,6 +365,32 @@ struct Runner {
     }
     if (status != B_ENTRY_NOT_FOUND)
       throw std::runtime_error(src + ": could not enumerate attributes");
+    if (omitted)
+      CopyNotice(src, "Haiku cannot write attributes on this NTFS destination; source attributes were not copied.");
+  }
+  bool OrdinaryAttributes(const std::string &src, const std::string &dst,
+                          int in, int out, dev_t sourceVolume, dev_t targetVolume) {
+    if (NtfsAttributesUnavailable(in, sourceVolume, src)) {
+      CopyNotice(src, "Haiku does not expose source attributes or Windows permissions on this NTFS driver; used destination creation permissions.");
+      return false;
+    }
+    Attributes(src, dst, false, out,
+               NtfsAttributesUnavailable(out, targetVolume, dst));
+    return true;
+  }
+  bool SetCopyMode(int fd, mode_t mode, dev_t volume, const std::string &path) {
+    if (!fchmod(fd, mode & 07777))
+      return true;
+    if (errno == B_UNSUPPORTED && NtfsCopy(volume))
+      return false;
+    Fail(path);
+    return false;
+  }
+  void PermissionNotice(const std::string &src) {
+    CopyNotice(src, "Haiku cannot set these permissions on NTFS; destination permissions were not preserved.");
+  }
+  void DurabilityNotice(const std::string &src) {
+    CopyNotice(src, "Published with source retained. Haiku cannot flush this NTFS directory; safe eject and verify after reconnecting. Crash durability was not confirmed.");
   }
   bool Allow(std::string &dst, const std::string &src, const struct stat &incoming,
              const struct stat &existing, bool &keepBoth) {
@@ -676,6 +742,9 @@ struct Runner {
       parent.Verify();
       PinnedDirectory directory(dst, before.st_dev, before.st_ino);
       CheckDestinationDevice(before.st_dev);
+      CheckDestinationDevice(parentIdentity.st_dev);
+      const bool ntfsDirectory = NtfsCopy(before.st_dev);
+      const bool ntfsParent = NtfsCopy(parentIdentity.st_dev);
       copyDirectories.emplace_back(dst, before);
       struct DirectoryScope {
         DirectoryStack &stack;
@@ -698,9 +767,14 @@ struct Runner {
       }
       Guard();
       if (!existed) {
-        Attributes(src, dst);
-        if (fchmod(directory.Descriptor(), st.st_mode & 07777))
-          Fail(dst);
+        bool useSourceMode = true;
+        if (NtfsCopy(st.st_dev) || ntfsDirectory)
+          useSourceMode = OrdinaryAttributes(src, dst, dirfd(dir.get()),
+                                             directory.Descriptor(), st.st_dev, before.st_dev);
+        else
+          Attributes(src, dst);
+        if (useSourceMode && !SetCopyMode(directory.Descriptor(), st.st_mode, before.st_dev, dst))
+          PermissionNotice(src);
         struct timespec times[2] = {st.st_atim, st.st_mtim};
         if (futimens(directory.Descriptor(), times))
           Fail(dst);
@@ -712,9 +786,11 @@ struct Runner {
       Guard();
       parent.Verify();
       try {
-        FlushDestination(directory, expected.st_dev);
+        const bool flushed = FlushDestination(directory, expected.st_dev, false, ntfsDirectory);
         CheckDestinationDevice(parentIdentity.st_dev);
-        FlushDestination(parent, parentIdentity.st_dev);
+        const bool parentFlushed = FlushDestination(parent, parentIdentity.st_dev, false, ntfsParent);
+        if (!flushed || !parentFlushed)
+          DurabilityNotice(src);
         directory.Verify();
         Guard();
       } catch (const Cancelled &) {
@@ -739,6 +815,12 @@ struct Runner {
     if (existed && S_ISDIR(before.st_mode))
       throw std::runtime_error(dst +
                                ": a directory cannot be replaced by a file");
+    if (existed && PlainCopy()) {
+      CheckDestinationDevice(before.st_dev);
+      if (NtfsCopy(before.st_dev))
+        throw std::runtime_error(dst + ": NTFS directory durability is unavailable; "
+                                     "existing files were left untouched. Copy to an unused name.");
+    }
     bool keepBoth = false;
     if (existed && !Allow(dst, src, st, before, keepBoth))
       return false;
@@ -781,6 +863,7 @@ struct Runner {
       bound = true;
       recovery.Advance(RecoveryPhase::Writing, &stagingIdentity);
       CheckDestinationDevice(stagingIdentity.st_dev);
+      const bool ntfsTarget = S_ISREG(st.st_mode) && NtfsCopy(stagingIdentity.st_dev);
       if (deferCompletion || guardedJob->copyForArchiveMove)
         RequireSameMoveVolume(guardedJob->expectedDestination.device,
                               stagingIdentity.st_dev);
@@ -798,10 +881,16 @@ struct Runner {
         if (fstat(in.n, &opened) || !S_ISREG(opened.st_mode) ||
             !SameEntry(opened, st))
           throw std::runtime_error(src + ": source changed before copying");
+        auto copyAttributes = [&] {
+          if (NtfsCopy(st.st_dev) || ntfsTarget)
+            return OrdinaryAttributes(src, tmp, in.n, out.n, st.st_dev, stagingIdentity.st_dev);
+          Attributes(src, tmp);
+          return true;
+        };
         const bool removableSource =
             backingDevices.at(st.st_dev).removable;
         if (removableSource || backingDevices.at(stagingIdentity.st_dev).removable) {
-          Attributes(src, tmp);
+          const bool useSourceMode = copyAttributes();
           // No filename is passed to the worker: only this queue thread can
           // replace the final target, after checking both identities again.
           const std::function<void(size_t)> checkpoint = [&](size_t bytes) {
@@ -821,10 +910,17 @@ struct Runner {
                                   ? (removableSource ? ParentLocation(guardedSource)
                                                      : guardedJob->destination)
                                   : endpoint.mount;
-          WriteRemovableStagingFile(std::exchange(in.n, -1),
-                                    std::exchange(out.n, -1), st, checkpoint,
-                                    true);
+          auto permissions = StagingPermissions::Preserve;
+          if (!useSourceMode)
+            permissions = StagingPermissions::KeepCreationMode;
+          else if (ntfsTarget)
+            permissions = StagingPermissions::PreserveIfSupported;
+          const bool modeSet = WriteRemovableStagingFile(
+              std::exchange(in.n, -1), std::exchange(out.n, -1), st,
+              checkpoint, true, permissions, ntfsTarget);
           interruptedFolder.clear();
+          if (!modeSet)
+            PermissionNotice(src);
         } else {
           std::vector<char> buf(131072);
           for (;;) {
@@ -851,12 +947,12 @@ struct Runner {
           struct stat after;
           if (fstat(in.n, &after) || !SameEntry(after, st))
             throw std::runtime_error(src + ": source changed while copying");
-          Attributes(src, tmp);
-          if (fchmod(out.n, st.st_mode & 07777))
-            Fail(tmp);
+          if (copyAttributes() && !SetCopyMode(out.n, st.st_mode, stagingIdentity.st_dev, tmp))
+            PermissionNotice(src);
           struct timespec times[2] = {st.st_atim, st.st_mtim};
           CheckDestinationDevice(stagingIdentity.st_dev);
-          if (futimens(out.n, times) || fsync(out.n))
+          // NTFS updates mtime when flushed file pages reach the driver.
+          if ((ntfsTarget && fsync(out.n)) || futimens(out.n, times) || fsync(out.n))
             Fail(tmp);
         }
       }
@@ -898,8 +994,10 @@ struct Runner {
         Commit(tmp, dst, false, before);
       }
       published = true;
+      bool flushed = false;
       try {
-        FlushDestination(parentDirectory, stagingIdentity.st_dev);
+        flushed = FlushDestination(parentDirectory, stagingIdentity.st_dev,
+                                   false, ntfsTarget);
       } catch (const RemovableCopyInterrupted &) {
         ++mutations;
         Outcome(src, dst).status = "published-flush-failed";
@@ -917,9 +1015,14 @@ struct Runner {
                                  "was not flushed. " + error.what());
       }
       try {
-        // Publishing permits either namespace outcome. Keep it until checked
-        // retirement succeeds; a crash here must not authorize any cleanup.
-        recovery.Retire();
+        // Retire only after directory durability is acknowledged. If the
+        // driver cannot do that, leave a review record even on successful I/O.
+        if (flushed)
+          recovery.Retire();
+        else {
+          recovery.Advance(RecoveryPhase::Published);
+          DurabilityNotice(src);
+        }
       } catch (const std::exception &error) {
         ++mutations;
         Outcome(src, dst).status = "published-recovery-pending";

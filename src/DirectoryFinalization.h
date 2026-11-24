@@ -18,7 +18,9 @@ public:
 
   int Descriptor() const { return fd; }
   void Verify() const;
-  void Flush(const std::function<void()> &checkpoint = {}) const;
+  // False only for the known Haiku NTFS directory-fsync limitation.
+  bool Flush(const std::function<void()> &checkpoint = {},
+             bool allowUnsupportedNtfs = false) const;
   void FlushAfterCleanup(const std::function<void()> &checkpoint = {}) const;
 
 private:
