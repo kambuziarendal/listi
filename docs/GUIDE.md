@@ -673,6 +673,8 @@ interrupted folder's BFS attributes (for example, with
 before restoring any contents and clears it only after the copy has been
 flushed. If the point already has that attribute, Listi uses the first unused
 numeric suffix instead. After a failure, restore to another new path; do not
-use a marked copy. Use a destination parent that other processes do not edit. When a
+use a marked copy. If there is no room to write the marker or the process
+stops before it is written, only the empty destination directory may remain.
+Use a destination parent that other processes do not edit. When a
 connected history folder is gone or replaced, close the history window and
 reopen it to explicitly connect again.

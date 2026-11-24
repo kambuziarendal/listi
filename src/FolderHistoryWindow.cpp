@@ -137,7 +137,9 @@ public:
       }
       operation.reset();
       --activeOperations;
-      status->SetText(message->GetString("status", ""));
+      const auto *outcome = message->GetString("status", "");
+      status->SetText(outcome);
+      status->SetToolTip(outcome);
       if (message->HasBool("replace")) {
         loadedPoint.clear();
         ClearPoints();
@@ -203,6 +205,7 @@ private:
     }
     operation = std::make_shared<Operation>();
     ++activeOperations;
+    status->SetToolTip(nullptr);
     status->SetText(action == kSave ? "Creating history point…" :
         action == kRestore ? "Restoring copy…" : "Reading history…");
     UpdateControls();

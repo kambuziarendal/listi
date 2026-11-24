@@ -452,6 +452,7 @@ void HistoryStore::Restore(const std::string &point, const std::string &destinat
   parent->Verify();
   Check(mkdirat(parent->Descriptor(), leaf.c_str(), 0700) == 0, "Create new copy at " + target.string());
   const auto marker = RestoreMarker(root);
+  bool finished = false;
   try {
     FD output(openat(parent->Descriptor(), leaf.c_str(),
                      O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC), target);
@@ -472,12 +473,14 @@ void HistoryStore::Restore(const std::string &point, const std::string &destinat
     // Do not check cancellation after this commit point. The restored bytes,
     // metadata and parent directory were already flushed with the marker.
     Check(fs_remove_attr(output.fd, marker.c_str()) == 0, "Finish restored copy");
-    if (fsync(output.fd) != 0)
-      throw std::runtime_error(std::string("Copy complete; completion marker durability not confirmed: ") + strerror(errno));
+    finished = true;
+    copy.Flush();
   } catch (const std::exception &e) {
-    throw std::runtime_error(std::string(e.what()) +
-        " Check the new folder for an incomplete copy: " + target.string() +
-        " (BFS attribute " + marker + ").");
+    if (finished)
+      throw std::runtime_error("Copy complete; marker removal not confirmed: " +
+                               target.string() + ". " + e.what());
+    throw std::runtime_error("Restore incomplete: " + std::string(e.what()) +
+        " New folder: " + target.string() + " (BFS attribute " + marker + ").");
   }
 }
 }
