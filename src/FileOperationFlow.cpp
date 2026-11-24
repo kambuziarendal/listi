@@ -62,6 +62,8 @@ public:
         preview += "Original location unavailable; will stay in Trash.";
       }
     }
+    // The job is already frozen. Confirmation cannot drift to a different
+    // selection while a removable disk or Trash reader is slow.
     BMessage reply = EncodeJob(job, kRestoreReady);
     reply.AddInt64("request", request);
     reply.AddString("preview", preview.c_str());

@@ -664,11 +664,15 @@ struct Runner {
     published = true;
     ++mutations;
     Outcome(src, dst).status = "partial";
+    const auto stagingDetail = Outcome(src).detail;
     Outcome(src).detail = "Publication incomplete; inspect the new file and recovery stage.";
     FD verify(dup(final.n));
     if (verify.n < 0)
       Fail(dst);
-    Attributes(tmp, dst, false, final.n);
+    // FAT stages have no stored Haiku attributes. They may expose a
+    // synthetic MIME type derived from the temporary filename.
+    if (!FatCopy(staged.st_dev))
+      Attributes(tmp, dst, false, final.n);
     try {
       WriteRemovableStagingFile(std::exchange(input.n, -1),
                                 std::exchange(final.n, -1), staged,
@@ -692,7 +696,7 @@ struct Runner {
         !SameEntry(opened, staged))
       throw std::runtime_error(tmp + ": staging changed during publication");
     FlushDestination(parentDirectory, staged.st_dev);
-    Outcome(src).detail.clear();
+    Outcome(src).detail = stagingDetail;
     if (unlinkat(parent, leaf.c_str(), 0)) {
       ++mutations;
       Outcome(src, dst).status = "published-recovery-pending";

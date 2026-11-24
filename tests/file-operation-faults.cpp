@@ -453,6 +453,14 @@ int main() {
     fs::remove(inTrash);
 
   const auto trashed = MoveToTrash(source.string());
+  Job guardedRestore{Action::Restore, {trashed}, {}};
+  FreezeLocalJob(guardedRestore);
+  const auto shown = OriginalTrashPath(trashed, guardedRestore.expectedSources.at(trashed));
+  Check(shown == source.string(), "restore preview identifies exact original path");
+  guardedRestore.restoreTargets[trashed] = shown + "-different";
+  result = Run(guardedRestore, {});
+  Check(!result.completed && !result.errors.empty() && fs::exists(trashed) && !fs::exists(source),
+        "restore refuses to repoint a user's destination after confirmation");
   denyTrashCleanup = true;
   result = Run({Action::Restore, {trashed}, {}}, {});
   denyTrashCleanup = false;

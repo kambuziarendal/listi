@@ -257,7 +257,7 @@ public:
     UpdateVisibility();
   }
   void Expand(bool show) {
-    if (expanded == show) {
+    if ((!show && choicesVisible) || expanded == show) {
       UpdateVisibility();
       return;
     }
@@ -394,7 +394,10 @@ public:
       }
       if (!activeOperation || operation != activeOperation)
         break;
-      title->SetText(m->GetString("title", title->Text()));
+      if (const char *label = m->GetString("title", nullptr)) {
+        title->SetText(label);
+        title->SetToolTip(label);
+      }
       if (const char *path = m->GetString("path", nullptr)) {
         file->SetText(path);
         file->SetToolTip(path);
@@ -768,8 +771,11 @@ void OperationQueue::Loop() {
     const auto &job = queued.job;
     const int64 operation = queued.operation;
     BString title;
-    title << Verb(job.action) << ": " << int32(job.sources.size())
-          << " selected entries";
+    title << Verb(job.action) << ": ";
+    if (job.sources.size() > 1)
+      title << int32(job.sources.size()) << " selected items";
+    else
+      title << Listi::LocationLeaf(job.sources.empty() ? job.destination : job.sources.front()).c_str();
     BMessage start(kJobUpdate);
     start.AddInt64("operation", operation);
     start.AddString("title", title);
@@ -953,7 +959,7 @@ void OperationQueue::Loop() {
       issue += result.completed ? " partially completed" : " not confirmed";
       if (!failedSource.empty())
         issue += ": " + Listi::LocationLeaf(failedSource);
-      if (!job.destination.empty())
+      if (!job.destination.empty() && transfer)
         issue += " → " + job.destination;
       issue += ". Check Details before retrying.";
       done.AddString("issue", issue.c_str());
