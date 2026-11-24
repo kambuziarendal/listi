@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "Pane.h"
+#include <Window.h>
 #include "ArchiveEditor.h"
 #include "ImagePreview.h"
 #include "InlineAction.h"
