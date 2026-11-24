@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: MIT
 #include <stdexcept>
+#include "../build/ListiBuildIdentity.h"
+#include "FileClipboard.h"
+#include <Alert.h>
+#include <sys/utsname.h>
 #include "MainWindow.h"
 #include "WindowOverview.h"
 #include "FolderTabs.h"
@@ -560,6 +564,37 @@ public:
     }
     if (HandleFolderTab(*m) || HandleWindowAction(m))
       return;
+    if (m->what == kAboutListi) {
+      std::string text = "Listi " LISTI_PACKAGE_VERSION "\nBuild: " LISTI_BUILD_ID;
+      struct utsname os {};
+      text += "\nSystem: ";
+      if (uname(&os) == 0)
+        text += std::string(os.sysname) + " " + os.release + " " + os.version +
+                "\nArchitecture: " + os.machine;
+      else
+        text += "unknown\nArchitecture: unknown";
+      text += "\nABI: " __HAIKU_ARCH_ABI;
+      text += std::string("\nWorkspace: ") + WorkspaceName(prefs.workspace);
+      for (int i = 0; i < (prefs.SinglePane() ? 1 : 2); ++i) {
+        text += i == 0 ? "\nPanel 1: " : "\nPanel 2: ";
+        switch (split->Panel(i).Current()) {
+        case PanelPage::Flat: text += "Flat View"; break;
+        case PanelPage::Search: text += "Search"; break;
+        case PanelPage::Preview: text += "Preview"; break;
+        case PanelPage::Files: text += ViewModeLabel(panes[i]->CurrentView()); break;
+        }
+      }
+      auto *about = new BAlert("About Listi", text.c_str(), "Close",
+                               "Copy diagnostic information");
+      if (about->Go() == 1) {
+        try {
+          Listi::PutPathsAsText({text});
+        } catch (const std::exception &error) {
+          PostMainWindowNotice(error.what());
+        }
+      }
+      return;
+    }
     if (m->what == Listi::kOpenWindowOverview) {
       overview = Listi::OpenWindowOverview(*this, overview);
       return;

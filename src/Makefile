@@ -27,3 +27,9 @@ listi-audit-config:
 	@printf '%s\n' 'listi:target=$(TARGET)' 'listi:compiler=$(C++)' \
 		'listi:objects=$(strip $(OBJS))' 'listi:flags=$(strip $(INCLUDES) $(CXXFLAGS))' \
 		'listi:libraries=$(strip $(LINK_PATHS) $(LINK_LIBS) $(LINKER_FLAGS))'
+
+# Check each invocation; unchanged metadata must not recompile the window.
+.PHONY: listi-check-identity
+../build/ListiBuildIdentity.h: listi-check-identity
+	python3 ../ci/build-identity.py $@
+$(OBJ_DIR)/MainWindow.o $(OBJ_DIR)/MainWindow.d: ../build/ListiBuildIdentity.h

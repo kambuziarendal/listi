@@ -46,6 +46,7 @@ MainWindowMenu::MainWindowMenu() : BMenuBar("menu") {
   windows->AddItem(tabs);
   AddItem(windows);
   auto *help = new BMenu("Help");
+  AddCommand(help, "About Listi…", kAboutListi);
   AddCommand(help, "Layout introduction…", Listi::kShowLayoutGuide);
   AddItem(help);
 }
