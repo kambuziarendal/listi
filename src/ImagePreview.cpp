@@ -406,8 +406,8 @@ ImagePreview::ImagePreview(bool standalone)
   text->SetInsets(4, 3, 4, 3);
   text->SetResizingMode(B_FOLLOW_ALL);
   textScroll = new Listi::AdaptiveScrollView("preview scroll", text, false);
-  AddChild(textScroll);
-  textScroll->Hide();
+  // Mount the text surface only for text. A stale native scroll child must
+  // never clip the image drawn by this view after an editor closes.
 
   auto addButton = [this](const char *label, uint32 command) {
     auto button = new BButton(label, new BMessage(command));
@@ -432,6 +432,8 @@ ImagePreview::ImagePreview(bool standalone)
   closeQuickView->SetToolTip("Close Quick view (Esc)");
 }
 ImagePreview::~ImagePreview() {
+  if (!textScroll->Parent())
+    delete textScroll;
   generation->store(-1);
   Listi::RetireReadWorker(loader);
   delete bitmap;
@@ -505,7 +507,7 @@ bool ImagePreview::BeginEditing(const std::string &p) {
   ++*generation;
   terminal->Take();
   replies->Clear();
-  Listi::SetViewVisible(textScroll, false);
+  SetTextVisible(false);
   delete bitmap;
   bitmap = nullptr;
   UpdateControls();
@@ -550,7 +552,7 @@ void ImagePreview::Request(int requestedPage, bool playback) {
   caption = path.empty() ? "Select a file to inspect"
                         : playback ? "Playing preview (up to 15 seconds)"
                                    : loader ? "Loading preview…" : "Preview reader unavailable.";
-  Listi::SetViewVisible(textScroll, false);
+  SetTextVisible(false);
   if (!path.empty() && loader) {
     BMessage m(kLoad);
     m.AddInt64("serial", serial);
@@ -699,7 +701,7 @@ void ImagePreview::MessageReceived(BMessage *m) {
       text->SetText(content);
       text->Select(0, 0);
       text->ScrollToOffset(0);
-      textScroll->Show();
+      SetTextVisible(true);
     }
     if (kind == Inspector::Kind::Unknown && !bitmap && canEdit)
       caption = "Unknown format. Try opening it as UTF-8 text?";
@@ -811,6 +813,17 @@ void ImagePreview::FrameResized(float, float) {
   Invalidate();
 }
 
+void ImagePreview::SetTextVisible(bool visible) {
+  if (visible && !textScroll->Parent()) {
+    AddChild(textScroll);
+    LayoutControls();
+    textScroll->InvalidateLayout();
+  } else if (!visible && textScroll->Parent()) {
+    textScroll->RemoveSelf();
+    Invalidate();
+  }
+}
+
 void ImagePreview::LayoutControls() {
   const float width = Bounds().Width(), height = Bounds().Height();
   const float closeLeft = width - closeQuickView->Bounds().Width() - 5;
@@ -826,14 +839,18 @@ void ImagePreview::LayoutControls() {
     editor->MoveTo(0, 35);
     editor->ResizeTo(width, std::max(0.f, height - 35));
   }
-  textScroll->MoveTo(8, 35);
-  textScroll->ResizeTo(std::max(32.f, width - 16), std::max(32.f, height - 70));
+  if (textScroll->Parent()) {
+    textScroll->MoveTo(8, 35);
+    textScroll->ResizeTo(std::max(32.f, width - 16), std::max(32.f, height - 70));
+  }
   const float buttonTop = height - 44 - previous->Bounds().Height();
   previous->MoveTo(12, buttonTop);
   next->MoveTo(20 + previous->Bounds().Width(), buttonTop);
   play->MoveTo(12, buttonTop);
 }
-void ImagePreview::Draw(BRect) {
+void ImagePreview::Draw(BRect update) {
+  SetHighUIColor(B_DOCUMENT_BACKGROUND_COLOR);
+  FillRect(update);
   SetHighUIColor(B_DOCUMENT_TEXT_COLOR);
   BString title(editor ? "Edit"
                       : closeQuickView->IsHidden(closeQuickView) ? "Inspector" : "Quick view");
@@ -863,7 +880,7 @@ void ImagePreview::Draw(BRect) {
                  std::max(0., region.height*region.scale-1));
       dest.OffsetTo(area.left + region.x, area.top + region.y);
       SetDrawingMode(B_OP_ALPHA);
-      DrawBitmap(bitmap, src, dest);
+      DrawBitmap(bitmap, src, dest, region.scale < 1 ? B_FILTER_BITMAP_BILINEAR : 0);
       SetDrawingMode(B_OP_COPY);
       line << " · " << int32(std::lround(region.scale * 100)) << "%";
     }

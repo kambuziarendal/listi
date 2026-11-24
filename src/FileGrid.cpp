@@ -214,8 +214,10 @@ public:
       mode = value;
       Reset();
     }
-    cellWidth = mode == 1 ? 112 : 156;
-    cellHeight = mode == 1 ? 100 : 154;
+    cellWidth = mode == MiniIconMode ? 172 : mode == 1 ? 112 : 156;
+    BFont font;
+    GetFont(&font);
+    cellHeight = mode == MiniIconMode ? std::max(28.f, font.Size() + 14) : mode == 1 ? 100 : 154;
     Update();
   }
   void SyncSelection() override {
@@ -508,13 +510,15 @@ public:
         }
       }
       if (picture) {
-        float available = mode == 1 ? 48 : 104;
+        float available = mode == MiniIconMode ? 16 : mode == 1 ? 48 : 104;
         auto src = picture->Bounds();
         float scale = std::min(available / (src.Width() + 1),
                                available / (src.Height() + 1));
         float w = (src.Width() + 1) * scale, h = (src.Height() + 1) * scale;
         BRect dest(cell.left + (cell.Width() - w) / 2,
                    cell.top + 4 + (available - h) / 2, 0, 0);
+        if (mode == MiniIconMode)
+          dest.OffsetTo(cell.left + 3, cell.top + (cell.Height() + 1 - h) / 2);
         dest.right = dest.left + w - 1;
         dest.bottom = dest.top + h - 1;
         SetDrawingMode(B_OP_ALPHA);
@@ -524,10 +528,17 @@ public:
       SetHighUIColor(selected ? B_LIST_SELECTED_ITEM_TEXT_COLOR
                               : B_DOCUMENT_TEXT_COLOR);
       BString label(row->name.c_str());
-      TruncateString(&label, B_TRUNCATE_MIDDLE, cell.Width() - 8);
-      DrawString(label,
-                 BPoint(cell.left + (cell.Width() - StringWidth(label)) / 2,
-                        cell.bottom - 10));
+      if (mode == MiniIconMode) {
+        TruncateString(&label, B_TRUNCATE_MIDDLE, std::max(1.f, cell.Width() - 28));
+        font_height font;
+        GetFontHeight(&font);
+        DrawString(label, BPoint(cell.left + 23,
+            (cell.top + cell.bottom + font.ascent - font.descent) / 2));
+      } else {
+        TruncateString(&label, B_TRUNCATE_MIDDLE, cell.Width() - 8);
+        DrawString(label, BPoint(cell.left + (cell.Width() - StringWidth(label)) / 2,
+                                 cell.bottom - 10));
+      }
       if (row->transferState) {
         SetHighUIColor(row->transferState == 2   ? B_SUCCESS_COLOR
                        : row->transferState == 3 ? B_FAILURE_COLOR

@@ -120,7 +120,7 @@ Pane::Pane(int32 number, const Preferences &p,
   forward->SetToolTip("Forward in this panel (Command+] while browsing)");
   UpdateNavigation();
   edit->SetExplicitMinSize(BSize(120, B_SIZE_UNSET));
-  filter = new BTextControl("filter", "Filter:", "", new BMessage(kFilterDone));
+  filter = new BTextControl("filter", "Filter this folder:", "", new BMessage(kFilterDone));
   filter->SetModificationMessage(new BMessage(kFilterChanged));
   filter->SetExplicitMinSize(BSize(120, B_SIZE_UNSET));
   filter->SetToolTip("Show names containing this text. Enter returns to the "
@@ -641,7 +641,7 @@ void Pane::StartNavigation(const std::string &request, int target, bool trash, b
   m.AddInt64("serial", serial);
   m.AddBool("icons", false);
   m.AddBool("firstScreen", true);
-  m.AddInt32("iconSize", mode == 0 || mode == MillerMode ? 16 : 96);
+  m.AddInt32("iconSize", mode == 0 || mode == MillerMode || mode == MiniIconMode ? 16 : 96);
   m.AddBool("trash", trash);
   if (mode == 0)
     for (auto &name : attributeColumns)
@@ -704,7 +704,7 @@ void Pane::RequestVisibleIcon(PaneEntry &row) {
   request.AddBool("directory", row.directory);
   request.AddInt64("device", row.device);
   request.AddInt64("node", row.node);
-  request.AddInt32("iconSize", mode == 0 || mode == MillerMode ? 16 : 96);
+  request.AddInt32("iconSize", mode == 0 || mode == MillerMode || mode == MiniIconMode ? 16 : 96);
   if (iconReader->PostMessage(&request) == B_OK) {
     row.iconRequested = true;
     pendingIcons[row.path] = &row;

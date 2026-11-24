@@ -66,7 +66,7 @@ in this alpha.
 - **Places:** save the current location under a name, rename it, forget it or
   reopen it. Saving a place is not saving credentials.
 - **Same folder in other panel:** open the active location on the other side.
-- **View:** Details, Icons, Large icons, Thumbnails and Miller columns; optional folder tree per
+- **View:** Details, Icons, Mini icons (small icons beside filenames), Large icons, Thumbnails and Miller columns; optional folder tree per
   panel. Details columns can also be used to choose sort order.
 - **Remember view for this folder / Use pane view for this folder:** save or clear
   a folder-specific display-mode override. This is not a saved workspace or a
@@ -77,7 +77,7 @@ in this alpha.
 - **Selection summary:** selected file bytes, folder/link counts and unavailable
   sizes are distinguished. Folder contents and link targets are not recursively
   included in that byte total.
-- **Filter:** Clear or Escape removes the filter; Enter returns to the list.
+- **Filter this folder** matches visible names in this pane only. Use **Listi → Find files…** to search subfolders. Clear or Escape removes the filter; Enter returns to the list.
   The filter is a literal name match, not a wildcard expression.
 - **Keyboard selection:** Space toggles the focused entry; icon views also
   support arrows, Shift+arrows for range selection, Home/End and Enter to open.
@@ -180,7 +180,7 @@ choices.
 ### Archive conveniences
 
 - Favourite formats appear directly; others are grouped under **More formats**.
-  Choose a default, **Ask for a format every time** and a compression level per
+  Under **Change format…**, use **Format preferences…** to set a favourite, a default or **Ask for a format every time**. Choose a compression level per
   format where supported. Changing format updates the proposed extension.
 - Choose an output folder and name. Extraction proposes a new “... extracted”
   folder rather than merging silently into an existing destination.
@@ -619,11 +619,11 @@ files are copied into the saved search.
 
 ### Folder tabs
 
-Each file pane has its own folder tabs, separate from the Files, Search and Preview tools in Smiðja. **Window > Folder tabs** opens a new tab in the selected folder (otherwise here), duplicates a tab with its current state, renames or moves it, closes it, or reopens the last tab closed in that pane. A single tab stays hidden unless **Always show folder tabs** is selected. The last file tab cannot be closed on its own; close the window instead.
+Each file pane has its own folder tabs, separate from the Files, Search and Preview tools in Smiðja. **Window > Folder tabs** opens a new tab in the selected folder (otherwise here), duplicates a tab with its current state, renames or moves it, closes it, or reopens the last tab closed in that pane. A single tab stays hidden unless **Always show folder tabs** is selected or the last closed tab can be reopened from the strip. The last file tab cannot be closed on its own; close the window instead.
 
 While browsing files, use **Command+Option+T** for a new tab, **Command+Option+[** and **Command+Option+]** to cycle, and **Command+Option+W** to close a tab. Command+T and Command+Shift+T still open the terminal. The tab strip is for navigation, not a file-drop target: drop onto the file view of a real folder. Switching tabs does not redirect an already queued copy.
 
-**Detach to Einn window** moves the active tab, including its navigation history, filter, view and selection. If you detach the only tab, the original pane opens your home folder. The new window keeps its own queue and uses session-local layout preferences; its layout does not change the initial browser’s saved workspace. Closing the original window does not close a detached file window. Folder tabs last for the session and are not saved worksets.
+**Window → Detach tab to Einn window** opens a compact single-pane window and moves the active tab, including its navigation history, filter, view and selection. If you detach the only tab, the original pane opens your home folder. The new window keeps its own queue and uses session-local layout preferences; its layout does not change the initial browser’s saved workspace. Closing the original window does not close a detached file window. Folder tabs last for the session and are not saved worksets.
 
 ### Independent file windows
 

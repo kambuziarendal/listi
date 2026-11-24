@@ -64,6 +64,21 @@ int main() {
   auto &files = panel.Files();
   auto &bar = panel.FolderBar();
   auto &target = Panel(*window, 1).Files();
+  const auto fullFrame = window->Frame();
+  auto switchTo = [&](Workspace workspace) {
+    BMessage m(kWorkspace);
+    m.AddInt32("workspace", static_cast<int32>(workspace));
+    window->MessageReceived(&m);
+  };
+  switchTo(Workspace::einn);
+  Check(window->Frame().Width() < fullFrame.Width(), "switching to Einn is compact");
+  window->ResizeBy(40, 30);
+  const auto resized = window->Frame();
+  switchTo(Workspace::tviskipt);
+  Check(window->Frame() == fullFrame, "leaving Einn restores the previous frame");
+  switchTo(Workspace::einn);
+  Check(window->Frame() == resized, "returning to Einn remembers a manual resize");
+  switchTo(Workspace::tviskipt);
   files.Navigate(a.c_str());
   target.Navigate(c.c_str());
   Ready(*window);
@@ -134,6 +149,9 @@ int main() {
     }
   }
   Check(detached, "detached native browser opened");
+  Check(detached->Bounds().Width() < window->Bounds().Width() &&
+        detached->Bounds().Height() < window->Bounds().Height(),
+        "detached tab opens a compact Einn window");
   Ready(*detached);
   auto &moved = Panel(*detached);
   auto value = moved.FolderBar().Snapshot();

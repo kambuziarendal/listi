@@ -43,7 +43,7 @@ MainWindowMenu::MainWindowMenu() : BMenuBar("menu") {
   AddCommand(tabs, "Name tab…", Listi::kTabRename);
   AddCommand(tabs, "Move tab left", Listi::kTabLeft);
   AddCommand(tabs, "Move tab right", Listi::kTabRight);
-  AddCommand(tabs, "Detach to Einn window", Listi::kTabDetach);
+  AddCommand(windows, "Detach tab to Einn window", Listi::kTabDetach);
   AddCommand(tabs, "Close tab", Listi::kTabClose);
   AddCommand(tabs, "Reopen closed tab", Listi::kTabReopen);
   tabs->AddSeparatorItem();

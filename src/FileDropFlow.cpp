@@ -129,8 +129,11 @@ bool FileDropFlow::Handle(const BMessage &message) {
     std::vector<std::string> labels;
     BMessage output;
     for (int32 i = 0; message.FindMessage("output", i, &output) == B_OK; ++i) {
-      labels.push_back(std::string(output.GetString("name", "")) + " (." +
-                       output.GetString("extension", "") + ")");
+      std::string label = std::string(output.GetString("name", "")) + " (." +
+                          output.GetString("extension", "") + ")";
+      if (std::string(output.GetString("mime", "")) == "image/jpeg")
+        label += " · transparency becomes white";
+      labels.push_back(std::move(label));
     }
     if (labels.empty())
       break;
@@ -141,13 +144,20 @@ bool FileDropFlow::Handle(const BMessage &message) {
     std::string text = "Convert " + Leaf(job.sources.front()) +
                        " into:\n" + job.destination +
                        "\nThe original and existing files are kept.";
-    actionArea.Ask(text.c_str(), "Convert", accepted, nullptr, nullptr,
-                    nullptr, labels);
+    actionArea.Ask(text.c_str(), "Convert", accepted, nullptr,
+                   InTransferSourceFolder(job) ? nullptr : "Copy original instead",
+                   nullptr, labels);
     break;
   }
   case kImageDropConvert: {
     if (message.GetInt64("request", -1) != serial)
       break;
+    if (message.GetInt32("which", 1) == 2) {
+      auto job = DecodeSubmittedJob(message, {Action::Copy});
+      if (job && !InTransferSourceFolder(*job))
+        queue.Enqueue(*job);
+      break;
+    }
     BMessage output;
     const auto option = message.GetInt32("option", -1);
     if (option < 0 || message.FindMessage("output", option, &output) != B_OK)

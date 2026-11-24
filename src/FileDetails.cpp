@@ -98,14 +98,23 @@ public:
   std::string hoverPath;
   BView *batchTarget = nullptr;
   Pane *pane;
-  NameColumn(Pane *owner, const Preferences &p)
-      : BStringColumn("Name", 260, 80, 1200, B_TRUNCATE_MIDDLE), prefs(p), pane(owner) {}
+  PaneModel *model;
+  NameColumn(Pane *owner, PaneModel *state, const Preferences &p)
+      : BStringColumn("Name", 260, 80, 1200, B_TRUNCATE_MIDDLE), prefs(p), pane(owner), model(state) {}
   void DrawField(BField *f, BRect r, BView *v) override {
     const BRect fieldRect = r;
     v->SetFont(&prefs.font);
     auto n = static_cast<NameField *>(f);
     rgb_color old = v->HighColor();
-    if (n->entry->parent)
+    if (model->IsSelected(n->entry->path)) {
+      // A checkmark remains distinguishable from focus or striped rows, even
+      // in a theme with subtle selection colours.
+      v->SetHighUIColor(B_LIST_SELECTED_ITEM_TEXT_COLOR);
+      float x = r.left + 4, y = (r.top + r.bottom) / 2;
+      v->StrokeLine(BPoint(x, y), BPoint(x + 3, y + 3));
+      v->StrokeLine(BPoint(x + 3, y + 3), BPoint(x + 9, y - 4));
+      r.left += 14;
+    } else if (n->entry->parent)
       v->SetHighColor(ui_color(B_PANEL_TEXT_COLOR));
     else
       v->SetHighColor(prefs.Color(n->entry->kind == 1   ? prefs.folders
@@ -287,7 +296,7 @@ public:
       : AdaptiveColumnList("files", B_WILL_DRAW | B_NAVIGABLE | B_DRAW_ON_CHILDREN,
                         B_FANCY_BORDER),
         pane(p), model(state) {
-    name = new NameColumn(p, prefs);
+    name = new NameColumn(p, state, prefs);
     name->batchTarget = ScrollView();
     AddColumn(name, 0);
     size = new SizeColumn(prefs.font);
@@ -544,10 +553,10 @@ public:
                    Listi::PanelBackground(B_PANEL_BACKGROUND_COLOR, active));
     list->SetColor(B_COLOR_TEXT, ui_color(B_PANEL_TEXT_COLOR));
     list->SetColor(B_COLOR_SELECTION,
-                   tint_color(ui_color(B_PANEL_BACKGROUND_COLOR), 0.80));
-    list->SetColor(B_COLOR_SELECTION_TEXT, ui_color(B_PANEL_TEXT_COLOR));
+                   ui_color(B_LIST_SELECTED_BACKGROUND_COLOR));
+    list->SetColor(B_COLOR_SELECTION_TEXT, ui_color(B_LIST_SELECTED_ITEM_TEXT_COLOR));
     list->SetColor(B_COLOR_NON_FOCUS_SELECTION,
-                   tint_color(ui_color(B_PANEL_BACKGROUND_COLOR), 0.80));
+                   ui_color(B_LIST_SELECTED_BACKGROUND_COLOR));
     list->UpdateScrollBars();
     Redraw();
   }
