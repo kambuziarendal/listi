@@ -643,3 +643,30 @@ with comma separators and double-quote text delimiters. Times are UTC; unknown
 values and folder sizes are empty. To prevent formula evaluation, exported text
 starting with a tab or line break, or whose first non-whitespace character is
 `=`, `+`, `-` or `@`, receives a leading apostrophe. This changes only the CSV.
+
+### Manual folder history
+
+Open a local BFS folder, then choose **Files → Folder history…**. The window
+keeps that source even if you navigate elsewhere in Listi. Enter the absolute
+path of an existing, dedicated BFS folder outside the source tree and click
+**Connect**. Connecting does not write to the folder. Click **Create point** to
+save the current tree. Select a point to inspect its read-only listing; to copy
+the whole point, enter an absolute path whose parent exists and whose final
+folder does not, then click **Restore as copy**. The app will not merge with
+an existing folder or restore into the original tree.
+
+Use a quiet source and a trusted store. This is not an atomic live filesystem
+snapshot, an automatic backup service, or an in-place rollback. Identical file
+bytes share an object independently of the name and BFS attributes. The store
+is not encrypted, and the old standalone F12 SQLite prototype is not compatible
+with this store. This version preserves typed BFS attributes, symlink text,
+file/folder modification times and ordinary permission bits; not symlink
+timestamps, ownership, hard-link relationships or volume indexes.
+
+Canceling a save before publication leaves existing points readable. An
+interrupted save can leave complete, unreferenced blobs (or private temporary
+files after a process crash); there is no removal or retention action.
+An interrupted restore can leave an incomplete **new** folder; Listi reports
+its name and never removes or overwrites an existing destination. When a
+connected history folder is gone or replaced, close the history window and
+reopen it to explicitly connect again.

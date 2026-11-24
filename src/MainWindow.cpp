@@ -11,6 +11,7 @@
 #include <atomic>
 #include <MenuItem.h>
 #include "LayoutIntroduction.h"
+#include "FolderHistory.h"
 #include "FileListExportWindow.h"
 #include "RecoveryReviewWindow.h"
 #include "FlatView.h"
@@ -586,6 +587,10 @@ public:
   }
 
   bool QuitRequested() override {
+    if (browserCount == 1 && Listi::FolderHistoryBusy()) {
+      PostMainWindowNotice("Finish or cancel the folder history operation before closing Listi.");
+      return false;
+    }
     if (PreferencesOpenFor(BMessenger(this))) {
       queue.ErrorInfo("Apply or close this window's preferences first.");
       return false;
@@ -677,6 +682,14 @@ public:
           PostMainWindowNotice(error.what());
         }
       }
+      return;
+    }
+    if (m->what == Listi::kFolderHistory) {
+      const auto &pane = *panes[split->Source()];
+      if (!pane.LocationValid() || pane.IsSearchList() || pane.Path()[0] != '/')
+        PostMainWindowNotice("Open a local folder before using folder history.");
+      else
+        Listi::OpenFolderHistory(pane.Path());
       return;
     }
     if (m->what == Listi::kOpenWindowOverview) {

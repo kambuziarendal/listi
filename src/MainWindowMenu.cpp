@@ -3,6 +3,7 @@
 #include "Common.h"
 #include "FlatView.h"
 #include "FolderTabs.h"
+#include "FolderHistory.h"
 #include "MainWindow.h"
 #include "PaneSidebar.h"
 #include "ShelfWindow.h"
@@ -78,6 +79,7 @@ void MainWindowMenu::AddFilesMenu() {
   AddCommand(files, "New folder", kMkdir, 'N');
   AddCommand(files, "Move to Trash", kDelete, 'D');
   AddCommand(files, "Restore from Trash", kRestore);
+  AddCommand(files, "Folder history…", Listi::kFolderHistory);
   AddCommand(files, "Delete permanently...", kPermanentDelete);
   undoBulkRenameItem = AddCommand(files, "Undo last bulk rename", kUndoBulkRename);
   undoBulkRenameItem->SetEnabled(false);

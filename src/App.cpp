@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "ReadWorker.h"
 #include "ApplicationServices.h"
+#include "FolderHistory.h"
 #include "ArchiveEditor.h"
 #include "ArchivePasswords.h"
 #include "ArchivePasswordWindow.h"
@@ -182,6 +183,10 @@ public:
     }
   }
   bool QuitRequested() override {
+    if (Listi::FolderHistoryBusy()) {
+      PostMainWindowNotice("Finish or cancel the folder history operation before quitting Listi.");
+      return false;
+    }
     if (CurrentMessage() && CurrentMessage()->GetBool("lastBrowser", false)) {
       Drain();
       if (!browsers.empty())
