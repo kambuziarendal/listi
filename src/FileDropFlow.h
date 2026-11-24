@@ -2,6 +2,8 @@
 #pragma once
 
 #include <Messenger.h>
+#include "FileOperation.h"
+#include <optional>
 
 class InlineAction;
 class OperationQueue;
@@ -22,6 +24,8 @@ private:
   InlineAction &actionArea;
   OperationQueue &queue;
   BMessenger owner, service;
+  std::optional<Job> missingParent;
+  std::string missingLeaf;
   int64 serial = 0;
 };
 

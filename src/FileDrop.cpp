@@ -5,6 +5,9 @@
 #include "VirtualFile.h"
 #include <algorithm>
 #include <Path.h>
+#include <Directory.h>
+#include <cerrno>
+#include <cstring>
 #include <limits.h>
 #include <set>
 #include <stdexcept>
@@ -74,7 +77,9 @@ BMessage MakeFileDrag(const std::vector<std::string> &paths,
   return drag;
 }
 Job PrepareFileDrop(const BMessage &message, const std::string &destination,
-                    bool allowSameFolder) {
+                    bool allowSameFolder, std::string *missingLeaf) {
+  if (missingLeaf)
+    missingLeaf->clear();
   if (message.FlattenedSize() > 2 * 1024 * 1024)
     throw std::runtime_error("The dragged selection is too large.");
   Job job;
@@ -96,11 +101,48 @@ Job PrepareFileDrop(const BMessage &message, const std::string &destination,
   }
   if (!destination.empty() && destination[0] == '/') {
     char canonical[PATH_MAX];
+    const auto end = destination.find_last_not_of('/');
+    const auto path = end == std::string::npos ? "/" : destination.substr(0, end + 1);
+    struct stat st;
+    if (lstat(path.c_str(), &st) != 0) {
+      const auto error = errno;
+      const auto slash = path.rfind('/');
+      const auto leaf = path.substr(slash + 1);
+      if (!missingLeaf || error != ENOENT || slash == std::string::npos ||
+          leaf == "." || leaf == ".." || message.HasString("listi:path") ||
+          !realpath(path.substr(0, slash + 1).c_str(), canonical))
+        throw std::runtime_error("Drop destination unavailable: " + destination);
+      job.destination = canonical;
+      job = PrepareTransfer(std::move(job), true);
+      *missingLeaf = leaf;
+      return job;
+    }
     if (!realpath(destination.c_str(), canonical))
-      throw std::runtime_error("The drop destination is unavailable.");
+      throw std::runtime_error("Drop destination unavailable: " + destination);
     job.destination = canonical;
   }
   return PrepareTransfer(std::move(job), allowSameFolder);
+}
+Job CreateFileDropDestination(Job parentJob, const std::string &leaf) {
+  if (leaf.empty() || leaf == "." || leaf == ".." || leaf.find('/') != std::string::npos)
+    throw std::runtime_error("Invalid destination folder name.");
+  parentJob = PrepareTransfer(std::move(parentJob), true);
+  const auto path = parentJob.destination +
+                    (parentJob.destination == "/" ? "" : "/") + leaf;
+  BDirectory parent(parentJob.destination.c_str()), created;
+  node_ref id;
+  if (parent.GetNodeRef(&id) != B_OK ||
+      id.device != parentJob.expectedDestination.device ||
+      id.node != parentJob.expectedDestination.inode)
+    throw std::runtime_error("Destination parent changed: " + path);
+  const auto status = parent.CreateDirectory(leaf.c_str(), &created);
+  if (status != B_OK)
+    throw std::runtime_error("Cannot create " + path + ": " + strerror(status));
+  if (created.GetNodeRef(&id) != B_OK)
+    throw std::runtime_error("Cannot verify created folder: " + path);
+  parentJob.destination = path;
+  parentJob.expectedDestination = {int32_t(id.device), int64_t(id.node)};
+  return PrepareTransfer(std::move(parentJob));
 }
 bool CanMoveFileDrop(const Job &job) {
   const auto volume = job.expectedDestination.device;
