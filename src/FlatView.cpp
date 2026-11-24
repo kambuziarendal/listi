@@ -374,6 +374,7 @@ public:
       auto *first = results->CurrentSelection();
       if (!first)
         break;
+      const auto selection = results->SelectedEntries();
       BPopUpMenu menu("Flat View file actions", false, false);
       auto *open = new BMenuItem("Open", new BMessage(kOpenSystem));
       open->SetEnabled(results->CurrentSelection(first) == nullptr);
@@ -383,14 +384,18 @@ public:
       AddCopyTextMenu(menu, true, true, true);
       menu.AddSeparatorItem();
       menu.AddItem(new BMenuItem("Add to Shelf", new BMessage(kAddToShelf)));
-      if (auto *choice = menu.Go(message->GetPoint("point", BPoint()), false, true, false))
-        {
-          const uint32 action = choice->Message()->what;
-          if (action == kCopyNames || action == kCopyPaths || action == kCopyRelative)
-            MessageReceived(choice->Message());
-          else
-            Window()->MessageReceived(choice->Message());
-        }
+      if (auto *choice = menu.Go(message->GetPoint("point", BPoint()), false, true, false)) {
+        const uint32 action = choice->Message()->what;
+        if (action == kCopyNames || action == kCopyPaths || action == kCopyRelative) {
+          try {
+            CopySelectionText(action, selection.sources, rootPath);
+            shelfStatus->SetText("Selection copied as text.");
+          } catch (const std::exception &error) {
+            shelfStatus->SetText(error.what());
+          }
+        } else
+          Window()->MessageReceived(choice->Message());
+      }
       break;
     }
     case kInvoke: {
@@ -407,8 +412,6 @@ public:
     case kOpenSystem:
     case kClipboardCopy:
     case kClipboardCut:
-    case kCopyNames:
-    case kCopyRelative:
     case kCopyPaths: {
       try {
         auto selected = results->SelectedEntries();
@@ -418,7 +421,7 @@ public:
           FreezeLocalJob(selected);
           Open(selected.sources.front());
         } else {
-          const bool text = message->what != kClipboardCopy && message->what != kClipboardCut;
+          const bool text = message->what == kCopyPaths;
           if (text)
             CopySelectionText(message->what, selected.sources, rootPath);
           else
