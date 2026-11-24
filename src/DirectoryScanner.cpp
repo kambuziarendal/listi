@@ -225,6 +225,14 @@ public:
           send();
       };
       try {
+        auto location = Listi::ParseLocation(path.String());
+        if (location.Archive() && location.path == "/" && !Listi::IsVirtual(location.archive)) {
+          struct stat file;
+          if (lstat(location.archive.c_str(), &file) == 0) {
+            done.AddInt64("folderDevice", file.st_dev);
+            done.AddInt64("folderNode", file.st_ino);
+          }
+        }
         auto entries = Listi::ListFiles(path.String(), control);
         auto parent = Listi::ParentLocation(path.String());
         if (parent != path.String()) {
@@ -271,10 +279,15 @@ public:
           done.AddString("error", strerror(errno));
         else {
           struct stat opened;
+          const bool identified = fstat(dirfd(dir), &opened) == 0;
+          if (identified) {
+            done.AddInt64("folderDevice", opened.st_dev);
+            done.AddInt64("folderNode", opened.st_ino);
+          }
           if (watch) {
             node_ref ref;
             status_t status = B_ERROR;
-            if (fstat(dirfd(dir), &opened) == 0) {
+            if (identified) {
               ref.device = opened.st_dev;
               ref.node = opened.st_ino;
               status = watch->Install(serial, ref, target);

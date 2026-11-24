@@ -148,6 +148,11 @@ private:
   void OpenSearchList(const Listi::SavedSearch &);
   bool HandleQueryReply(BMessage &);
   BPoint ScrollPosition();
+  PaneEntry *ScrollRow(const std::string *, float &);
+  Listi::VisitPosition CaptureVisit();
+  void RestoreVisit();
+  std::optional<Listi::VisitPosition> pendingVisit;
+  Listi::VisitPosition::Identity folderIdentity{-1, -1};
   void RestoreScroll(BPoint);
 
   void StartNavigation(const std::string &, int target = -1,

@@ -100,6 +100,15 @@ class GridView : public FileGrid {
   }
 
 public:
+  PaneEntry *ScrollRow(const std::string *path, float &top) override {
+    const auto &rows = model->Visible();
+    for (size_t i = 0; i < rows.size(); ++i) {
+      top = Cell(i).top;
+      if (path ? rows[i]->path == *path : top + cellHeight > Bounds().top)
+        return rows[i];
+    }
+    return nullptr;
+  }
   void SetActive(bool active) override {
     const auto background =
         Listi::PanelBackground(B_DOCUMENT_BACKGROUND_COLOR, active);

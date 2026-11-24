@@ -552,6 +552,10 @@ void Pane::UpdateNavigation() {
   forward->SetEnabled(history.Forward() >= 0);
 }
 void Pane::StartNavigation(const std::string &request, int target, bool trash, bool restore) {
+  if (!restore && locationValid && !scanning)
+    history.SavePosition(CaptureVisit());
+  pendingVisit = restore ? restoring->pendingVisit
+                         : target >= 0 ? history.PositionAt(target) : std::nullopt;
   if (!restore) restoring.reset();
   const bool wasQuery = IsSearchList();
   Listi::RetireReadWorker(queryWorker);
@@ -1101,8 +1105,22 @@ void Pane::MessageReceived(BMessage *m) {
       break;
     }
     try {
-      Navigate(Listi::ParentLocation(path == "@disks" ? "/" : path.String())
-                   .c_str());
+      const std::string child = path.String();
+      auto parent = Listi::ParentLocation(child == "@disks" ? "/" : child);
+      Listi::VisitPosition up;
+      auto entry = child;
+      const auto location = Listi::ParseLocation(child);
+      if (location.Archive() && location.path == "/")
+        entry = location.archive;
+      if (locationValid && (Listi::IsVirtual(entry) || folderIdentity.second >= 0)) {
+        up.focusId = folderIdentity;
+        up.focus = up.anchor = entry;
+        up.anchorId = up.focusId;
+        up.selected.emplace(entry, up.focusId);
+      }
+      Navigate(parent.c_str());
+      if (scanning && parent != child)
+        pendingVisit = std::move(up);
     } catch (const std::exception &e) {
       SetStatus(e.what());
     }
@@ -1139,7 +1157,10 @@ void Pane::MessageReceived(BMessage *m) {
          r->path != m->GetString("selection", "") || !ColumnEntryUnchanged(*m)))
       break;
     if (r) {
-      if (r->directory)
+      if (r->parent) {
+        BMessage parent(kParent);
+        MessageReceived(&parent);
+      } else if (r->directory)
         Navigate(r->path.c_str());
       else {
         BMessage open(kOpenPaths);
@@ -1248,6 +1269,8 @@ void Pane::MessageReceived(BMessage *m) {
     scanTimer.reset();
     path = m->GetString("path", path);
     locationValid = !m->HasString("error");
+    folderIdentity = {m->GetInt64("folderDevice", -1), m->GetInt64("folderNode", -1)};
+    if (!locationValid) pendingVisit.reset();
     if (locationValid && mode != 0)
       entries.Sort(entries.Sorting());
     history.Complete(serial, path.String(), locationValid);
@@ -1291,7 +1314,8 @@ void Pane::MessageReceived(BMessage *m) {
           entries.SetSelection({reveal.path}, reveal.path);
         reveal = {};
       }
-      SendSelection();
+      if (pendingVisit && !restoring) RestoreVisit();
+      else SendSelection();
       if (stale)
         SetStatus(
             "Search result changed during navigation. Search again; nothing selected.");
@@ -1320,6 +1344,7 @@ void Pane::MessageReceived(BMessage *m) {
         entries.SetSelection(entries.Selected(), focus);
         Sort(restoring->sorting);
         RestoreScroll(restoring->scroll);
+        RestoreVisit();
       }
       restoring.reset();
     }

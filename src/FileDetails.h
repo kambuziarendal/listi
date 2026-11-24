@@ -2,11 +2,13 @@
 #pragma once
 #include <View.h>
 #include "PaneModel.h"
+struct PaneEntry;
 class Pane;
 class PaneModel;
 struct Preferences;
 class FileDetails : public BView {
 public:
+  virtual PaneEntry *ScrollRow(const std::string *path, float &top) = 0;
   using BView::BView;
   virtual PaneSort Sorting() = 0;
   virtual void Sort(PaneSort) = 0;

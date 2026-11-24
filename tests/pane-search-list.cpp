@@ -86,7 +86,8 @@ int main() {
   pane->MessageReceived(&back);
   check(await(folder), "Back returns to physical folder");
   pane->MessageReceived(&forward);
-  check(matches(2), "Forward restarts exact search criteria");
+  check(matches(2) && pane->Selected() == std::vector<std::string>{right},
+        "Forward restarts exact search criteria and restores its original selection");
   std::ofstream(left) << "replacement";
   pane->Navigate(root.c_str());
   check(await(folder), "leave query before independent restoration");
@@ -101,7 +102,39 @@ int main() {
   pane->MessageReceived(&missing);
   check(await([&] { return !pane->IsScanning(); }) && !pane->LocationValid(),
         "unavailable scope is an error, not an empty successful search");
+  // Keep the old inode alive while creating its namesake.
+  const std::string original = root + "/original";
+  std::ofstream(original) << "old";
+  for (int i = 0; i < 80; ++i)
+    std::ofstream(root + "/scroll-" + std::to_string(i)) << i;
+  pane->Navigate(root.c_str());
+  check(await(folder), "history fixture folder opens");
+  auto scrolled = pane->CaptureNavigation();
+  scrolled.scroll.y = 300;
+  pane->RestoreNavigation(scrolled);
+  check(await(folder) && pane->CaptureNavigation().scroll.y == 300,
+        "fixture starts below the first screen");
+  pane->MatchPattern("original", true);
+  auto before = pane->CaptureNavigation();
+  pane->Navigate(a.c_str());
+  check(await(ready), "child visit opens");
+  rename(original.c_str(), (a + "/retained").c_str());
+  std::ofstream(original) << "new";
+  pane->MessageReceived(&back);
+  check(await(folder) && pane->Selected().empty() &&
+        pane->CaptureNavigation().scroll.y == before.scroll.y,
+        "Back retains viewport but rejects same-path replacement");
+  pane->MessageReceived(&forward);
+  check(await(ready) && a == pane->Path(), "Forward reopens child");
+  BMessage up(kParent);
+  pane->MessageReceived(&up);
+  check(await(folder) && pane->Selected() == std::vector<std::string>{a} &&
+        pane->CaptureNavigation().focused == a, "Up selects the child folder");
   w->Quit();
+  unlink(original.c_str());
+  unlink((a + "/retained").c_str());
+  for (int i = 0; i < 80; ++i)
+    unlink((root + "/scroll-" + std::to_string(i)).c_str());
   for (const auto &path : {left, right, a + "/extra.live", a + "/old"}) unlink(path.c_str());
   rmdir(a.c_str());
   rmdir(b.c_str());

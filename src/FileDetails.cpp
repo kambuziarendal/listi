@@ -496,8 +496,22 @@ public:
   }
   bool CancelSelectionGesture() override { return list->band->Escape(); }
   void MakeFocus(bool focus = true) override { list->MakeFocus(focus); }
+  PaneEntry *ScrollRow(const std::string *path, float &top) override {
+    top = 0;
+    for (int32 i = 0; i < list->CountRows(); ++i) {
+      auto row = static_cast<FileRow *>(list->RowAt(i));
+      const float next = top + row->Height() + 1;
+      if (path ? row->entry->path == *path : next > ScrollPosition().y)
+        return row->entry;
+      top = next;
+    }
+    return nullptr;
+  }
   BPoint ScrollPosition() override { return list->ScrollView()->Bounds().LeftTop(); }
-  void RestoreScroll(BPoint p) override { list->ScrollView()->ScrollTo(p); }
+  void RestoreScroll(BPoint p) override {
+    static_cast<BScrollBar *>(list->FindView("horizontal_scroll_bar"))->SetValue(p.x);
+    static_cast<BScrollBar *>(list->FindView("vertical_scroll_bar"))->SetValue(p.y);
+  }
   void Redraw() override { list->ScrollView()->Invalidate(); }
   void RedrawEntry(const std::string &path) override {
     auto found = rows.find(path);

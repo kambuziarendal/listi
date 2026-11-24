@@ -73,6 +73,15 @@ public:
     Invalidate();
   }
 
+  PaneEntry *ScrollRow(const std::string *path, float &top) {
+    const auto &rows = Visible();
+    for (size_t i = 0; i < rows.size(); ++i) {
+      top = float(i) * height;
+      if (path ? rows[i]->path == *path : top + height > Bounds().top)
+        return rows[i];
+    }
+    return nullptr;
+  }
   float ContentHeight() const { return float(Visible().size()) * height; }
   void Refresh(bool reveal = false) {
     font_height font;
@@ -642,6 +651,10 @@ float MillerColumns::ContentWidth(float viewport) const {
   return ColumnWidth(viewport) * state->columns.size();
 }
 
+PaneEntry *MillerColumns::ScrollRow(const std::string *path, float &top) {
+  return state->current < state->columns.size()
+      ? state->columns[state->current].rows->ScrollRow(path, top) : nullptr;
+}
 BPoint MillerColumns::ScrollPosition() const {
   return {Bounds().left, state->current < state->columns.size()
                             ? state->columns[state->current].rows->Bounds().top : 0};

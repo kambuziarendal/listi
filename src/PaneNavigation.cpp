@@ -6,6 +6,7 @@
 #include "SearchWorker.h"
 #include "VirtualFile.h"
 #include <MessageRunner.h>
+#include <ScrollBar.h>
 #include <algorithm>
 
 namespace {
@@ -28,13 +29,64 @@ BPoint Pane::ScrollPosition() {
   return mode == MillerMode ? columns->ScrollPosition() : grid->Bounds().LeftTop();
 }
 
+PaneEntry *Pane::ScrollRow(const std::string *path, float &top) {
+  if (mode == 0) return list->ScrollRow(path, top);
+  return mode == MillerMode ? columns->ScrollRow(path, top) : grid->ScrollRow(path, top);
+}
+
+Listi::VisitPosition Pane::CaptureVisit() {
+  Listi::VisitPosition visit;
+  auto scroll = ScrollPosition();
+  visit.x = scroll.x;
+  visit.y = scroll.y;
+  float top;
+  if (auto *row = ScrollRow(nullptr, top)) {
+    visit.anchor = row->path;
+    visit.anchorId = IdentityOf(*row);
+    visit.offset = scroll.y - top;
+  }
+  if (auto *row = entries.Focused()) {
+    visit.focus = row->path;
+    visit.focusId = IdentityOf(*row);
+    if (entries.IsSelected(row->path))
+      visit.selected.emplace(row->path, visit.focusId);
+  }
+  for (auto *row : entries.Visible()) {
+    if (visit.selected.size() == visit.SelectionLimit) break;
+    if (entries.IsSelected(row->path))
+      visit.selected.emplace(row->path, IdentityOf(*row));
+  }
+  return visit;
+}
+
+void Pane::RestoreVisit() {
+  if (!pendingVisit) return;
+  const auto &visit = *pendingVisit;
+  std::vector<std::string> selection;
+  std::string focus;
+  for (auto *row : entries.Visible()) {
+    auto selected = visit.selected.find(row->path);
+    if (selected != visit.selected.end() && selected->second == IdentityOf(*row))
+      selection.push_back(row->path);
+    if (visit.focus == row->path && visit.focusId == IdentityOf(*row))
+      focus = row->path;
+  }
+  entries.SetSelection(selection, focus);
+  SendSelection();
+  float top;
+  auto *anchor = ScrollRow(&visit.anchor, top);
+  RestoreScroll({visit.x, anchor && IdentityOf(*anchor) == visit.anchorId
+                              ? top + visit.offset : visit.y});
+  pendingVisit.reset();
+}
+
 void Pane::RestoreScroll(BPoint position) {
   if (mode == 0)
     list->RestoreScroll(position);
   else if (mode == MillerMode)
     columns->RestoreScroll(position);
-  else
-    grid->ScrollTo(position);
+  else if (auto *bar = grid->ScrollBar(B_VERTICAL))
+    bar->SetValue(position.y);
 }
 
 Listi::PaneNavigationState Pane::CaptureNavigation() {
@@ -44,6 +96,7 @@ Listi::PaneNavigationState Pane::CaptureNavigation() {
   state.location = path.String();
   state.displayLabel = IsSearchList() ? LocationLabel() : Listi::Leaf(state.location);
   state.history = history;
+  state.pendingVisit = pendingVisit;
   state.queries = queries;
   state.filter = filter->Text();
   state.view = mode;
@@ -68,7 +121,7 @@ void Pane::RestoreNavigation(const Listi::PaneNavigationState &state) {
   queries = state.queries;
   restoredView = state.folderView >= 0 ? state.folderView : state.view;
   restoring = state;
-  const int index = history.Position();
+  const int index = history.PendingTarget() >= 0 ? history.PendingTarget() : history.Position();
   StartNavigation(state.location, index >= 0 && history.At(index) == state.location ? index : -1,
                   false, true);
 }
@@ -133,6 +186,7 @@ bool Pane::HandleQueryReply(BMessage &message) {
     queryRows.clear();
     savedSelection.clear();
     restoring.reset();
+    pendingVisit.reset();
     scanTimer.reset();
     scanning = locationValid = false;
     history.Complete(serial, path.String(), false);
@@ -168,6 +222,7 @@ bool Pane::HandleQueryReply(BMessage &message) {
   SetDisplayMode(0);
   Sort(state.sorting);
   RestoreScroll(state.scroll);
+  RestoreVisit();
   if (!initial && entries.Selected().size() < state.selection.size())
     ShowStatus("A selected original disappeared, changed identity or no longer matches.");
   else if (message.GetBool("limited", false) || message.GetInt64("skipped", 0) > 0)
