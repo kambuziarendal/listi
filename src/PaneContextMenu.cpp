@@ -3,6 +3,7 @@
 #include "FileClipboard.h"
 #include "FileContextMenu.h"
 #include "JobSnapshot.h"
+#include "MainWindow.h"
 #include "Pane.h"
 #include "PropertiesWindow.h"
 #include "SavedPlaces.h"
@@ -105,6 +106,9 @@ PaneContextMenuResult RunPaneContextMenu(
       folder != pane.Path() || destination != other.Path())
     throw std::runtime_error(
         "The panel changed. Open the file menu again.");
+  // Browsing a directory (including a volume root) needs no transfer identity.
+  if (action == kSelectedBrowser && options.directory && selected.size() == 1)
+    return {BMessage(action), {}};
   if (action == kRestoreSidebar) {
     BMessage restore(kRestoreSidebar);
     pane.MessageReceived(&restore);
