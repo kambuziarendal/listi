@@ -154,32 +154,31 @@ public:
   }
 };
 struct DateField : BDateField {
-  BFont formattedFont;
-  bool formatted = false;
+  uint64 fontRevision = 0;
   explicit DateField(time_t *value) : BDateField(value) {}
 };
 class DateColumn : public BDateColumn {
 public:
   BFont font;
+  uint64 fontRevision = 1;
   explicit DateColumn(const BFont &value)
       : BDateColumn("Modified", 160, 80, 280), font(value) {}
   void DrawField(BField *field, BRect rect, BView *view) override {
     auto date = static_cast<DateField *>(field);
     view->SetFont(&font);
-    if (!date->formatted || date->formattedFont != font)
+    if (date->fontRevision != fontRevision)
       date->SetWidth(-1);
     BDateColumn::DrawField(field, rect, view);
     // Haiku's date column tests the full cell width, but caches the width
     // minus its text margins. Normalize the key so selection repainting does
     // not rerun locale formatting for every visible date on every frame.
     date->SetWidth(rect.Width());
-    date->formattedFont = font;
-    date->formatted = true;
+    date->fontRevision = fontRevision;
   }
 };
 struct SizeField : BSizeField {
   BString label, clipped;
-  BFont formattedFont;
+  uint64 fontRevision = 0;
   float width = -1;
   bool formatted = false;
   explicit SizeField(off_t size) : BSizeField(size) {}
@@ -187,6 +186,7 @@ struct SizeField : BSizeField {
 class SizeColumn : public BSizeColumn {
 public:
   BFont font;
+  uint64 fontRevision = 1;
   explicit SizeColumn(const BFont &value)
       : BSizeColumn("Size", 85, 50, 200), font(value) {}
   void DrawField(BField *field, BRect rect, BView *view) override {
@@ -199,12 +199,12 @@ public:
       size->formatted = true;
     }
     view->SetFont(&font);
-    if (size->width != rect.Width() || size->formattedFont != font) {
+    if (size->width != rect.Width() || size->fontRevision != fontRevision) {
       size->clipped = size->label;
       view->TruncateString(&size->clipped, B_TRUNCATE_END,
                            std::max(0.f, rect.Width() - 16));
       size->width = rect.Width();
-      size->formattedFont = font;
+      size->fontRevision = fontRevision;
     }
     DrawString(size->clipped.String(), view, rect);
   }
@@ -278,6 +278,10 @@ public:
   SizeColumn *size;
   DateColumn *date;
   bool syncing = false, showModified = true;
+  // Row heights may differ after a font change. Maintain their sum instead
+  // of walking the growing native list on every incoming scan batch.
+  double rowsHeight = 0;
+  float ContentHeight() override { return static_cast<float>(rowsHeight); }
   RubberBand *band;
   DetailsList(Pane *p, PaneModel *state, const Preferences &prefs)
       : AdaptiveColumnList("files", B_WILL_DRAW | B_NAVIGABLE | B_DRAW_ON_CHILDREN,
@@ -527,8 +531,12 @@ public:
   void Apply(const Preferences &p) override {
     prefs = p;
     list->name->prefs = p;
-    list->size->font = p.font;
-    list->date->font = p.font;
+    if (list->size->font != p.font) {
+      list->size->font = p.font;
+      list->date->font = p.font;
+      ++list->size->fontRevision;
+      ++list->date->fontRevision;
+    }
     list->SetFont(&p.font);
     list->size->SetVisible(p.size);
     list->showModified = p.date;
@@ -569,6 +577,7 @@ public:
       auto *first = list->FocusRow();
       if (!first)
         first = list->RowAt(0);
+      list->rowsHeight = 0;
       list->RemoveRow(first);
       delete first;
       list->Clear();
@@ -582,6 +591,7 @@ public:
       visible.insert(entry->path);
     for (auto it = rows.begin(); it != rows.end();) {
       if (!visible.count(it->first)) {
+        list->rowsHeight -= it->second->Height() + 1;
         list->RemoveRow(it->second);
         delete it->second;
         it = rows.erase(it);
@@ -615,6 +625,7 @@ public:
                       3 + i);
       rows.emplace(entry->path, row);
       added.AddItem(row);
+      list->rowsHeight += row->Height() + 1;
       if (model->IsSelected(entry->path))
         selected.push_back(row);
     }
