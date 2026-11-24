@@ -83,6 +83,13 @@ void FolderTabs::RestoreTabs(const BMessage &archive) {
   }
 }
 
+void FolderTabs::OpenDirectory(const char *path) {
+  Snapshot();
+  FolderTab tab{++nextTab, {}, {}};
+  tab.state.location = path;
+  Insert(std::move(tab));
+  Restore();
+}
 void FolderTabs::Adopt(FolderTab tab) {
   tabs[active] = std::move(tab);
   Restore();

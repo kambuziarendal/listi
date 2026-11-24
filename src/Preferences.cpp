@@ -33,6 +33,8 @@ rgb_color Preferences::Color(const BString &text) const {
 }
 void Preferences::Load(const BMessage &m) {
   WorkspaceLayout::Load(m);
+  int32 opening = m.GetInt32("folderOpening", NewWindow);
+  folderOpening = opening >= NewWindow && opening <= Ask ? FolderOpening(opening) : NewWindow;
   tviskiptButtons = m.GetInt32("tviskiptButtons", -1);
   if (tviskiptButtons < -1 || tviskiptButtons > 1)
     tviskiptButtons = -1;
@@ -117,6 +119,8 @@ BMessage Preferences::Save() const {
 }
 BMessage Preferences::SharedChanges(const Preferences *before) const {
   BMessage m(kSharedPreferences);
+  if (!before || folderOpening != before->folderOpening)
+    m.AddInt32("folderOpening", folderOpening);
   if (!before || separateWindows != before->separateWindows)
     m.AddBool("separateWindows", separateWindows);
   if (!before || alwaysFolderTabs != before->alwaysFolderTabs)
@@ -149,6 +153,9 @@ BMessage Preferences::SharedChanges(const Preferences *before) const {
   return m;
 }
 void Preferences::ApplyShared(const BMessage &m) {
+  int32 opening = m.GetInt32("folderOpening", folderOpening);
+  if (opening >= NewWindow && opening <= Ask)
+    folderOpening = FolderOpening(opening);
   separateWindows = m.GetBool("separateWindows", separateWindows);
   alwaysFolderTabs = m.GetBool("alwaysFolderTabs", alwaysFolderTabs);
   icons = m.GetBool("icons", icons);
@@ -234,6 +241,7 @@ class PreferencesWindow : public BWindow {
   BPopUpMenu *categories;
   BPopUpMenu *defaultModes[sizeof(kSettingsWorkspaces) /
                            sizeof(kSettingsWorkspaces[0])];
+  BPopUpMenu *folderOpening;
   BCheckBox *icons, *size, *date, *buttons, *command, *separateWindows;
   BTextControl *family, *fontSize, *folders, *files, *links, *editor, *terminal;
 
@@ -302,7 +310,12 @@ public:
     customize->SetTarget(target);
     separateWindows = new BCheckBox("Open a new window when launching Listi again", nullptr);
     separateWindows->SetValue(p.separateWindows);
+    folderOpening = new BPopUpMenu("folder opening");
+    for (const char *label : Preferences::FolderOpeningLabels)
+      folderOpening->AddItem(new BMenuItem(label, nullptr));
+    folderOpening->ItemAt(p.folderOpening)->SetMarked(true);
     views.End()
+        .Add(new BMenuField("external folders", "Open external folders in:", folderOpening))
         .Add(separateWindows)
         .Add(new WrappedLabel(
             "view precedence",
@@ -437,6 +450,7 @@ public:
       }
     }
     const Preferences before = prefs;
+    prefs.folderOpening = Preferences::FolderOpening(folderOpening->IndexOf(folderOpening->FindMarked()));
     prefs.separateWindows = separateWindows->Value();
     prefs.font.SetFamilyAndStyle(family->Text(), nullptr);
     prefs.font.SetSize(n);

@@ -3,8 +3,9 @@
 #include "WorkspaceLayout.h"
 #include <Messenger.h>
 class BWindow;
+struct Preferences;
 namespace Listi {
 inline constexpr uint32 kGuideChoice = 'wlay';
 BMessenger OpenLayoutIntroduction(BWindow &, BMessenger previous,
-                                  Workspace current, bool firstRun);
+                                  const Preferences &settings, bool firstRun);
 }

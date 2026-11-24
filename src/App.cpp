@@ -15,6 +15,7 @@
 #include "SavedPlaces.h"
 #include "SavedSearches.h"
 #include <Application.h>
+#include <Alert.h>
 #include <Window.h>
 #include <Directory.h>
 #include <Path.h>
@@ -56,15 +57,32 @@ class App : public BApplication {
       std::lock_guard<std::mutex> guard(requestLock);
       pending.swap(requests);
     }
-    for (auto &request : pending)
+    for (auto &request : pending) {
+      if (request.external && !browsers.empty()) {
+        auto opening = prefs.folderOpening;
+        if (opening == Preferences::Ask) {
+          std::string question = "Open " + request.path + " in a new window or a folder tab?";
+          int32 choice = (new BAlert("Open folder", question.c_str(), "Cancel",
+                                     "Window", "Tab"))->Go();
+          if (choice < 1) continue;
+          opening = choice == 2 ? Preferences::NewTab : Preferences::NewWindow;
+        }
+        if (opening == Preferences::NewTab) {
+          BMessage tab(kExternalTab);
+          tab.AddString("path", request.path.c_str());
+          if (browsers.begin()->second.SendMessage(&tab) == B_OK)
+            continue;
+        }
+      }
       Open(std::move(request));
+    }
   }
-  void LaunchDirectory(const char *path) {
+  void LaunchDirectory(const char *path, bool forceWindow = false) {
     BDirectory directory(path);
     BEntry entry;
     BPath normalized;
     if (directory.GetEntry(&entry) == B_OK && entry.GetPath(&normalized) == B_OK)
-      Queue({normalized.Path(), {}, {}});
+      Queue({normalized.Path(), {}, {}, false, !forceWindow});
   }
 
 public:
@@ -84,7 +102,7 @@ public:
       if (cwd && argv[index][0] != '/')
         path.SetTo(cwd, argv[index], true);
       if (path.Path())
-        LaunchDirectory(path.Path());
+        LaunchDirectory(path.Path(), index == 2);
     } else if (index == 2)
       Queue({});
   }

@@ -23,6 +23,7 @@ class FolderTabs : public BGroupView {
 public:
   FolderTabs(int32 side, Pane &);
   bool Change(uint32 command, int64 chosen = -1);
+  void OpenDirectory(const char *path);
   FolderTab Snapshot();
   BMessage ArchiveTabs();
   void RestoreTabs(const BMessage &);

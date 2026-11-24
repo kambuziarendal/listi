@@ -682,17 +682,57 @@ public:
       overview = Listi::OpenWindowOverview(*this, overview);
       return;
     }
+    if (m->what == kExternalTab) {
+      int side = split->Source();
+      const char *path = m->GetString("path", "");
+      if (!*path) return;
+      if (!split->ActivateFiles(side)) {
+        if (!openBrowser || !openBrowser({path, {}, {}}))
+          queue.ErrorInfo("Could not open folder.");
+        return;
+      }
+      split->Panel(side).FolderBar().OpenDirectory(path);
+      if (IsMinimized()) Minimize(false);
+      Activate();
+      split->Focus();
+      return;
+    }
     if (m->what == Listi::kShowLayoutGuide) {
-      guide = Listi::OpenLayoutIntroduction(*this, guide, prefs.workspace,
+      guide = Listi::OpenLayoutIntroduction(*this, guide, prefs,
                                            m->GetBool("firstRun", false));
       return;
     }
     if (m->what == Listi::kGuideChoice) {
       const int32 value = m->GetInt32("workspace", -1);
-      if (value >= 0 && value <= 3 && prefs.workspace != Workspace(value))
-        SetWorkspace(Workspace(value));
-      else if (m->GetBool("firstRun", false))
-        Save();
+      if (value < 0 || value > 3) {
+        if (m->GetBool("firstRun", false)) Save();
+        return;
+      }
+      if (!split->PrepareLayoutChange()) return;
+      prefs.workspace = Workspace(value);
+      prefs.singlePane = split->Source();
+      const int32 sidebar = m->GetInt32("sidebarChoice", 0);
+      if (sidebar >= 1 && sidebar <= 3) {
+        const SidebarMode modes[] = {SidebarMode::Hidden, SidebarMode::FolderTree,
+                                     SidebarMode::Shelf};
+        for (int i = 0; i < 2; ++i)
+          prefs.SetSidebar(i, modes[sidebar - 1]);
+      }
+      if (!prefs.SinglePane()) {
+        prefs.SetPreview(m->GetBool("preview", prefs.Preview()));
+        prefs.command = m->GetBool("command", prefs.command);
+        if (m->GetBool("buttons", prefs.ActionButtonsVisible()) != prefs.ActionButtonsVisible())
+          (prefs.IsSmidja() ? prefs.smidjaButtons : prefs.tviskiptButtons) =
+              m->GetBool("buttons", false);
+      }
+      Preferences before = prefs;
+      prefs.ApplyShared(*m);
+      if (prefs.folderOpening != before.folderOpening) {
+        BMessage delta = prefs.SharedChanges(&before);
+        be_app->PostMessage(&delta);
+      }
+      ApplyWorkspace();
+      Save();
       return;
     }
     if (m->what == Listi::kFlatContext) {

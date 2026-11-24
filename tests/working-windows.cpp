@@ -138,7 +138,7 @@ int main() {
 
   auto choose = [&](bool apply) {
     file.SendMessage(kShowLayoutGuide);
-    auto guide = Dialog("Choose a Listi layout");
+    auto guide = Dialog("Listi setup");
     Check(With(guide, [&](BWindow &w) {
       auto *radio = dynamic_cast<BRadioButton *>(w.FindView("Einn"));
       if (!radio) return false;

@@ -119,6 +119,10 @@ enum : uint32 {
 };
 struct Preferences : WorkspaceLayout {
   BFont font = *be_plain_font;
+  enum FolderOpening : int32 { NewWindow, NewTab, Ask };
+  inline static constexpr const char *FolderOpeningLabels[] = {
+      "Independent window", "Folder tab", "Ask each time"};
+  FolderOpening folderOpening = NewWindow;
   bool separateWindows = true;
   bool icons = true, size = true, date = true, alwaysFolderTabs = false;
   // Quick overrides are independent of saved layout profiles.

@@ -11,6 +11,7 @@ class SavedPlaces;
 class SavedSearches;
 }
 
+constexpr uint32 kExternalTab = 'extb';
 constexpr uint32 kQuickView = 'qvpr', kInlineNotice = 'inot';
 
 constexpr uint32 kNewBrowser = 'wbne', kSelectedBrowser = 'wbsl',
@@ -20,6 +21,7 @@ struct BrowserRequest {
   std::optional<Listi::FolderTab> detached;
   std::optional<BPoint> position;
   bool localLayout = false;
+  bool external = false;
   std::optional<BMessage> workingSet = {};
 };
 using BrowserOpener = std::function<bool(BrowserRequest)>;
