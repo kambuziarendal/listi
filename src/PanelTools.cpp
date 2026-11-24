@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "PanelTools.h"
 #include "FolderTabs.h"
+#include "FolderHistory.h"
 #include "FlatView.h"
 #include "ViewVisibility.h"
 
@@ -76,7 +77,7 @@ bool PanelTools::CloseEditor() {
 
 void PanelTools::EnableTools(bool enabled) {
   toolsEnabled = enabled;
-  if (!enabled && current != PanelPage::Flat)
+  if (!enabled && current != PanelPage::Flat && current != PanelPage::History)
     ShowPage(PanelPage::Files);
   else
     UpdateTabs();
@@ -93,6 +94,7 @@ void PanelTools::FocusCurrent() {
     Page(current)->MessageReceived(&focus);
     break;
   }
+  case PanelPage::History:
   case PanelPage::Preview:
     Page(current)->MakeFocus();
     break;
@@ -103,6 +105,12 @@ void PanelTools::OpenFlat(const std::shared_ptr<Shelf> &shelf) {
   if (current == PanelPage::Files)
     Open(PanelPage::Flat,
          CreateFlatView(BMessenger(Window()), shelf, files.Path(), pane));
+}
+
+bool PanelTools::OpenHistory(const char *source) {
+  if (current != PanelPage::Files) return false;
+  Open(PanelPage::History, CreateHistoryPreview(source, pane));
+  return true;
 }
 
 bool PanelTools::OpenSearch(const BMessage &store) {
@@ -159,7 +167,7 @@ void PanelTools::RemovePage(PanelPage page) {
 
 void PanelTools::ShowPage(PanelPage page) {
   if (current != page) {
-    if (current == PanelPage::Flat)
+    if (current == PanelPage::Flat || current == PanelPage::History)
       RemovePage(current);
     else
       Page(current)->Hide();

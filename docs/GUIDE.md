@@ -647,13 +647,22 @@ starting with a tab or line break, or whose first non-whitespace character is
 ### Manual folder history
 
 Open a local BFS folder, then choose **Files → Folder history…**. The window
-keeps that source even if you navigate elsewhere in Listi. Enter the absolute
-path of an existing, dedicated BFS folder outside the source tree and click
-**Connect**. Connecting does not write to the folder. Click **Create point** to
-save the current tree. Select a point to inspect its read-only listing; to copy
-the whole point, enter an absolute path whose parent exists and whose final
-folder does not, then click **Restore as copy**. The app will not merge with
-an existing folder or restore into the original tree.
+keeps that source even if you navigate elsewhere. A configured folder opens
+its saved versions directly. For a manual history, click **Choose history
+folder…** and select an existing dedicated BFS folder outside the source.
+Connecting does not write. **Save version** records the current tree.
+
+Slide left to go back in time, right for newer versions, or use the arrows
+for one step at a time. Scrolling over the timeline also steps between versions. The date identifies the saved folder, not the live
+folder. Added and removed paths and changes to file bytes, link targets or
+mode are relative to the preceding version. The listing is read-only and is
+limited to 2,048 entries per version. Changes are not annotated when truncated.
+**Refresh** reloads saved versions.
+
+Select a regular file and click **Restore file…**, or **Restore folder…** for
+the entire version. Choose the containing folder and name the new copy.
+Restore never merges, overwrites or writes into the original tree or store.
+Browsing history alone does not restore anything.
 
 Use a quiet source and a trusted store. This is not an atomic live filesystem
 snapshot or an in-place rollback. For optional scheduled points, see below.
@@ -666,7 +675,7 @@ timestamps, ownership, hard-link relationships or volume indexes.
 Canceling a save before publication leaves existing points readable. An
 interrupted save can leave complete, unreferenced blobs (or private temporary
 files after a process crash); there is no removal or retention action.
-An interrupted restore can leave an incomplete **new** folder; Listi reports
+An interrupted restore can leave an incomplete **new** file or folder; Listi reports
 its path and never removes or overwrites an existing destination. Inspect an
 interrupted folder's BFS attributes (for example, with
 `catattr Listi:RestoreIncomplete /path/to/copy`). Listi writes this marker
@@ -674,7 +683,7 @@ before restoring any contents and clears it only after the copy has been
 flushed. If the point already has that attribute, Listi uses the first unused
 numeric suffix instead. After a failure, restore to another new path; do not
 use a marked copy. If there is no room to write the marker or the process
-stops before it is written, only the empty destination directory may remain.
+stops before it is written, only the empty destination may remain.
 Use a destination parent that other processes do not edit. When a
 connected history folder is gone or replaced, close the history window and
 reopen it to explicitly connect again.
@@ -692,8 +701,13 @@ reopen it to explicitly connect again.
    helper runs at low priority even when Listi is closed, starts after
    roughly one minute, and checks about hourly while Haiku is running.
    **Run now** requests a check immediately.
-4. To browse and restore, open the corresponding source in Listi and choose
-   **Files → Folder history…**. Connect to the same history folder.
+4. Open the configured source folder and click **History…** beside the pane
+   status. No reconnection is needed after restarting Listi or Haiku. Or
+   right-click the folder background and choose **Folder history → Preview in
+   other panel** in a two-panel workspace. The opposite folder is kept intact;
+   close the preview with **×** to return to it. **Open in window** also
+   provides restore actions. If the store identity changes, review the
+   automatic settings instead of silently opening the replacement.
 5. Click **Disable** to stop the helper and remove its Deskbar icon. The
    selected paths and saved points are kept, and manual history is unchanged.
    Disable before editing or reconfirming the selection.

@@ -13,6 +13,8 @@
 #include "LayoutIntroduction.h"
 #include "FolderHistory.h"
 #include "AutomaticHistory.h"
+#include "HistorySettings.h"
+#include <thread>
 #include "FileListExportWindow.h"
 #include "RecoveryReviewWindow.h"
 #include "FlatView.h"
@@ -78,6 +80,9 @@ namespace {
 std::atomic<int> browserCount{0};
 class MainWindow : public Listi::WorkingWindow {
   BMessenger overview, guide;
+  static constexpr uint32 kHistoryConfigRead = 'fhcf';
+  std::vector<BMessage> historyPairs;
+  bool readingConfig = false, refreshConfig = false, automaticEnabled = false;
   std::string titleLocation;
   std::array<std::string, 2> tabLocations;
   bool sessionLayout = false;
@@ -139,6 +144,16 @@ class MainWindow : public Listi::WorkingWindow {
   }
   void UpdateTransferTarget() {
     for (int side = 0; side < 2; ++side) {
+      const auto *pane = panes[side];
+      bool known = false;
+      if (pane->LocationValid() && !pane->IsSearchList()) {
+        const auto [device, node] = pane->FolderIdentity();
+        for (const auto &pair : historyPairs)
+          if (strcmp(pane->Path(), pair.GetString("path", 0, "")) == 0 &&
+              device == pair.GetInt64("node", 0, -1) && node == pair.GetInt64("node", 1, -1))
+            known = true;
+      }
+      panes[side]->SetHistoryHint(known, automaticEnabled);
       if (tabLocations[side] != panes[side]->Path()) {
         tabLocations[side] = panes[side]->Path();
         split->Panel(side).FolderBar().UpdateLabel();
@@ -558,6 +573,27 @@ public:
     if (!quitting)
       UpdateTransferTarget();
   }
+  void ReadHistoryConfig() {
+    if (readingConfig) { refreshConfig = true; return; }
+    readingConfig = true;
+    try {
+      std::thread([target = BMessenger(this)] {
+        BMessage result(kHistoryConfigRead);
+        try {
+          const auto config = Listi::ReadHistorySettings();
+          for (const auto &pair : Listi::HistoryPairs(config)) result.AddMessage("pair", &pair);
+          result.AddBool("enabled", config.GetBool("enabled", false));
+        } catch (const std::exception &) {
+          // Show no affordance on unreadable settings. Opening history explicitly reports the error.
+        }
+        target.SendMessage(&result);
+      }).detach();
+    } catch (const std::exception &) { readingConfig = false; }
+  }
+  void WindowActivated(bool active) override {
+    BWindow::WindowActivated(active);
+    if (active) ReadHistoryConfig();
+  }
   void MenusBeginning() override {
     BWindow::MenusBeginning();
     const auto &pane = *panes[split->Source()];
@@ -623,6 +659,13 @@ public:
     return true;
   }
   void MessageReceived(BMessage *m) override {
+    if (m->what == kHistoryConfigRead) {
+      readingConfig = false;
+      historyPairs = Listi::HistoryPairs(*m);
+      automaticEnabled = m->GetBool("enabled", false);
+      if (refreshConfig) { refreshConfig = false; ReadHistoryConfig(); }
+      return;
+    }
     if (m->what == kQuitListi) {
       be_app->PostMessage(B_QUIT_REQUESTED);
       return;
@@ -672,6 +715,7 @@ public:
         switch (split->Panel(i).Current()) {
         case PanelPage::Flat: text += "Flat View"; break;
         case PanelPage::Search: text += "Search"; break;
+        case PanelPage::History: text += "Folder history"; break;
         case PanelPage::Preview: text += "Preview"; break;
         case PanelPage::Files: text += ViewModeLabel(panes[i]->CurrentView()); break;
         }
@@ -692,12 +736,17 @@ public:
         PostMainWindowNotice("Could not open automatic history. Install the complete Listi package.");
       return;
     }
-    if (m->what == Listi::kFolderHistory) {
-      const auto &pane = *panes[split->Source()];
+    if (m->what == Listi::kFolderHistory || m->what == Listi::kPreviewHistory) {
+      int side = m->GetInt32("pane", split->Source());
+      if (PromptBlocksCommand() || !split->ActivateFiles(side)) return;
+      const auto &pane = *panes[side];
       if (!pane.LocationValid() || pane.IsSearchList() || pane.Path()[0] != '/')
         PostMainWindowNotice("Open a local folder before using folder history.");
-      else
+      else if (m->what == Listi::kFolderHistory)
         Listi::OpenFolderHistory(pane.Path());
+      else if (!prefs.SinglePane() && !split->QuickView() && split->Panel(1 - side).OpenHistory(pane.Path()))
+        split->RefreshPanels();
+      else PostMainWindowNotice("Open a second file panel to preview history here.");
       return;
     }
     if (m->what == Listi::kOpenWindowOverview) {
@@ -984,7 +1033,7 @@ public:
                          : m->GetInt32("terminal lister", source);
       if (lister < 0 || lister > 1)
         break;
-      if (panes[lister]->IsSearchList()) {
+      if (split->Panel(lister).Current() == PanelPage::History || panes[lister]->IsSearchList()) {
         PostMainWindowNotice("Open a local folder before starting a terminal.");
         break;
       }
@@ -1001,7 +1050,7 @@ public:
       break;
     case Listi::kTerminalWindow:
     case kCommand: {
-      if (!strcmp(pane.Path(), "@disks") ||
+      if (panel.Current() == PanelPage::History || !strcmp(pane.Path(), "@disks") ||
           Listi::IsVirtual(pane.Path())) {
         PostMainWindowNotice("Open a local folder first.");
         break;

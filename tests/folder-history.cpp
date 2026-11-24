@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Native BFS regression; run with make audit TESTS=folder-history.
 #include "FolderHistory.h"
+#include "FolderHistoryListing.h"
 #include <cassert>
 #include <cstring>
 #include <cstdlib>
@@ -107,11 +108,21 @@ int main() {
   assert(count() == 3 && objects() == 1 && renamed != metadata);
   make(source/"dir/renamed","changed");
   history.Save(cancel);
+  const auto edited = latest();
   assert(count()==4 && objects()==2);
   fs::remove(source/"dir/renamed");
   history.Save(cancel);
   assert(count()==5 && objects()==2);
   std::cout << "PASS first/next, metadata/rename and identical contents share one object; changed bytes add one; deletion saved" << std::endl;
+  std::string status;
+  auto movedRows = Listi::DescribeVersion(history, renamed, metadata, status, cancel);
+  assert(movedRows.at("dir/note").change == "Removed" && movedRows.at("dir/note").mode == 0);
+  assert(movedRows.at("dir/renamed").change == "Added");
+  auto editedRows = Listi::DescribeVersion(history, edited, renamed, status, cancel);
+  assert(editedRows.at("dir/renamed").change == "Changed" && editedRows.at("same").change.empty());
+  auto initialRows = Listi::DescribeVersion(history, first, "", status, cancel);
+  assert(initialRows.at("dir/note").change.empty() && !initialRows.count("dir/renamed"));
+  std::cout << "PASS timeline compares adjacent saved versions, including removed and changed nested files" << std::endl;
   history.Restore(first,base/"one",cancel);
   history.Restore(metadata,base/"two",cancel);
   history.Restore(renamed,base/"three",cancel);
@@ -127,6 +138,17 @@ int main() {
   checkAttr(base/"two/dir/note","Status",B_STRING_TYPE,"approved",9);
   std::cout << "PASS independent copies preserve BFS MIME, int32, raw bytes, strings, directory and symlink attributes" << std::endl;
   reject([&]{ history.Restore(first,base/"one",cancel); }, "existing destination not overwritten");
+  fs::create_directory(base/"picked");
+  history.Restore(first, base/"picked/note", cancel, "dir/note");
+  std::string recovered;
+  std::ifstream(base/"picked/note") >> recovered;
+  assert(recovered == "original" && std::distance(fs::directory_iterator(base/"picked"), {}) == 1);
+  checkAttr(base/"picked/note", "Count", B_INT32_TYPE, &answer, sizeof(answer));
+  reject([&] { history.Restore(first, base/"picked/note", cancel, "dir/note"); }, "file destination exists");
+  reject([&] { history.Restore(first, base/"invalid", cancel, "../same"); }, "invalid selected file");
+  reject([&] { history.Restore(first, base/"invalid", cancel, "pointer"); }, "symlink not a regular file");
+  assert(!fs::exists(base/"invalid"));
+  std::cout << "PASS selected nested file restores old bytes and metadata, never siblings or overwrites" << std::endl;
   cancelAfterWrite = &cancel;
   reject([&]{ history.Restore(first,base/"partial",cancel); }, "canceled after a payload write");
   assert(cancel && !cancelAfterWrite && count() == 5);

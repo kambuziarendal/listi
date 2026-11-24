@@ -1,274 +1,390 @@
 // SPDX-License-Identifier: MIT
 #include "FolderHistory.h"
+#include "HistorySettings.h"
+#include "FolderHistoryListing.h"
+#include "PanelTools.h"
+#include "ViewVisibility.h"
 
 #include <Button.h>
+#include <Entry.h>
+#include <FilePanel.h>
+#include <GroupView.h>
 #include <LayoutBuilder.h>
 #include <ListView.h>
 #include <Messenger.h>
+#include <Path.h>
 #include <ScrollView.h>
+#include <Slider.h>
 #include <StringView.h>
-#include <TextControl.h>
-#include <TextView.h>
 #include <Window.h>
-#include <ctime>
+#include <algorithm>
 #include <cstdlib>
-#include <stdexcept>
+#include <ctime>
+#include <filesystem>
+#include <map>
 #include <mutex>
+#include <stdexcept>
 #include <sys/stat.h>
 #include <thread>
+#include <vector>
 
 namespace Listi {
 namespace {
-constexpr uint32 kConnect = 'fhcn', kSave = 'fhsv', kBrowse = 'fhbr',
-    kRestore = 'fhrs', kCancel = 'fhca', kDone = 'fhdn';
-std::atomic_int activeOperations{0};
+namespace fs = std::filesystem;
+constexpr uint32 kOpen = 'fbop', kChoose = 'fbch', kChosen = 'fbcn', kSave = 'fbsv',
+    kLoad = 'fbld', kOlder = 'fbol', kNewer = 'fbnw', kSelect = 'fbse',
+    kPickFile = 'fbpf', kPickFolder = 'fbpd', kRestore = 'fbrs', kDone = 'fbdn',
+    kCancel = 'fbca', kRefresh = 'fbrf';
+std::atomic_int active{0};
 
-struct Operation {
-  std::atomic_bool canceled{false};
-  std::mutex lock;
-  std::shared_ptr<HistoryStore> connectedStore;
-};
-
-std::string PointLabel(const std::string &id) {
+std::string PointDate(const std::string &id) {
   time_t seconds = std::strtoll(id.c_str() + 6, nullptr, 10) / 1000000;
   tm local{};
   char text[64];
-  if (localtime_r(&seconds, &local) &&
-      strftime(text, sizeof(text), "%Y-%m-%d %H:%M:%S", &local))
-    return std::string(text) + "  ·  " + id.substr(6);
-  return id;
+  if (localtime_r(&seconds, &local) && strftime(text, sizeof(text), "%Y-%m-%d %H:%M:%S", &local))
+    return text;
+  return "Unknown date";
 }
 
-std::string DisplayName(std::string name) {
-  for (char &character : name)
-    if (character >= 0 && character < ' ') character = '?';
-  return name;
-}
-
-void Describe(const BMessage &folder, const std::string &prefix, std::string &text) {
-  BMessage child;
-  for (int32 i = 0; text.size() < 256 * 1024 &&
-       folder.FindMessage("child", i, &child) == B_OK; ++i) {
-    auto path = prefix + DisplayName(child.GetString("name", ""));
-    const auto mode = child.GetInt32("mode", 0);
-    if (S_ISDIR(mode)) {
-      text += path + "/\n";
-      Describe(child, path + "/", text);
-    } else if (S_ISLNK(mode)) {
-      text += path + " → " + DisplayName(child.GetString("target", "")) + "\n";
-    } else {
-      text += path + "\n";
-    }
-  }
-}
-
-class PointItem : public BStringItem {
+class Timeline : public BSlider {
 public:
-  explicit PointItem(std::string value)
-      : BStringItem(PointLabel(value).c_str()), id(std::move(value)) {}
-  std::string id;
+  Timeline() : BSlider("version timeline", "Saved version", new BMessage(kLoad),
+                       0, 1, B_HORIZONTAL) {
+    SetModificationMessage(new BMessage(kLoad));
+    SetToolTip("Slide or scroll to browse saved versions");
+  }
+  void MessageReceived(BMessage *m) override {
+    if (m->what == B_MOUSE_WHEEL_CHANGED && IsEnabled()) {
+      float delta = m->GetFloat("be:wheel_delta_y", 0);
+      if (delta != 0) {
+        SetValue(Value() + (delta > 0 ? -1 : 1));
+        Invoke();
+      }
+      return;
+    }
+    BSlider::MessageReceived(m);
+  }
 };
 
-class HistoryWindow : public BWindow {
+struct Task {
+  std::atomic_bool cancel{false};
+  std::mutex lock;
+  std::shared_ptr<HistoryStore> store;
+  std::vector<std::string> points;
+  HistoryRows rows;
+  std::string notice;
+  bool manual = false, failed = false;
+};
+
+class HistoryView : public BGroupView {
 public:
-  explicit HistoryWindow(const char *root)
-      : BWindow(BRect(110, 88, 920, 620), "Folder history", B_TITLED_WINDOW,
-                B_AUTO_UPDATE_SIZE_LIMITS | B_ASYNCHRONOUS_CONTROLS),
-        source(root) {
-    auto *label = new BStringView("source", ("Source: " + source).c_str());
-    folder = new BTextControl("store", "History folder:", "", nullptr);
-    destination = new BTextControl("destination", "New copy path:", "", nullptr);
-    connect = new BButton("connect", "Connect", new BMessage(kConnect));
-    save = new BButton("save", "Create point", new BMessage(kSave));
-    restore = new BButton("restore", "Restore as copy", new BMessage(kRestore));
-    cancel = new BButton("cancel", "Cancel operation", new BMessage(kCancel));
-    points = new BListView("points");
-    points->SetSelectionMessage(new BMessage(kBrowse));
-    contents = new BTextView("contents");
-    contents->MakeEditable(false);
-    status = new BStringView("status", "Enter an existing, dedicated folder outside the source.");
-    status->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
-    status->SetTruncation(B_TRUNCATE_END);
-    auto *pointScroll = new BScrollView("point scroll", points, 0, false, true);
-    auto *contentScroll = new BScrollView("content scroll", contents, 0, false, true);
-    pointScroll->SetExplicitMinSize(BSize(280, 230));
-    contentScroll->SetExplicitMinSize(BSize(320, 230));
-
-    BLayoutBuilder::Group<>(this, B_VERTICAL, B_USE_DEFAULT_SPACING)
-        .SetInsets(B_USE_WINDOW_SPACING)
-        .Add(label)
-        .AddGroup(B_HORIZONTAL).Add(folder).Add(connect).End()
-        .AddGroup(B_HORIZONTAL).Add(save).Add(cancel).AddGlue().End()
-        .AddGroup(B_HORIZONTAL)
-          .AddGroup(B_VERTICAL).Add(new BStringView("points label", "Saved points")).Add(pointScroll).End()
-          .AddGroup(B_VERTICAL).Add(new BStringView("contents label", "Contents (read-only)")).Add(contentScroll).End()
-        .End()
-        .AddGroup(B_HORIZONTAL).Add(destination).Add(restore).End()
-        .Add(status);
-    UpdateControls();
-    folder->MakeFocus();
+  HistoryView(const char *path, int32 side)
+      : BGroupView(B_VERTICAL), source(path), panel(side) {
+    SetName("folder history browser");
+    auto *header = new BStringView("history source", ("History: " + source).c_str());
+    header->SetTruncation(B_TRUNCATE_MIDDLE);
+    header->SetToolTip(source.c_str());
+    auto controls = BLayoutBuilder::Group<>(this, B_VERTICAL, B_USE_SMALL_SPACING);
+    controls.SetInsets(B_USE_SMALL_SPACING);
+    auto top = controls.AddGroup(B_HORIZONTAL);
+    top.Add(header).AddGlue();
+    refresh = Button("Refresh", kRefresh);
+    top.Add(refresh);
+    if (panel >= 0) {
+      auto *message = new BMessage(kClosePanelPage);
+      message->AddInt32("pane", panel);
+      close = new BButton("close history", "×", message);
+      close->SetToolTip("Close history and return to this panel’s files");
+      top.Add(close);
+    }
+    top.End();
+    choose = Button("Choose history folder…", kChoose);
+    controls.Add(choose, 0);
+    timeline = new Timeline();
+    older = Button("‹", kOlder);
+    newer = Button("›", kNewer);
+    older->SetToolTip("Previous saved version");
+    newer->SetToolTip("Next saved version");
+    controls.AddGroup(B_HORIZONTAL).Add(older).Add(timeline).Add(newer).End();
+    list = new BListView("saved files");
+    list->SetSelectionMessage(new BMessage(kSelect));
+    controls.Add(new BScrollView("saved files scroll", list, 0, false, true));
+    notice = new BStringView("history status", "Looking for saved versions…");
+    notice->SetTruncation(B_TRUNCATE_END);
+    controls.Add(notice);
+    if (panel < 0) {
+      save = Button("Save version", kSave);
+      one = Button("Restore file…", kPickFile);
+      all = Button("Restore folder…", kPickFolder);
+      cancel = Button("Cancel", kCancel);
+      controls.AddGroup(B_HORIZONTAL).Add(save).Add(cancel).AddGlue().Add(one).Add(all).End();
+    }
+    SetViewVisible(choose, false);
+    if (close) close->SetFlat(true);
+    Update();
   }
 
-  ~HistoryWindow() override { ClearPoints(); }
-
-  bool QuitRequested() override {
-    if (!operation) return true;
-    status->SetText("Finish or cancel the current operation before closing.");
-    return false;
+  ~HistoryView() override {
+    if (task) task->cancel = true;
+    Clear();
   }
 
-  void MessageReceived(BMessage *message) override {
-    switch (message->what) {
-    case kConnect: case kSave: case kBrowse: case kRestore:
-      Start(message->what);
-      break;
-    case kCancel:
-      if (operation) {
-        operation->canceled = true;
-        cancel->SetEnabled(false);
-        status->SetText("Cancel requested…");
-      }
-      break;
-    case kDone: {
-      if (!operation) break;
-      {
-        const std::lock_guard<std::mutex> lock(operation->lock);
-        if (operation->connectedStore) store = std::move(operation->connectedStore);
-      }
-      operation.reset();
-      --activeOperations;
-      const auto *outcome = message->GetString("status", "");
-      status->SetText(outcome);
-      status->SetToolTip(outcome);
-      if (message->HasBool("replace")) {
-        loadedPoint.clear();
-        ClearPoints();
-        const char *point;
-        for (int32 i = 0; message->FindString("point", i, &point) == B_OK; ++i)
-          points->AddItem(new PointItem(point));
-        contents->SetText("");
-      }
-      if (const char *viewed = message->GetString("viewed", nullptr)) {
-        if (SelectedPoint() != viewed) {
-          Start(kBrowse);
-          break;
-        }
-        if (const char *listing = message->GetString("listing", nullptr))
-          contents->SetText(listing);
-        loadedPoint = message->HasString("listing") ? viewed : "";
-      }
-      if (!message->HasString("viewed") && !message->HasBool("replace") &&
-          SelectedPoint() != loadedPoint) {
-        Start(kBrowse);
-        break;
-      }
-      UpdateControls();
+  bool Writing() const { return task && (kind == kRestore || kind == kSave); }
+
+  void AttachedToWindow() override {
+    BGroupView::AttachedToWindow();
+    for (auto *button : {older, newer, choose, refresh, save, cancel, one, all})
+      if (button) button->SetTarget(this);
+    list->SetTarget(this);
+    timeline->SetTarget(this);
+    if (close) close->SetTarget(Window());
+    Start(kOpen);
+  }
+
+  void MessageReceived(BMessage *m) override {
+    switch (m->what) {
+    case kRefresh: Start(store ? kRefresh : kOpen); break;
+    case kChoose: Pick(false, {}); break;
+    case kChosen: {
+      entry_ref ref;
+      BPath path;
+      if (!task && m->FindRef("refs", &ref) == B_OK &&
+          BEntry(&ref, true).GetPath(&path) == B_OK)
+        Start(kOpen, path.Path());
       break;
     }
-    default:
-      BWindow::MessageReceived(message);
+    case kSave: Start(kSave); break;
+    case kCancel:
+      if (task) {
+        task->cancel = true;
+        cancel->SetEnabled(false);
+        Status("Cancel requested…");
+      }
+      break;
+    case kOlder: case kNewer:
+      timeline->SetValue(timeline->Value() + (m->what == kOlder ? -1 : 1));
+      // fall through
+    case kLoad:
+      if (Wanted() != loaded) {
+        Clear();
+        if (!task) Start(kLoad);
+      }
+      Update();
+      break;
+    case kSelect: Update(); break;
+    case kPickFile: case kPickFolder:
+      if (store && !task && !loaded.empty() && loaded == Wanted() &&
+          (m->what == kPickFolder || SelectedFile()))
+        Pick(true, m->what == kPickFolder ? "" : SelectedFile()->path);
+      break;
+    case kRestore: {
+      entry_ref ref;
+      BPath path;
+      const char *name = m->GetString("name", "");
+      if (!task && m->FindRef("directory", &ref) == B_OK && *name &&
+          BEntry(&ref, true).GetPath(&path) == B_OK) {
+        auto version = std::string(m->GetString("point", ""));
+        if (version != loaded || version != Wanted()) {
+          Status("The version changed. Choose Restore again.");
+          break;
+        }
+        Start(kRestore, (fs::path(path.Path()) / name).string(), m->GetString("file", ""));
+      }
+      break;
+    }
+    case kDone:
+      Finish();
+      break;
+    default: BGroupView::MessageReceived(m);
     }
   }
 
 private:
-  void ClearPoints() {
-    while (auto *point = points->RemoveItem(int32(0))) delete point;
+  BButton *Button(const char *label, uint32 what) {
+    return new BButton(label, label, new BMessage(what));
+  }
+  void Status(const std::string &text) {
+    notice->SetText(text.c_str());
+    notice->SetToolTip(text.c_str());
+  }
+  std::string Wanted() const {
+    const auto i = timeline->Value();
+    return i >= 0 && size_t(i) < points.size() ? points[i] : "";
+  }
+  const HistoryRow *SelectedFile() const {
+    auto i = list->CurrentSelection();
+    return i >= 0 && size_t(i) < rows.size() && S_ISREG(rows[i].mode) ? &rows[i] : nullptr;
+  }
+  void Clear() {
+    while (list->CountItems()) delete list->RemoveItem(list->CountItems() - 1);
+    rows.clear();
+    loaded.clear();
+  }
+  void Update() {
+    const bool browse = !task || kind == kLoad;
+    const auto i = timeline->Value();
+    const auto id = Wanted();
+    std::string label = id.empty() ? "Saved versions" : PointDate(id) + "  (" +
+        std::to_string(i + 1) + "/" + std::to_string(points.size()) + ")";
+    timeline->SetLabel(label.c_str());
+    timeline->SetEnabled(browse && points.size() > 1);
+    older->SetEnabled(browse && i > 0);
+    newer->SetEnabled(browse && size_t(i + 1) < points.size());
+    refresh->SetEnabled(!task);
+    choose->SetEnabled(!task);
+    if (save) {
+      save->SetEnabled(!task && bool(store));
+      SetViewVisible(cancel, Writing());
+      cancel->SetEnabled(task && !task->cancel);
+      all->SetEnabled(!task && !loaded.empty() && loaded == id);
+      one->SetEnabled(all->IsEnabled() && SelectedFile());
+    }
+  }
+  void Pick(bool restore, const std::string &file) {
+    BMessenger target(this);
+    BMessage selected(restore ? kRestore : kChosen);
+    selected.AddString("point", loaded.c_str());
+    selected.AddString("file", file.c_str());
+    picker = std::make_unique<BFilePanel>(restore ? B_SAVE_PANEL : B_OPEN_PANEL,
+        &target, nullptr, restore ? B_FILE_NODE : B_DIRECTORY_NODE, false, &selected);
+    if (restore) {
+      auto proposed = file.empty() ? fs::path(source).filename().string() + " restored"
+                                   : fs::path(file).filename().string();
+      picker->SetSaveText(proposed.c_str());
+      picker->SetButtonLabel(B_DEFAULT_BUTTON, "Restore copy");
+    }
+    picker->Show();
   }
 
-  std::string SelectedPoint() const {
-    auto *item = static_cast<PointItem *>(points->ItemAt(points->CurrentSelection()));
-    return item ? item->id : "";
-  }
-
-  void UpdateControls() {
-    const bool idle = !operation;
-    folder->SetEnabled(idle && !store);
-    connect->SetEnabled(idle && !store);
-    save->SetEnabled(idle && bool(store));
-    destination->SetEnabled(idle && bool(store));
-    restore->SetEnabled(idle && !loadedPoint.empty() && SelectedPoint() == loadedPoint);
-    cancel->SetEnabled(!idle);
-  }
-
-  void Start(uint32 action) {
-    if (operation || (action == kConnect ? bool(store) : !store)) return;
-    std::string point = SelectedPoint();
-    if (action == kRestore && point != loadedPoint) return;
-    if ((action == kBrowse || action == kRestore) && point.empty()) {
-      contents->SetText("");
-      UpdateControls();
+  void Start(uint32 action, std::string path = {}, std::string file = {}) {
+    if (task || (action != kOpen && !store)) return;
+    auto id = Wanted();
+    if (action == kLoad && id.empty()) return;
+    auto work = std::make_shared<Task>();
+    if (active.fetch_add(1) >= 8) {
+      --active;
+      Status("History readers are busy. Try Refresh shortly.");
       return;
     }
-    if (action == kBrowse) {
-      contents->SetText("");
-      loadedPoint.clear();
-    }
-    operation = std::make_shared<Operation>();
-    ++activeOperations;
-    status->SetToolTip(static_cast<const char *>(nullptr));
-    status->SetText(action == kSave ? "Creating history point…" :
-        action == kRestore ? "Restoring copy…" : "Reading history…");
-    UpdateControls();
+    kind = action;
+    loading = id;
+    task = std::move(work);
+    Status(action == kRestore ? "Restoring copy…" : action == kSave ? "Saving version…" : "Reading history…");
+    Update();
+    auto previous = timeline->Value() > 0 && !id.empty() ? points[timeline->Value() - 1] : "";
     try {
-      std::thread([action, point, source = source, folder = std::string(folder->Text()),
-          destination = std::string(destination->Text()), connected = store,
-          operation = operation, reply = BMessenger(this)] {
-        BMessage result(kDone);
-        std::string status;
-        if (action == kBrowse) result.AddString("viewed", point.c_str());
-        try {
-          if (action == kConnect || action == kSave) {
-            auto history = action == kConnect ? std::make_shared<HistoryStore>(source, folder) : connected;
-            if (action == kSave) history->Save(operation->canceled);
-            result = history->Points();
-            result.what = kDone;
-            result.AddBool("replace", true);
-            if (action == kConnect) {
-              if (operation->canceled) throw std::runtime_error("Canceled.");
-              const std::lock_guard<std::mutex> lock(operation->lock);
-              operation->connectedStore = std::move(history);
+      std::thread([action, id, previous, path, file, source = source, existing = store,
+                   work = task, reply = BMessenger(this)] {
+        {
+          const std::lock_guard<std::mutex> guard(work->lock);
+          try {
+            auto history = existing;
+            if (action == kOpen) {
+              auto pair = HistoryPairFor(ReadHistorySettings(), source);
+              auto destination = path.empty() ? pair.GetString("path", 1, "") : path;
+              if (destination.empty()) {
+                work->manual = true;
+                throw std::runtime_error("Choose the folder where versions are stored.");
+              }
+              history = std::make_shared<HistoryStore>(source, destination);
+              if (pair.HasString("path") && !history->FolderIdentity().HasSameData(pair))
+                throw std::runtime_error("Configured folders changed. Check automatic history settings.");
             }
-            status = action == kConnect ? "History folder connected." : "History point saved.";
-          } else if (action == kBrowse) {
-            auto manifest = connected->Browse(point);
-            std::string listing;
-            Describe(manifest, "", listing);
-            if (operation->canceled) throw std::runtime_error("Canceled.");
-            if (listing.empty()) listing = "(Empty folder)";
-            if (listing.size() >= 256 * 1024) listing += "\n(Listing truncated; restore uses the full point.)";
-            result.AddString("listing", listing.c_str());
-            status = "Viewing saved history.";
-          } else {
-            connected->Restore(point, destination, operation->canceled);
-            status = "Copy restored to " + destination;
+            if (action == kOpen || action == kRefresh || action == kSave) {
+              if (action == kSave) history->Save(work->cancel);
+              auto found = history->Points();
+              const char *point;
+              for (int32 i = 0; found.FindString("point", i, &point) == B_OK; ++i)
+                work->points.emplace_back(point);
+              std::reverse(work->points.begin(), work->points.end());
+              work->store = std::move(history);
+            } else if (action == kLoad) {
+              work->rows = DescribeVersion(*history, id, previous, work->notice, work->cancel);
+            } else {
+              history->Restore(id, path, work->cancel, file);
+              work->notice = "Restored copy: " + path;
+            }
+          } catch (const std::exception &error) {
+            work->notice = error.what();
+            work->rows.clear();
+            work->store.reset();
+            work->points.clear();
+            work->failed = true;
           }
-        } catch (const std::exception &error) {
-          status = error.what();
         }
-        result.AddString("status", status.c_str());
-        reply.SendMessage(&result);
+        --active;
+        reply.SendMessage(kDone);
       }).detach();
-    } catch (const std::exception &error) {
-      operation.reset();
-      --activeOperations;
-      status->SetText(error.what());
-      UpdateControls();
+    } catch (const std::exception &e) {
+      --active;
+      task.reset();
+      Status(e.what());
+      Update();
     }
+  }
+  void Finish() {
+    if (!task) return;
+    auto work = std::move(task);
+    const std::lock_guard<std::mutex> guard(work->lock);
+    Status(work->notice);
+    if (work->store) {
+      store = std::move(work->store);
+      SetViewVisible(choose, false);
+      Clear();
+      points = std::move(work->points);
+      timeline->SetLimits(0, std::max<int32>(1, int32(points.size()) - 1));
+      timeline->SetValue(points.empty() ? 0 : int32(points.size()) - 1);
+      if (points.empty()) Status("No versions saved yet.");
+      else Start(kLoad);
+    } else if (kind == kLoad) {
+      if (Wanted() != loading) Start(kLoad);
+      else if (!work->failed) {
+        Clear();
+        for (auto &[path, entry] : work->rows) {
+          std::string label = path + (S_ISDIR(entry.mode) ? "/" : "");
+          for (char &c : label) if (c >= 0 && c < ' ') c = '?';
+          if (!entry.change.empty()) label += "  ·  " + entry.change;
+          rows.push_back(std::move(entry));
+          list->AddItem(new BStringItem(label.c_str()));
+        }
+        loaded = loading;
+      }
+    } else if (kind == kOpen) SetViewVisible(choose, work->manual || manual);
+    manual |= work->manual;
+    Update();
   }
 
   const std::string source;
+  const int32 panel;
+  BButton *older, *newer, *refresh, *choose, *close = nullptr, *save = nullptr,
+          *one = nullptr, *all = nullptr, *cancel = nullptr;
+  BSlider *timeline;
+  BListView *list;
+  BStringView *notice;
+  std::unique_ptr<BFilePanel> picker;
   std::shared_ptr<HistoryStore> store;
-  std::shared_ptr<Operation> operation;
-  std::string loadedPoint;
-  BTextControl *folder, *destination;
-  BButton *connect, *save, *restore, *cancel;
-  BListView *points;
-  BTextView *contents;
-  BStringView *status;
+  std::shared_ptr<Task> task;
+  uint32 kind = 0;
+  bool manual = false;
+  std::vector<std::string> points;
+  std::vector<HistoryRow> rows;
+  std::string loaded, loading;
+};
+
+class HistoryWindow : public BWindow {
+public:
+  explicit HistoryWindow(const char *source)
+      : BWindow(BRect(140, 100, 770, 520), "Folder history", B_TITLED_WINDOW,
+                B_AUTO_UPDATE_SIZE_LIMITS | B_ASYNCHRONOUS_CONTROLS), view(new HistoryView(source, -1)) {
+    BLayoutBuilder::Group<>(this, B_VERTICAL, 0).Add(view);
+  }
+  bool QuitRequested() override { return !view->Writing(); }
+private:
+  HistoryView *view;
 };
 }
 
-bool FolderHistoryBusy() { return activeOperations != 0; }
-
+bool FolderHistoryBusy() { return active.load() != 0; }
 void OpenFolderHistory(const char *source) { (new HistoryWindow(source))->Show(); }
+BView *CreateHistoryPreview(const char *source, int32 pane) { return new HistoryView(source, pane); }
 }

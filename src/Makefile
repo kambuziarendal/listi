@@ -8,7 +8,7 @@ SRCS += ArchiveJobPreparation.cpp ArchiveJobChecks.cpp RecoveryInventory.cpp Rec
 SRCS += FlatView.cpp WorkspaceLayout.cpp WorkspaceEditor.cpp WorkspaceSplit.cpp PanelTools.cpp FolderTabs.cpp InspectorContent.cpp InspectorDocument.cpp InspectorEditor.cpp InspectorPhoto.cpp
 SRCS += InspectorTextView.cpp SearchResultsView.cpp ReadWorker.cpp
 SRCS += FileListExportWindow.cpp FileListExport.cpp
-SRCS += FolderHistory.cpp FolderHistoryWindow.cpp AutomaticHistoryLaunch.cpp
+SRCS += FolderHistory.cpp FolderHistoryWindow.cpp FolderHistoryListing.cpp HistorySettings.cpp AutomaticHistoryLaunch.cpp
 SRCS += TerminalDock.cpp TerminalPanel.cpp TerminalSession.cpp $(wildcard vendor/libvterm/src/*.c)
 LOCAL_INCLUDE_PATHS += vendor/libvterm/include
 LIBS = shared translation textencoding media be columnlistview tracker sqlite3 $(STDCPPLIBS)
@@ -21,7 +21,7 @@ DEVEL_DIRECTORY := $(shell findpaths -r makefile_engine B_FIND_PATH_DEVELOP_DIRE
 include $(DEVEL_DIRECTORY)/etc/makefile-engine
 
 HISTORY_HELPER_OBJECTS := $(addprefix $(OBJ_DIR)/, AutomaticHistoryHelper.o \
-	AutomaticHistoryTile.o AutomaticHistoryLaunch.o FolderHistory.o \
+	AutomaticHistoryTile.o HistorySettings.o AutomaticHistoryLaunch.o FolderHistory.o \
 	DirectoryFinalization.o RemovableCopy.o MessageStore.o Sha256.o)
 HISTORY_HELPER := $(OBJ_DIR)/ListiHistory
 default: $(HISTORY_HELPER)

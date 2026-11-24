@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "AutomaticHistory.h"
 #include "FolderHistory.h"
+#include "HistorySettings.h"
 #include "MessageStore.h"
 
 #include <Alert.h>
@@ -27,37 +28,16 @@
 namespace Listi {
 namespace {
 namespace fs = std::filesystem;
-constexpr size_t kFolderCount = 3;
 constexpr uint32 kEnable = 'aHen', kDisable = 'aHds', kRun = 'aHrn',
     kTick = 'aHtk', kFinished = 'aHfn', kState = 'aHst', kClosed = 'aHcl',
-    kShow = 'aHsw', kHelp = 'aHhp', kConfigFormat = 'aH01',
+    kShow = 'aHsw', kHelp = 'aHhp',
     kPick = 'aHpk', kPicked = 'aHpd';
 constexpr bigtime_t kSecond = 1000000;
 constexpr bigtime_t kFirstDelay = 60 * kSecond, kInterval = 3600 * kSecond;
 
-std::string SettingsFile() {
-  BPath path;
-  if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) != B_OK ||
-      path.Append("Listi_automatic_history") != B_OK)
-    throw std::runtime_error("Cannot find user settings.");
-  return path.Path();
-}
-
 bool Overlaps(const fs::path &first, const fs::path &second) {
   auto relative = first.lexically_relative(second);
   return !relative.empty() && *relative.begin() != "..";
-}
-
-std::vector<BMessage> ReadPairs(const BMessage &config) {
-  std::vector<BMessage> pairs;
-  BMessage pair;
-  for (int32 i = 0; config.FindMessage("pair", i, &pair) == B_OK; ++i) {
-    if (pairs.size() == kFolderCount || !*pair.GetString("path", "") ||
-        !pair.HasString("path", 1))
-      throw std::runtime_error("Invalid automatic history settings.");
-    pairs.push_back(pair);
-  }
-  return pairs;
 }
 
 class SettingsWindow : public BWindow {
@@ -77,7 +57,7 @@ public:
     layout.SetInsets(B_USE_WINDOW_SPACING);
     layout.Add(new BStringView("instructions",
         "Choose up to three local BFS sources and a separate history folder for each."));
-    for (size_t i = 0; i < kFolderCount; ++i) {
+    for (size_t i = 0; i < kHistoryPairLimit; ++i) {
       auto number = std::to_string(i + 1);
       sources[i] = new BTextControl(("source" + number).c_str(),
           ("Source " + number + ":").c_str(), "", nullptr);
@@ -132,7 +112,7 @@ public:
     }
     case kEnable: {
       BMessage request(kEnable);
-      for (size_t i = 0; i < kFolderCount; ++i) {
+      for (size_t i = 0; i < kHistoryPairLimit; ++i) {
         request.AddString("source", sources[i]->Text());
         request.AddString("store", stores[i]->Text());
       }
@@ -148,8 +128,8 @@ public:
           "history folder. Leave unused pairs blank.\n\n"
           "2. Click Enable. The clock icon in Deskbar opens these settings. Listi can be closed. "
           "The helper starts after one minute and checks about once per hour. Run now is optional.\n\n"
-          "3. Read or restore points from Files → Folder history in Listi, using the same "
-          "source and history folder. Disable stops future work without deleting points.\n\n"
+          "3. In the source folder, click History to browse saved dates. Right-click the folder "
+          "background for a preview beside your files. In the history window, restore one file or the folder as a new copy. Disable stops future saves without deleting versions.\n\n"
           "Only changed trees get points. Automatic saves stop at the configured safety limits "
           "(including 24 points or about 512 MiB per history folder). Nothing is removed "
           "automatically. This is not an independent backup or a live filesystem snapshot.",
@@ -176,13 +156,13 @@ private:
     const bool enabled = state.GetBool("enabled", false);
     const bool working = state.GetBool("working", false);
     if (loadPaths) {
-      auto pairs = ReadPairs(state);
+      auto pairs = HistoryPairs(state);
       for (size_t i = 0; i < pairs.size(); ++i) {
         sources[i]->SetText(pairs[i].GetString("path", 0, ""));
         stores[i]->SetText(pairs[i].GetString("path", 1, ""));
       }
     }
-    for (size_t i = 0; i < kFolderCount; ++i) {
+    for (size_t i = 0; i < kHistoryPairLimit; ++i) {
       sources[i]->SetEnabled(!enabled && !working);
       stores[i]->SetEnabled(!enabled && !working);
     }
@@ -195,9 +175,9 @@ private:
     status->SetToolTip(text);
   }
 
-  std::array<BTextControl *, kFolderCount> sources{}, stores{};
+  std::array<BTextControl *, kHistoryPairLimit> sources{}, stores{};
   const int64 id;
-  std::array<BButton *, kFolderCount * 2> browse{};
+  std::array<BButton *, kHistoryPairLimit * 2> browse{};
   std::unique_ptr<BFilePanel> picker;
   BButton *enable{}, *disable{}, *run{};
   BStringView *status{};
@@ -222,11 +202,9 @@ public:
 
   void ReadyToRun() override {
     try {
-      auto stored = LoadMessageStore(SettingsFile(), true);
+      auto stored = ReadHistorySettings();
       if (stored.what != 'none') {
-        if (stored.what != kConfigFormat)
-          throw std::runtime_error("Unsupported automatic history settings.");
-        auto pairs = ReadPairs(stored);
+        auto pairs = HistoryPairs(stored);
         if (stored.GetBool("enabled", false) && pairs.empty())
           throw std::runtime_error("No automatic history folders are configured.");
         config = stored;
@@ -326,9 +304,9 @@ private:
   }
 
   void Enable(const BMessage &request) {
-    BMessage desired(kConfigFormat);
+    BMessage desired(kHistoryConfigFormat);
     std::vector<fs::path> paths;
-    for (size_t i = 0; i < kFolderCount; ++i) {
+    for (size_t i = 0; i < kHistoryPairLimit; ++i) {
       const fs::path source(request.GetString("source", i, ""));
       const fs::path store(request.GetString("store", i, ""));
       if (source.empty() && store.empty()) continue;
@@ -360,7 +338,7 @@ private:
       throw std::runtime_error("Cannot add Listi Folder History to Deskbar.");
     try {
       StartTimer();
-      SaveMessageStore(SettingsFile(), desired);
+      SaveMessageStore(HistorySettingsFile(), desired);
     } catch (...) {
       timer.reset();
       deskbar.RemoveItem(kHistoryDeskbarItem);
@@ -382,7 +360,7 @@ private:
     BDeskbar deskbar;
     auto remove = deskbar.HasItem(kHistoryDeskbarItem)
         ? deskbar.RemoveItem(kHistoryDeskbarItem) : B_OK;
-    SaveMessageStore(SettingsFile(), desired);
+    SaveMessageStore(HistorySettingsFile(), desired);
     status = remove == B_OK
         ? "Disabled. Existing points were kept."
         : "Disabled. Existing points were kept, but Deskbar could not remove the icon.";
@@ -391,7 +369,7 @@ private:
   }
 
   void StartRun() {
-    auto pairs = ReadPairs(config);
+    auto pairs = HistoryPairs(config);
     canceled = false;
     next = system_time() + kInterval;
     const BMessenger reply(this);
@@ -419,7 +397,7 @@ private:
     PushState();
   }
 
-  BMessage config{kConfigFormat};
+  BMessage config{kHistoryConfigFormat};
   BMessenger settings;
   int64 settingsId = 0;
   std::unique_ptr<BMessageRunner> timer;

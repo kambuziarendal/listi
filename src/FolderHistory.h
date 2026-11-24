@@ -6,8 +6,11 @@
 #include <memory>
 #include <string>
 
+class BView;
+
 namespace Listi {
-inline constexpr uint32 kFolderHistory = 'fhst';
+inline constexpr uint32 kFolderHistory = 'fhst', kPreviewHistory = 'fhpv';
+BView *CreateHistoryPreview(const char *source, int32 pane);
 void OpenFolderHistory(const char *source);
 bool FolderHistoryBusy();
 
@@ -23,7 +26,7 @@ public:
                          const BMessage &approvedFolders) const;
   BMessage FolderIdentity() const;
   void Restore(const std::string &point, const std::string &destination,
-               const std::atomic_bool &cancel) const;
+               const std::atomic_bool &cancel, const std::string &selectedFile = {}) const;
 private:
   bool SaveInternal(const std::atomic_bool &cancel, bool automatic) const;
   struct State;

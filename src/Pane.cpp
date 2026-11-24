@@ -3,6 +3,7 @@
 #include "SearchWorker.h"
 #include "AdaptiveScrollView.h"
 #include "FlatView.h"
+#include "FolderHistory.h"
 #include "PanelAppearance.h"
 #include "DirectoryScanner.h"
 #include "ReadWorker.h"
@@ -176,6 +177,11 @@ Pane::Pane(int32 number, const Preferences &p,
   clearEmptyFilter = new BButton("clear unmatched filter", "Clear filter",
                                  new BMessage(kClearFilter));
   clearEmptyFilter->Hide();
+  auto *historyAction = new BMessage(Listi::kFolderHistory);
+  historyAction->AddInt32("pane", id);
+  historyButton = new BButton("history indicator", "History…", historyAction);
+  historyButton->SetFlat(true);
+  historyButton->Hide();
   header = new BGroupView(B_HORIZONTAL, 5);
   header->SetName("panel toolbar");
   header->AddChild(field);
@@ -196,6 +202,7 @@ Pane::Pane(int32 number, const Preferences &p,
       .Add(content)
       .AddGroup(B_HORIZONTAL, 5, 0)
       .Add(status)
+      .Add(historyButton)
       .Add(clearEmptyFilter)
       .End();
   SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
@@ -209,6 +216,15 @@ Pane::~Pane() {
   stop_watching(this);
   Listi::RetireReadWorker(scanner);
   Listi::RetireReadWorker(iconReader);
+}
+bool Pane::HasHistoryHint() const { return !historyButton->IsHidden(historyButton); }
+void Pane::SetHistoryHint(bool visible, bool enabled) {
+  if (visible && (!HasHistoryHint() || historyEnabled != enabled)) {
+    historyEnabled = enabled;
+    historyButton->SetToolTip(enabled ? "Automatic history enabled · Browse versions"
+                                     : "Automatic saving paused · Browse history");
+  }
+  Listi::SetViewVisible(historyButton, visible);
 }
 void Pane::AttachedToWindow() {
   display->Menu()->SetTargetForItems(this);

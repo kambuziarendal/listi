@@ -364,6 +364,32 @@ bool Leaf(const std::string &name) {
       name.find('/') == std::string::npos;
 }
 
+void RestoreBytes(int output, int store, const BMessage &entry, const std::atomic_bool &cancel) {
+  std::string digest = entry.GetString("digest", "");
+  Require(Token(digest, "0123456789abcdef", 64) && digest.size() == 64, "Invalid history digest.");
+  FD input(openat(store, ("object-" + digest).c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC), "Open saved file");
+  Require(S_ISREG(Stat(input.fd).st_mode), "Invalid content object.");
+  Require(Digest(input.fd, output, cancel) == digest, "Saved file content is damaged.");
+}
+
+BMessage FindRegularFile(BMessage folder, const fs::path &relative) {
+  Require(!relative.empty() && relative.is_relative(), "Select a file in this version.");
+  for (const auto &part : relative) {
+    Require(Leaf(part) && S_ISDIR(folder.GetInt32("mode", 0)), "Invalid saved path.");
+    BMessage child;
+    bool found = false;
+    for (int32 i = 0; folder.FindMessage("child", i, &child) == B_OK; ++i) {
+      if (part != child.GetString("name", "")) continue;
+      folder = child;
+      found = true;
+      break;
+    }
+    Require(found, "File is not in this version.");
+  }
+  Require(S_ISREG(folder.GetInt32("mode", 0)) && !folder.HasMessage("child"), "Select a regular file.");
+  return folder;
+}
+
 void RestoreNode(int fd, int store, const BMessage &entry, const std::atomic_bool &cancel,
                  unsigned depth) {
   CheckCancel(cancel);
@@ -379,12 +405,8 @@ void RestoreNode(int fd, int store, const BMessage &entry, const std::atomic_boo
       FD opened(openat(fd, name.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC), name);
       RestoreNode(opened.fd, store, child, cancel, depth + 1);
     } else if (S_ISREG(mode)) {
-      std::string digest = child.GetString("digest", "");
-      Require(digest.size() == 64 && Token(digest, "0123456789abcdef", 64), "Invalid history digest.");
-      FD input(openat(store, ("object-" + digest).c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC), name);
-      Require(S_ISREG(Stat(input.fd).st_mode), "Invalid content object.");
       FD output(openat(fd, name.c_str(), O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, 0600), name);
-      Require(Digest(input.fd, output.fd, cancel) == digest, "History object is damaged: " + name);
+      RestoreBytes(output.fd, store, child, cancel);
       RestoreNode(output.fd, store, child, cancel, depth + 1);
     } else if (S_ISLNK(mode)) {
       Check(symlinkat(child.GetString("target", ""), fd, name.c_str()) == 0, "Create link " + name);
@@ -561,8 +583,10 @@ bool HistoryStore::SaveInternal(const std::atomic_bool &cancel, bool automatic) 
 }
 
 void HistoryStore::Restore(const std::string &point, const std::string &destination,
-                           const std::atomic_bool &cancel) const {
+                           const std::atomic_bool &cancel, const std::string &selectedFile) const {
   auto root = Browse(point);
+  const bool single = !selectedFile.empty();
+  if (single) root = FindRegularFile(root, selectedFile);
   fs::path entered(destination);
   Require(entered.is_absolute() && Leaf(entered.filename()), "Enter an absolute path with a new folder name.");
   auto parentPath = fs::canonical(entered.parent_path());
@@ -574,37 +598,55 @@ void HistoryStore::Restore(const std::string &point, const std::string &destinat
   CheckCancel(cancel);
   state->store->Verify();
   parent->Verify();
-  Check(mkdirat(parent->Descriptor(), leaf.c_str(), 0700) == 0, "Create new copy at " + target.string());
+  if (!single) Check(mkdirat(parent->Descriptor(), leaf.c_str(), 0700) == 0, "Create new copy at " + target.string());
   const auto marker = RestoreMarker(root);
+  const int flags = single ? O_CREAT | O_EXCL | O_RDWR : O_RDONLY | O_DIRECTORY;
+  FD output(openat(parent->Descriptor(), leaf.c_str(), flags | O_NOFOLLOW | O_CLOEXEC, 0600),
+            "Open new copy at " + target.string());
   bool finished = false;
   try {
-    FD output(openat(parent->Descriptor(), leaf.c_str(),
-                     O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC), target);
     const auto identity = Stat(output.fd);
-    PinnedDirectory copy(target, identity.st_dev, identity.st_ino);
+    std::unique_ptr<PinnedDirectory> directory;
+    if (!single) directory = std::make_unique<PinnedDirectory>(target, identity.st_dev, identity.st_ino);
+    auto verifyCopy = [&] {
+      parent->Verify();
+      struct stat named{};
+      Require(!fstatat(parent->Descriptor(), leaf.c_str(), &named, AT_SYMLINK_NOFOLLOW) &&
+              named.st_dev == identity.st_dev && named.st_ino == identity.st_ino,
+              "New copy was replaced during restore.");
+    };
+    auto flushCopy = [&] {
+      if (directory) directory->Flush();
+      else {
+        verifyCopy();
+        Check(fsync(output.fd) == 0, "Flush restored file");
+        verifyCopy();
+      }
+    };
     constexpr char incomplete[] = "Incomplete Listi restore. Do not use as a finished copy.";
     Check(fs_write_attr(output.fd, marker.c_str(), B_STRING_TYPE, 0,
                         incomplete, sizeof(incomplete)) == sizeof(incomplete),
           "Mark incomplete copy");
-    copy.Flush();
+    flushCopy();
     parent->Flush();
 
+    if (single) RestoreBytes(output.fd, state->store->Descriptor(), root, cancel);
     RestoreNode(output.fd, state->store->Descriptor(), root, cancel, 0);
     CheckCancel(cancel);
     state->store->Verify();
-    copy.Verify();
+    verifyCopy();
     parent->Flush();
     // Do not check cancellation after this commit point. The restored bytes,
     // metadata and parent directory were already flushed with the marker.
     Check(fs_remove_attr(output.fd, marker.c_str()) == 0, "Finish restored copy");
     finished = true;
-    copy.Flush();
+    flushCopy();
   } catch (const std::exception &e) {
     if (finished)
       throw std::runtime_error("Copy complete; marker removal not confirmed: " +
                                target.string() + ". " + e.what());
     throw std::runtime_error("Restore incomplete: " + std::string(e.what()) +
-        " New folder: " + target.string() + " (BFS attribute " + marker + ").");
+        " New copy: " + target.string() + " (BFS attribute " + marker + ").");
   }
 }
 }

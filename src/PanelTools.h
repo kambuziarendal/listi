@@ -14,7 +14,7 @@ class Pane;
 namespace Listi {
 class Shelf;
 class FolderTabs;
-enum class PanelPage : int32 { Files, Search, Preview, Flat };
+enum class PanelPage : int32 { Files, Search, Preview, Flat, History };
 inline constexpr uint32 kPanelPage = 'ptpg', kClosePanelPage = 'ptcl';
 
 // Keep the Pane and any open tools attached when switching pages. Detaching
@@ -34,6 +34,7 @@ public:
   void EnableTools(bool enabled);
   void FocusCurrent();
   void OpenFlat(const std::shared_ptr<Shelf> &shelf);
+  bool OpenHistory(const char *source);
   bool OpenSearch(const BMessage &store);
   BMessenger SearchMessenger() const;
   ImagePreview &OpenPreview();
@@ -55,7 +56,7 @@ private:
   FolderTabs *folderBar;
   bool alwaysFolderTabs = false;
   BButton *closeButton;
-  std::array<BView *, 4> pages{};
+  std::array<BView *, 5> pages{};
   std::array<BButton *, 3> buttons{};
 };
 } // namespace Listi

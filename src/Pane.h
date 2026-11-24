@@ -91,6 +91,8 @@ public:
   bool IsScanning() const { return scanning; }
   void SendSelection(bool gesture = false);
   void ContextMenu(const std::string &entry, BPoint screen);
+  void SetHistoryHint(bool visible, bool enabled);
+  bool HasHistoryHint() const;
   void ShowStatus(const char *text) { SetStatus(text); }
   void RequestVisibleIcon(PaneEntry &);
   PaneSort Sorting();
@@ -139,7 +141,8 @@ private:
   void PublishDisplay(bool folder = false, bool forget = false);
   bool locationValid = false;
   BTextControl *edit;
-  BButton *back, *forward;
+  BButton *back, *forward, *historyButton;
+  bool historyEnabled = false;
   Listi::NavigationHistory history;
   std::map<std::string, Listi::SavedSearch> queries;
   std::optional<Listi::PaneNavigationState> restoring;

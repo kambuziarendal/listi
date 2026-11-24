@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "FileContextMenu.h"
 #include "Common.h"
+#include "FolderHistory.h"
 #include "MainWindow.h"
 #include "CopyTextMenu.h"
 #include "ShelfWindow.h"
@@ -20,6 +21,12 @@ void FolderActions(BMenu &menu, const ContextMenuOptions &options) {
     item->SetMarked(marked);
     target.AddItem(item);
   };
+  if (options.history) {
+    auto *history = new BMenu("Folder history");
+    add(*history, "Open in window", Listi::kFolderHistory, true);
+    add(*history, "Preview in other panel", Listi::kPreviewHistory, options.dual);
+    menu.AddItem(history);
+  }
   const auto sort = options.sort;
   auto sorting = new BMenu("Sort by");
   auto sortItem = [&](const char *label, int column, bool ascending,

@@ -70,6 +70,7 @@ PaneContextMenuResult RunPaneContextMenu(
   options.local = local;
   options.dual = dual && !other.IsSearchList();
   options.folderLocal = folderLocal;
+  options.history = folderLocal && pane.HasHistoryHint();
   const auto folderLocation = Listi::ParseLocation(folder);
   options.folderArchive = folderLocation.Archive();
   options.archiveAdd =
