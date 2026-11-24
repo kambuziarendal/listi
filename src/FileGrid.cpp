@@ -473,10 +473,6 @@ public:
         if (found != thumbnails.end()) {
           if (found->second)
             picture = found->second.get();
-        } else if (!pending.count(row->path) && pending.size() >= 64) {
-          // A completion may belong to a cell no longer on screen.
-          // Retry the current viewport when the queue has room again.
-          retrySubmission = true;
         } else if (!pending.count(row->path)) {
           std::string lower = row->name.c_str();
           std::transform(lower.begin(), lower.end(), lower.begin(),
@@ -488,12 +484,16 @@ public:
               ext == ".tiff" || ext == ".tif" || ext == ".avif" ||
               ext == ".heif" || ext == ".svg" || ext == ".ico" ||
               ext == ".tga") {
-            if (!loader && Window() && system_time() >= nextReaderAttempt) {
+            if (pending.size() >= 64) {
+              // A completion may belong to a cell no longer on screen.
+              // Retry the current viewport when the queue has room again.
+              retrySubmission = true;
+            } else if (!loader && Window() && system_time() >= nextReaderAttempt) {
               loader = new ThumbnailLoader(BMessenger(this), generation, replies, terminal);
               if (!Listi::StartReadWorker(loader))
                 nextReaderAttempt = system_time() + 250000;
             }
-            if (loader) {
+            if (loader && pending.size() < 64) {
               BMessage job(kThumbnail);
               job.AddString("path", row->path.c_str());
               job.AddInt64("serial", generation->load());
