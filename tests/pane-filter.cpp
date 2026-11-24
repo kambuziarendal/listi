@@ -94,12 +94,17 @@ int main() {
     BMessage mini(kGridMode);
     mini.AddInt32("mode", MiniIconMode);
     pane->MessageReceived(&mini);
+    for (int i = 0; i < 200 && pane->IsScanning(); ++i) {
+      window->Unlock();
+      snooze(25000);
+      window->Lock();
+    }
     float miniRange;
     bar->GetRange(&low, &miniRange);
-    const bool compact = pane->CurrentView() == MiniIconMode && miniRange < restored &&
+    const bool compact = !pane->IsScanning() && pane->CurrentView() == MiniIconMode && miniRange < restored &&
                          pane->Selected() == paths && root == pane->Path();
     std::cout << (compact ? "PASS " : "FAIL ")
-              << "mini icons fit more files and preserve the selection and folder\\n";
+              << "mini icons fit more files and preserve the selection and folder\n";
     passed = passed && compact;
     pane->Select(0);
     const auto revision = pane->SelectionRevision();

@@ -205,5 +205,12 @@ int main() {
   searchWindow->Quit();
   detached->Lock();
   detached->Quit();
+  prefs.workspace = Workspace::einn;
+  auto *standalone = CreateMainWindow(prefs, {}, {}, false, {}, false, {});
+  standalone->Show();
+  standalone->Lock();
+  Check(standalone->Frame().Width() < fullFrame.Width() && Panel(*standalone).Files().IsEinn(),
+        "opening a standalone Einn uses the compact frame");
+  standalone->Quit();
   fs::remove_all(root);
 }

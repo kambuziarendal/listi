@@ -148,8 +148,12 @@ void CheckDiscardPreview(BApplication &app, const std::string &folder) {
   auto imageVisible = [&] {
     if (!VisibleButton(view, "Image…")) return false;
     const auto pixels = Capture(view, BRect(145, 169, 165, 189));
-    return !pixels.empty() && std::count(pixels.begin(), pixels.end(), 0x17b44b) ==
-                              static_cast<int>(pixels.size());
+    return !pixels.empty() && std::all_of(pixels.begin(), pixels.end(), [](uint32 p) {
+      // Native screens may quantize RGB to 16 bpp.
+      return std::abs(int(p >> 16) - 0x17) < 8 &&
+             std::abs(int((p >> 8) & 255) - 0xb4) < 8 &&
+             std::abs(int(p & 255) - 0x4b) < 8;
+    });
   };
   await(imageVisible, "PNG pixels cover the inspector centre after Discard");
   host->Lock();
