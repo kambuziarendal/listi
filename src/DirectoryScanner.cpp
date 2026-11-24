@@ -134,7 +134,7 @@ public:
       }
       if (!Send(batch, serial)) {
         if (delivery)
-          delivery->ReleaseBatch();
+          delivery->ReleaseBatch(serial);
         deliveryFailed = true;
         return;
       }

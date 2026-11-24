@@ -1230,7 +1230,7 @@ void Pane::MessageReceived(BMessage *m) {
   case kRows: {
     if (!scanning || m->GetInt64("serial", -1) != serial)
       break;
-    scanDelivery->ReleaseBatch();
+    scanDelivery->ReleaseBatch(serial);
     BMessage e;
     const size_t first = entries.Visible().size();
     for (int i = 0; m->FindMessage("entry", i, &e) == B_OK; i++) {

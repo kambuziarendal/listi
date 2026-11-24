@@ -23,6 +23,12 @@ struct DirectoryScanDelivery {
     if (!limit)
       return true;
     std::unique_lock<std::mutex> guard(lock);
+    // A failed terminal notification can end a scan before the pane handles
+    // its last rows. An unacknowledged old batch must not consume a new slot.
+    if (current != serial) {
+      current = serial;
+      pending = 0;
+    }
     while (pending >= limit && generation.load() == serial)
       room.wait_for(guard, std::chrono::milliseconds(50));
     if (generation.load() != serial)
@@ -30,11 +36,11 @@ struct DirectoryScanDelivery {
     ++pending;
     return true;
   }
-  void ReleaseBatch() {
+  void ReleaseBatch(int64 serial) {
     if (!limit)
       return;
     std::lock_guard<std::mutex> guard(lock);
-    if (pending > 0) {
+    if (current == serial && pending > 0) {
       --pending;
       room.notify_one();
     }
@@ -44,6 +50,7 @@ private:
   const int limit;
   std::mutex lock;
   std::condition_variable room;
+  int64 current = -1;
   int pending = 0;
 };
 // The pane and its retired scanner may briefly coexist. Register against the

@@ -144,11 +144,11 @@ int main() {
    check(receive(), "paced scan delivers its first batch immediately");
    check(acquire_sem_etc(receiver->batch, 1, B_RELATIVE_TIMEOUT, 150000) == B_TIMED_OUT,
          "next batch waits for a pane receipt");
-   delivery->ReleaseBatch();
+   delivery->ReleaseBatch(1);
    check(receive(), "pane receipt releases the next batch");
-   delivery->ReleaseBatch();
+   delivery->ReleaseBatch(1);
    check(receive(), "final partial batch is delivered");
-   delivery->ReleaseBatch();
+   delivery->ReleaseBatch(1);
    check(acquire_sem_etc(receiver->done, 1, B_RELATIVE_TIMEOUT, 2000000) == B_OK &&
          receiver->count == 160 && receiver->names.size() == 160,
          "paced scan retains every row and completion");
@@ -159,7 +159,14 @@ int main() {
    epoch->store(3);
    const bool cancelled = reader->LockWithTimeout(2000000) == B_OK;
    check(cancelled, "obsolete paced scan exits without a UI receipt");
-   if (cancelled) reader->Quit();
+   if (cancelled) {
+     reader->Unlock();
+     request.ReplaceInt64("serial", 3);
+     reader->PostMessage(&request);
+     check(receive(), "fresh scan is not charged for an obsolete queued batch");
+     epoch->store(4);
+     if (reader->Lock()) reader->Quit();
+   }
    if (receiver->Lock()) receiver->Quit();
  }
  // Exercise the actual pane's out-of-band completion recovery, not just the
