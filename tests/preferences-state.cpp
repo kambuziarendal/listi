@@ -13,6 +13,20 @@ int main() {
     std::cout<<(ok?"PASS ":"FAIL ")<<label<<std::endl;
   };
   Preferences live;
+  Preferences other;
+  other.Load(BMessage());
+  check(other.separateWindows, "older archives default to separate windows");
+  Preferences edited = other;
+  edited.separateWindows = false;
+  BMessage delta = edited.SharedChanges(&other);
+  other.workspace = Workspace::einn;
+  other.icons = false;
+  other.ApplyShared(delta);
+  check(!other.separateWindows && !other.icons && other.IsEinn(),
+        "shared edit preserves unrelated appearance and window layout");
+  Preferences reopened;
+  reopened.Load(other.Save());
+  check(!reopened.separateWindows, "separate windows preference survives restart");
   auto stale=live.Save();
   stale.ReplaceBool("icons",false);stale.ReplaceFloat("fontSize",17);
   live.SetPaneMode(0,3);live.SetPaneMode(1,2);

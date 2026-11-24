@@ -22,6 +22,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <mutex>
 rgb_color Preferences::Color(const BString &text) const {
   unsigned int r, g, b;
   if (text.Length() == 7 &&
@@ -48,6 +50,7 @@ void Preferences::Load(const BMessage &m) {
       folderModes[path] = mode;
   }
   alwaysFolderTabs = m.GetBool("alwaysFolderTabs", false);
+  separateWindows = m.GetBool("separateWindows", true);
   icons = m.GetBool("icons", true);
   size = m.GetBool("size", true);
   date = m.GetBool("date", true);
@@ -90,10 +93,16 @@ void Preferences::ApplyDialog(const BMessage &message) {
   updated.ApplyLayout(layout);
   updated.profiles = profiles;
   updated.folderModes = folderModes;
+  BMessage delta;
+  if (message.FindMessage("sharedChanges", &delta) == B_OK) {
+    updated.ApplyShared(SharedChanges());
+    updated.ApplyShared(delta);
+  }
   *this = updated;
 }
 BMessage Preferences::Save() const {
-  BMessage m;
+  BMessage m = SharedChanges();
+  m.what = 0;
   WorkspaceLayout::Archive(m);
   m.AddInt32("tviskiptButtons", tviskiptButtons);
   m.AddInt32("smidjaButtons", smidjaButtons);
@@ -104,21 +113,59 @@ BMessage Preferences::Save() const {
     folder.AddInt32("mode", entry.second);
     m.AddMessage("folderView", &folder);
   }
-  m.AddBool("alwaysFolderTabs", alwaysFolderTabs);
-  m.AddBool("icons", icons);
-  m.AddBool("size", size);
-  m.AddBool("date", date);
-  font_family family;
+  return m;
+}
+BMessage Preferences::SharedChanges(const Preferences *before) const {
+  BMessage m(kSharedPreferences);
+  if (!before || separateWindows != before->separateWindows)
+    m.AddBool("separateWindows", separateWindows);
+  if (!before || alwaysFolderTabs != before->alwaysFolderTabs)
+    m.AddBool("alwaysFolderTabs", alwaysFolderTabs);
+  if (!before || icons != before->icons)
+    m.AddBool("icons", icons);
+  if (!before || size != before->size)
+    m.AddBool("size", size);
+  if (!before || date != before->date)
+    m.AddBool("date", date);
+  if (!before || editor != before->editor)
+    m.AddString("editor", editor);
+  if (!before || terminal != before->terminal)
+    m.AddString("terminal", terminal);
+  if (!before || folders != before->folders)
+    m.AddString("folders", folders);
+  if (!before || files != before->files)
+    m.AddString("files", files);
+  if (!before || links != before->links)
+    m.AddString("links", links);
+  font_family family, previousFamily = {};
   font_style style;
   font.GetFamilyAndStyle(&family, &style);
-  m.AddString("fontFamily", family);
-  m.AddFloat("fontSize", font.Size());
-  m.AddString("editor", editor);
-  m.AddString("terminal", terminal);
-  m.AddString("folders", folders);
-  m.AddString("files", files);
-  m.AddString("links", links);
+  if (before)
+    before->font.GetFamilyAndStyle(&previousFamily, &style);
+  if (!before || strcmp(family, previousFamily) != 0)
+    m.AddString("fontFamily", family);
+  if (!before || font.Size() != before->font.Size())
+    m.AddFloat("fontSize", font.Size());
   return m;
+}
+void Preferences::ApplyShared(const BMessage &m) {
+  separateWindows = m.GetBool("separateWindows", separateWindows);
+  alwaysFolderTabs = m.GetBool("alwaysFolderTabs", alwaysFolderTabs);
+  icons = m.GetBool("icons", icons);
+  size = m.GetBool("size", size);
+  date = m.GetBool("date", date);
+  editor = m.GetString("editor", editor);
+  terminal = m.GetString("terminal", terminal);
+  folders = m.GetString("folders", folders);
+  files = m.GetString("files", files);
+  links = m.GetString("links", links);
+  const char *family = nullptr;
+  if (m.FindString("fontFamily", &family) == B_OK)
+    font.SetFamilyAndStyle(family, nullptr);
+  float points;
+  if (m.FindFloat("fontSize", &points) == B_OK && std::isfinite(points) &&
+      points >= 8 && points <= 40)
+    font.SetSize(points);
 }
 namespace {
 constexpr Workspace kSettingsWorkspaces[] = {
@@ -187,7 +234,7 @@ class PreferencesWindow : public BWindow {
   BPopUpMenu *categories;
   BPopUpMenu *defaultModes[sizeof(kSettingsWorkspaces) /
                            sizeof(kSettingsWorkspaces[0])];
-  BCheckBox *icons, *size, *date, *buttons, *command;
+  BCheckBox *icons, *size, *date, *buttons, *command, *separateWindows;
   BTextControl *family, *fontSize, *folders, *files, *links, *editor, *terminal;
 
   void AddPage(BView *page) {
@@ -253,7 +300,10 @@ public:
     auto customize = new BButton("workspace layout",
                                  "Customize current workspace layout…", openLayout);
     customize->SetTarget(target);
+    separateWindows = new BCheckBox("Open folders in separate windows", nullptr);
+    separateWindows->SetValue(p.separateWindows);
     views.End()
+        .Add(separateWindows)
         .Add(new WrappedLabel(
             "view precedence",
             "An explicit view saved for a folder takes priority."), 0)
@@ -386,6 +436,8 @@ public:
         return;
       }
     }
+    const Preferences before = prefs;
+    prefs.separateWindows = separateWindows->Value();
     prefs.font.SetFamilyAndStyle(family->Text(), nullptr);
     prefs.font.SetSize(n);
     prefs.icons = icons->Value();
@@ -410,6 +462,8 @@ public:
       prefs.SetDefaultMode(workspace, mode);
     }
     BMessage result = prefs.Save();
+    BMessage delta = prefs.SharedChanges(&before);
+    result.AddMessage("sharedChanges", &delta);
     result.AddMessage("layoutChanges", &changes);
     result.what = kApplyPreferences;
     target.SendMessage(&result);
@@ -420,6 +474,8 @@ public:
 void OpenPreferences(BMessenger target, const Preferences &prefs) {
   // The main window is the only caller. A messenger remains safe if the
   // settings window has already closed.
+  static std::mutex mutex;
+  std::lock_guard<std::mutex> lock(mutex);
   static BMessenger openWindow;
   if (openWindow.LockTarget()) {
     BLooper *looper = nullptr;

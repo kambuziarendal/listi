@@ -591,4 +591,12 @@ Each file pane has its own folder tabs, separate from the Files, Search and Prev
 
 While browsing files, use **Command+Option+T** for a new tab, **Command+Option+[** and **Command+Option+]** to cycle, and **Command+Option+W** to close a tab. Command+T and Command+Shift+T still open the terminal. The tab strip is for navigation, not a file-drop target: drop onto the file view of a real folder. Switching tabs does not redirect an already queued copy.
 
-**Detach to Einn window** moves the active tab, including its navigation history, filter, view and selection. If you detach the only tab, the original pane opens your home folder. The new window keeps its own queue and uses session-local layout preferences; it does not change the main window’s default workspace or saved places. Closing the original window does not close a detached file window. Folder tabs last for the session and are not saved worksets.
+**Detach to Einn window** moves the active tab, including its navigation history, filter, view and selection. If you detach the only tab, the original pane opens your home folder. The new window keeps its own queue and uses session-local layout preferences; its layout does not change the initial browser’s saved workspace. Closing the original window does not close a detached file window. Folder tabs last for the session and are not saved worksets.
+
+### Independent file windows
+
+Choose **Files → New window** (Command+Shift+N) to browse the active folder in another native window. The new browser uses the saved workspace layout and starts its own history, selection, filter and operation queue; Command+N still creates a folder. Choose **Open in new window** from Files or a folder’s context menu to start in the selected folder. The windows can show the same location, and Haiku’s usual Stack & Tile controls work on them.
+
+From Terminal, use `/boot/system/apps/Listi --new-window [directory]`. Without a directory it opens the default location. In Preferences, the separate-window launch option controls whether launching Listi again from Tracker or Deskbar opens a browser; selecting an existing window only activates it.
+
+**Close window** (Command+W) closes that browser; **Quit Listi** (Command+Q) requests application-wide shutdown. Close a browser’s CLI sessions and finish or cancel its file operations first. Closing the last browser normally quits Listi. Additional browsers keep layout changes for the session; global preferences, Places, and saved searches are shared.

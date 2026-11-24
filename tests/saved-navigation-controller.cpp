@@ -151,6 +151,59 @@ int main() {
     editor->Quit();
   }
 
+  // Identical serials in two windows must not acknowledge each other's edits.
+  SavedNavigationController other(service, {}, true, {}, true, author);
+  other.EditPlace(place);
+  const auto ownPlace = requests->Next();
+  BMessage foreign(kPlacesSaved);
+  foreign.AddMessenger("origin", service);
+  foreign.AddInt64("serial", ownPlace.GetInt64("serial", -1));
+  SavedPlaces merged;
+  merged.Add("Other", "/other");
+  auto snapshot = merged.Message();
+  foreign.AddMessage("snapshot", &snapshot);
+  assert(other.FinishPlaceSave(foreign) && other.Saving());
+  assert(other.Places().Find("/other") && !other.Places().Find("/boot/home/work"));
+  BMessage own(kPlacesSaved);
+  own.AddMessenger("origin", author);
+  own.AddInt64("serial", ownPlace.GetInt64("serial", -1));
+  merged.ApplyEdit(ownPlace);
+  try {
+    merged.ApplyEdit(ownPlace);
+    assert(false); // Same path, unlike unrelated additions, conflicts.
+  } catch (const std::runtime_error &) {}
+  snapshot = merged.Message();
+  own.AddMessage("snapshot", &snapshot);
+  assert(other.FinishPlaceSave(own) && !other.Saving());
+  assert(other.Places().Items().size() == 2);
+
+  assert(!other.EditSearch(search, author));
+  const auto ownSearch = requests->Next();
+  SavedSearches both;
+  auto item = SavedSearch::FromMessage(search);
+  item.name = "Elsewhere";
+  both.Put(item, false);
+  foreign.what = kSearchesSaved;
+  foreign.AddInt64("revision", 0);
+  snapshot = both.Message();
+  foreign.ReplaceMessage("snapshot", &snapshot);
+  auto refresh = other.FinishSearchSave(foreign);
+  assert(refresh && !refresh->author.IsValid() && other.Saving());
+  assert(!refresh->message.HasString("chosen"));
+  own.what = kSearchesSaved;
+  own.AddInt64("revision", ownSearch.GetInt64("revision", -1));
+  own.ReplaceInt64("serial", ownSearch.GetInt64("serial", -1));
+  both.ApplyEdit(ownSearch);
+  try {
+    both.ApplyEdit(ownSearch);
+    assert(false);
+  } catch (const std::runtime_error &) {}
+  snapshot = both.Message();
+  own.ReplaceMessage("snapshot", &snapshot);
+  auto accepted = other.FinishSearchSave(own);
+  assert(accepted && accepted->author == author && !other.Saving());
+  assert(SavedSearches::FromMessage(accepted->message).Items().size() == 2);
+
   // A failure to enqueue must not keep quit blocked or publish an unsaved edit.
   SavedNavigationController disconnected(BMessenger{}, {}, true, {}, true);
   try {

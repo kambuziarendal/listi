@@ -51,7 +51,12 @@ int main() {
   std::ofstream(a/"one") << "tab payload";
   std::ofstream(b/"two") << "another file";
   Preferences prefs;
-  auto *window = CreateMainWindow(prefs, {}, {}, false, {}, false);
+  auto open = [&](BrowserRequest request) {
+    auto *child = CreateMainWindow(prefs, {}, {}, false, {}, false, std::move(request));
+    child->Show();
+    return true;
+  };
+  auto *window = CreateMainWindow(prefs, {}, {}, false, {}, false, {}, open);
   window->Show();
   window->Lock();
   auto &panel = Panel(*window);

@@ -12,8 +12,8 @@ constexpr char kPlacesUnavailable[] =
 
 SavedNavigationController::SavedNavigationController(
     BMessenger service, const SavedPlaces &places, bool placesWritable,
-    const SavedSearches &searches, bool searchesWritable)
-    : service(service), places(places), placesWritable(placesWritable),
+    const SavedSearches &searches, bool searchesWritable, BMessenger owner)
+    : service(service), owner(owner), places(places), placesWritable(placesWritable),
       searches(searches), searchesWritable(searchesWritable) {}
 
 std::optional<SavedNavigationController::PlacePrompt>
@@ -36,6 +36,8 @@ SavedNavigationController::PreparePlaceEdit(const BMessage &message) const {
   const auto &label = prompts[action];
   PlacePrompt prompt{std::string(label.question) + path, label.button, message,
                      std::nullopt};
+  if (action != 0)
+    prompt.accepted.AddString("promptName", place->name.c_str());
   prompt.accepted.what = kPlaceAccepted;
   prompt.accepted.AddBool("placeLabel", true);
   if (action != 2)
@@ -50,6 +52,11 @@ void SavedNavigationController::EditPlace(const BMessage &edit) {
   auto next = places;
   const char *path = edit.GetString("path", "");
   const char *name = edit.GetString("name", "");
+  if (edit.HasString("promptName")) {
+    const auto *current = places.Find(path);
+    if (!current || current->name != edit.GetString("promptName", ""))
+      throw std::runtime_error("This saved place changed while the prompt was open.");
+  }
   switch (edit.GetInt32("action", -1)) {
   case 0:
     next.Add(name, path);
@@ -63,6 +70,10 @@ void SavedNavigationController::EditPlace(const BMessage &edit) {
   }
   auto save = next.Message();
   save.what = kSavePlaces;
+  save.AddMessenger("origin", owner);
+  save.AddMessage("edit", &edit);
+  if (auto existing = places.Find(path))
+    save.AddString("previousName", existing->name.c_str());
   save.AddInt64("serial", ++placesSerial);
   pendingPlaces = std::move(next);
   if (service.SendMessage(&save) != B_OK) {
@@ -72,10 +83,18 @@ void SavedNavigationController::EditPlace(const BMessage &edit) {
 }
 
 bool SavedNavigationController::FinishPlaceSave(const BMessage &reply) {
+  BMessenger origin;
+  BMessage snapshot;
+  bool refreshed = reply.FindMessage("snapshot", &snapshot) == B_OK;
+  if (reply.FindMessenger("origin", &origin) == B_OK && origin != owner) {
+    if (refreshed)
+      places = SavedPlaces::FromMessage(snapshot);
+    return refreshed;
+  }
   if (!pendingPlaces || reply.GetInt64("serial", -1) != placesSerial)
     return false;
   if (!reply.HasString("error"))
-    places = std::move(*pendingPlaces);
+    places = refreshed ? SavedPlaces::FromMessage(snapshot) : std::move(*pendingPlaces);
   pendingPlaces.reset();
   return true;
 }
@@ -109,9 +128,17 @@ SavedNavigationController::EditSearch(const BMessage &edit, BMessenger author) {
 
     auto request = next.Message();
     request.what = kSaveSearches;
+    request.AddMessenger("origin", owner);
+    request.AddMessage("edit", &edit);
+    auto key = edit.GetBool("remove", false) ? edit.GetString("name", "") : chosen;
+    if (auto existing = searches.Find(key)) {
+      BMessage previous;
+      existing->WriteTo(previous);
+      request.AddMessage("previous", &previous);
+    }
     request.AddInt64("revision", searchesRevision);
     request.AddInt64("serial", ++searchesSerial);
-    pendingSearch = PendingSearch{std::move(next), std::move(chosen), author};
+    pendingSearch = PendingSearch{searchesRevision, std::move(next), std::move(chosen), author};
     if (service.SendMessage(&request) != B_OK) {
       pendingSearch.reset();
       throw std::runtime_error("Could not queue saved search.");
@@ -126,14 +153,24 @@ SavedNavigationController::EditSearch(const BMessage &edit, BMessenger author) {
 
 std::optional<SavedNavigationController::SearchUpdate>
 SavedNavigationController::FinishSearchSave(const BMessage &result) {
-  if (!pendingSearch || result.GetInt64("revision", -1) != searchesRevision ||
+  BMessenger origin;
+  BMessage snapshot;
+  bool refreshed = result.FindMessage("snapshot", &snapshot) == B_OK;
+  if (result.FindMessenger("origin", &origin) == B_OK && origin != owner) {
+    if (!refreshed)
+      return std::nullopt;
+    searches = SavedSearches::FromMessage(snapshot);
+    ++searchesRevision;
+    return SearchUpdate{SearchStore(), {}};
+  }
+  if (!pendingSearch || result.GetInt64("revision", -1) != pendingSearch->revision ||
       result.GetInt64("serial", -1) != searchesSerial)
     return std::nullopt;
 
   auto saved = std::move(*pendingSearch);
   pendingSearch.reset();
   if (!result.HasString("error")) {
-    searches = std::move(saved.next);
+    searches = refreshed ? SavedSearches::FromMessage(snapshot) : std::move(saved.next);
     ++searchesRevision;
   }
   auto reply = SearchStore();

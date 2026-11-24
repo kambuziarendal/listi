@@ -90,6 +90,7 @@ enum : uint32 {
   kFilterDone = 'fldn',
   kTerminal = 'term',
   kPreferences = 'pref',
+  kSharedPreferences = 'shpf',
   kApplyPreferences = 'aprf',
   kCommand = 'cmdl',
   kDrop = 'drop',
@@ -110,6 +111,7 @@ enum : uint32 {
 };
 struct Preferences : WorkspaceLayout {
   BFont font = *be_plain_font;
+  bool separateWindows = true;
   bool icons = true, size = true, date = true, alwaysFolderTabs = false;
   // Quick overrides are independent of saved layout profiles.
   int32 tviskiptButtons = -1, smidjaButtons = -1;
@@ -129,6 +131,8 @@ struct Preferences : WorkspaceLayout {
   BString folders = "system", files = "system", links = "system";
   rgb_color Color(const BString &value) const;
   void Load(const BMessage &);
+  BMessage SharedChanges(const Preferences *before = nullptr) const;
+  void ApplyShared(const BMessage &);
   void ApplyDialog(const BMessage &);
   BMessage Save() const;
 };

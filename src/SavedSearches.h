@@ -19,6 +19,7 @@ public:
   const SavedSearch *Find(const std::string &name) const;
   std::string Put(SavedSearch item, bool replace); // Returns the stored name.
   void Remove(const std::string &name);
+  void ApplyEdit(const BMessage &request);
   BMessage Message() const;
   static SavedSearches FromMessage(const BMessage &);
   static SavedSearches Load(const std::string &file);

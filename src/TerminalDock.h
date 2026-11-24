@@ -29,6 +29,8 @@ public:
                                             const char *directory);
   bool ApplyPlacement(const BMessage &request);
   TerminalPanel *Docked(int lister) const;
+  bool HasSessions() const { return sessions[0].visible || sessions[1].visible ||
+      sessions[0].detached.IsValid() || sessions[1].detached.IsValid(); }
   bool HasFocus() const;
   bool FocusFloating(int lister);
   bool Float(int64 placement);

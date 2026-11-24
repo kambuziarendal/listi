@@ -69,7 +69,8 @@ class MainWindow : public Listi::WorkingWindow {
   BMessenger overview, guide;
   std::string titleLocation;
   std::array<std::string, 2> tabLocations;
-  bool detachedBrowser = false;
+  bool sessionLayout = false;
+  BrowserOpener openBrowser;
   Preferences prefs;
   BMessenger service;
   BMessenger searchWindow;
@@ -92,13 +93,13 @@ class MainWindow : public Listi::WorkingWindow {
       pane->SetPlaces(savedNavigation.Places(), savedNavigation.CanEditPlaces());
   }
   void Save() {
-    // A detached window has independent layout choices. Do not overwrite
-    // the primary window's global preferences with its temporary Einn layout.
-    if (detachedBrowser)
+    // Only the initial browser persists a default layout for future sessions.
+    if (sessionLayout)
       return;
     auto saved = prefs.Save();
     saved.what = kSavePreferences;
-    service.SendMessage(&saved);
+    saved.AddMessenger("origin", BMessenger(this));
+    be_app->PostMessage(&saved);
   }
   bool PromptBlocksCommand() {
     if (!actionArea->Pending())
@@ -204,12 +205,17 @@ class MainWindow : public Listi::WorkingWindow {
       return true;
     auto &bar = split->Panel(side).FolderBar();
     switch (message.what) {
-    case kTabAlways:
+    case kTabAlways: {
       prefs.alwaysFolderTabs = !prefs.alwaysFolderTabs;
+      BMessage delta(kSharedPreferences);
+      delta.AddBool("alwaysFolderTabs", prefs.alwaysFolderTabs);
+      delta.AddMessenger("origin", BMessenger(this));
+      be_app->PostMessage(&delta);
       for (int index = 0; index < 2; ++index)
         split->Panel(index).ShowFolderTabs(prefs.alwaysFolderTabs);
       Save();
       return true;
+    }
     case kTabRename: {
       BMessage accepted(kTabNamed);
       accepted.AddInt32("pane", side);
@@ -224,17 +230,8 @@ class MainWindow : public Listi::WorkingWindow {
         bar.Rename(message.GetString("name", ""));
       return true;
     case kTabDetach: {
-      auto tab = bar.Snapshot();
-      Preferences standalone = prefs;
-      standalone.workspace = Workspace::einn;
-      standalone.singlePane = 0;
-      auto *window = new MainWindow(standalone, service, savedNavigation.Places(), false,
-                                    SavedSearches::FromMessage(savedNavigation.SearchStore()),
-                                    false, true);
-      window->MoveTo(Frame().LeftTop() + BPoint(24, 24));
-      window->split->Panel(0).FolderBar().Adopt(std::move(tab));
-      window->Show();
-      bar.AfterDetach();
+      if (openBrowser && openBrowser({{}, bar.Snapshot(), Frame().LeftTop() + BPoint(24, 24)}))
+        bar.AfterDetach();
       break;
     }
     default:
@@ -385,11 +382,31 @@ class MainWindow : public Listi::WorkingWindow {
     case kPreferences:
       OpenPreferences(BMessenger(this), prefs);
       break;
-    case kApplyPreferences:
+    case kSharedPreferences: {
+      const Preferences before = prefs;
+      prefs.ApplyShared(*m);
+      BMessage changes = prefs.SharedChanges(&before);
+      changes.RemoveName("separateWindows");
+      changes.RemoveName("alwaysFolderTabs");
+      if (!changes.IsEmpty())
+        Apply();
+      else if (before.alwaysFolderTabs != prefs.alwaysFolderTabs)
+        for (int side = 0; side < 2; ++side)
+          split->Panel(side).ShowFolderTabs(prefs.alwaysFolderTabs);
+      break;
+    }
+    case kApplyPreferences: {
+      BMessage delta;
+      if (m->FindMessage("sharedChanges", &delta) == B_OK && !delta.IsEmpty()) {
+        delta.what = kSharedPreferences;
+        delta.AddMessenger("origin", BMessenger(this));
+        be_app->PostMessage(&delta);
+      }
       prefs.ApplyDialog(*m);
       Apply();
       Save();
       break;
+    }
     default:
       return false;
     }
@@ -399,11 +416,11 @@ class MainWindow : public Listi::WorkingWindow {
 public:
   MainWindow(const Preferences &p, BMessenger svc,
              const Listi::SavedPlaces &saved, bool writable,
-             const Listi::SavedSearches &queries, bool queriesWritable, bool detached = false)
+             const Listi::SavedSearches &queries, bool queriesWritable, BrowserRequest request, BrowserOpener open)
       : Listi::WorkingWindow(BRect(70, 70, 1170, 710), "Listi", "File manager",
                 B_AUTO_UPDATE_SIZE_LIMITS),
-        detachedBrowser(detached), prefs(p), service(svc),
-        savedNavigation(svc, saved, writable, queries, queriesWritable) {
+        sessionLayout(request.localLayout || request.detached.has_value()), openBrowser(std::move(open)), prefs(p), service(svc),
+        savedNavigation(svc, saved, writable, queries, queriesWritable, BMessenger(this)) {
     panes[0] = new Pane(0, prefs, shelf.Model());
     panes[1] = new Pane(1, prefs, shelf.Model());
     split = new Listi::WorkspaceSplit(*panes[0], *panes[1], prefs, *menu);
@@ -431,10 +448,18 @@ public:
     split->Focus();
     ResizeTo(1140, 650);
     ++browserCount;
+    if (request.position)
+      MoveTo(*request.position);
+    if (request.detached)
+      split->Panel(0).FolderBar().Adopt(std::move(*request.detached));
+    else if (!request.path.empty())
+      panes[split->Source()]->Navigate(request.path.c_str());
   }
   ~MainWindow() override {
-    if (--browserCount == 0)
-      be_app->PostMessage(B_QUIT_REQUESTED);
+    --browserCount;
+    BMessage closed(kBrowserClosed);
+    closed.AddInt64("id", WindowId());
+    be_app->PostMessage(&closed);
   }
   void FrameResized(float width, float height) override {
     BWindow::FrameResized(width, height);
@@ -479,6 +504,7 @@ public:
     menu->FindItem(Listi::kTabRight)->SetEnabled(filePage && bar.Index() + 1 < bar.Count());
     menu->FindItem(Listi::kTabReopen)->SetEnabled(filePage && bar.CanReopen());
     menu->FindItem(Listi::kTabAlways)->SetMarked(prefs.alwaysFolderTabs);
+    menu->FindItem(kSelectedBrowser)->SetEnabled(filePage && !pane.SelectedFolder().empty());
     menu->SetFolderTree(page == PanelPage::Files && pane.CanToggleTree(),
                         SidebarHasTree(pane.Sidebar()));
     const bool canSaveClipboard =
@@ -492,17 +518,21 @@ public:
   }
 
   bool QuitRequested() override {
-    if (!InspectorEditorsAllowQuit() || !FilePropertiesAllowQuit() || !OpenWithAllowQuit() ||
-        !ArchiveEditorsAllowQuit())
+    if (browserCount == 1 && (!InspectorEditorsAllowQuit() || !FilePropertiesAllowQuit() ||
+        !OpenWithAllowQuit() || !ArchiveEditorsAllowQuit()))
       return false;
+    if (terminalDock->HasSessions()) {
+      queue.ErrorInfo("Close this window's CLI sessions first.");
+      return false;
+    }
     if (savedNavigation.Saving()) {
-      PostMainWindowNotice(
+      queue.ErrorInfo(
           "Saved places or searches are still being written. Please try quitting again shortly.");
       return false;
     }
     if (queue.Busy() || clipboard.Busy()) {
       queue.Show();
-      PostMainWindowNotice("File operations are still running. Let them finish, or use "
+      queue.ErrorInfo("File operations are still running. Let them finish, or use "
              "Cancel all before quitting.");
       return false;
     }
@@ -511,6 +541,17 @@ public:
     return true;
   }
   void MessageReceived(BMessage *m) override {
+    if (m->what == kQuitListi) {
+      be_app->PostMessage(B_QUIT_REQUESTED);
+      return;
+    }
+    if (m->what == kNewBrowser || m->what == kSelectedBrowser) {
+      auto &pane = *panes[split->Source()];
+      std::string path = m->what == kNewBrowser ? pane.Path() : pane.SelectedFolder();
+      if (!path.empty() && openBrowser)
+        openBrowser({path, {}, Frame().LeftTop() + BPoint(24, 24)});
+      return;
+    }
     if (HandleFolderTab(*m) || HandleWindowAction(m))
       return;
     if (m->what == Listi::kOpenWindowOverview) {
@@ -772,7 +813,17 @@ public:
 
 BWindow *CreateMainWindow(const Preferences &prefs, BMessenger service,
                           const Listi::SavedPlaces &places, bool placesWritable,
-                          const Listi::SavedSearches &searches, bool searchesWritable) {
-  return new MainWindow(prefs, service, places, placesWritable,
-                        searches, searchesWritable);
+                          const Listi::SavedSearches &searches, bool searchesWritable, BrowserRequest request, BrowserOpener open) {
+  auto layout = prefs;
+  if (request.detached) {
+    layout.workspace = Workspace::einn;
+    layout.singlePane = 0;
+  }
+  return new MainWindow(layout, service, places, placesWritable,
+                        searches, searchesWritable, std::move(request), std::move(open));
+}
+
+bool BrowserAllowsQuit(BWindow *window) {
+  auto *browser = dynamic_cast<MainWindow *>(window);
+  return !browser || browser->QuitRequested();
 }

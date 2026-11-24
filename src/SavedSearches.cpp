@@ -66,6 +66,25 @@ void SavedSearches::Remove(const std::string &name) {
     throw std::runtime_error("That saved search no longer exists.");
   items.erase(found);
 }
+void SavedSearches::ApplyEdit(const BMessage &request) {
+  BMessage edit;
+  if (request.FindMessage("edit", &edit) != B_OK)
+    throw std::runtime_error("Missing saved-search edit.");
+  auto item = Listi::SavedSearch::FromMessage(edit);
+  BMessage expected;
+  if (request.FindMessage("previous", &expected) == B_OK) {
+    auto old = Find(expected.GetString("name", ""));
+    BMessage actual;
+    if (old)
+      old->WriteTo(actual);
+    if (!old || !actual.HasSameData(expected, true, true))
+      throw std::runtime_error("This saved search changed in another window.");
+  }
+  if (edit.GetBool("remove", false))
+    Remove(item.name);
+  else
+    Put(item, edit.GetBool("replace", false));
+}
 BMessage SavedSearches::Message() const {
   BMessage result;
   result.AddInt32("version", 2);

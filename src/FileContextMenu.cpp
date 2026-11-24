@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "FileContextMenu.h"
 #include "Common.h"
+#include "MainWindow.h"
 #include "ShelfWindow.h"
 #include <MenuItem.h>
 #include <PopUpMenu.h>
@@ -81,6 +82,8 @@ void FileActions(BMenu &menu, const ContextMenuOptions &options) {
     menu.AddItem(item);
   };
   add("Open", kInvoke, single);
+  if (single && directory)
+    add("Open in new window", kSelectedBrowser);
   if (single && directory)
     add("Add to shortcuts…", kAddShortcut, options.addShortcut);
   if (!directory) {

@@ -16,15 +16,88 @@
 #include "SavedSearches.h"
 #include <Application.h>
 #include <Window.h>
+#include <Directory.h>
+#include <Path.h>
+#include <map>
+#include <mutex>
+#include <vector>
 #include <unistd.h>
 #include <cstring>
 #include <exception>
 
 class App : public BApplication {
   BLooper *services = nullptr;
-  BMessenger mainWindow;
+  Preferences prefs;
+  Listi::SavedPlaces places;
+  Listi::SavedSearches searches;
+  bool placesWritable = false, searchesWritable = false;
+  std::map<int64, BMessenger> browsers;
+  std::mutex requestLock;
+  std::vector<BrowserRequest> requests;
+  bool ready = false;
+
+  void Broadcast(BMessage *message) {
+    for (auto &entry : browsers)
+      entry.second.SendMessage(message);
+  }
+  BWindow *Open(BrowserRequest request) {
+    request.localLayout = !browsers.empty();
+    auto *window = CreateMainWindow(prefs, BMessenger(services), places,
+        placesWritable, searches, searchesWritable, std::move(request),
+        [this](BrowserRequest next) { return Queue(std::move(next)); });
+    auto *working = static_cast<Listi::WorkingWindow *>(window);
+    browsers.emplace(working->WindowId(), BMessenger(window));
+    window->Show();
+    return window;
+  }
+  void Drain() {
+    std::vector<BrowserRequest> pending;
+    {
+      std::lock_guard<std::mutex> guard(requestLock);
+      pending.swap(requests);
+    }
+    for (auto &request : pending)
+      Open(std::move(request));
+  }
+  void LaunchDirectory(const char *path) {
+    BDirectory directory(path);
+    BEntry entry;
+    BPath normalized;
+    if (directory.GetEntry(&entry) == B_OK && entry.GetPath(&normalized) == B_OK)
+      Queue({normalized.Path(), {}, {}});
+  }
+
 
 public:
+  bool Queue(BrowserRequest request) {
+    std::lock_guard<std::mutex> guard(requestLock);
+    requests.emplace_back(std::move(request));
+    if (PostMessage(kNewBrowser) == B_OK)
+      return true;
+    requests.pop_back();
+    return false;
+  }
+  void ArgvReceived(int32 argc, char **argv) override {
+    int index = argc > 1 && !strcmp(argv[1], "--new-window") ? 2 : 1;
+    if (argc > index) {
+      const char *cwd = CurrentMessage() ? CurrentMessage()->GetString("cwd", nullptr) : nullptr;
+      BPath path(argv[index]);
+      if (cwd && argv[index][0] != '/')
+        path.SetTo(cwd, argv[index], true);
+      if (path.Path())
+        LaunchDirectory(path.Path());
+    } else if (index == 2)
+      Queue({});
+  }
+  void RefsReceived(BMessage *message) override {
+    entry_ref ref;
+    for (int32 i = 0; message->FindRef("refs", i, &ref) == B_OK; ++i) {
+      BEntry entry(&ref, true);
+      BPath path;
+      if (entry.GetPath(&path) == B_OK)
+        LaunchDirectory(path.Path());
+    }
+  }
   App() : BApplication(kSignature) {}
   ~App() {
     Listi::StopArchivePasswords();
@@ -37,7 +110,6 @@ public:
   }
   void ReadyToRun() override {
     InstallArchivePasswordWindow();
-    Preferences prefs;
     BMessage settings;
     std::string settingsError;
     try {
@@ -48,14 +120,12 @@ public:
     }
     services = CreateApplicationServices(BMessenger(this), settingsError.empty());
     services->Run();
-    Listi::SavedPlaces places;
     std::string placesError;
     try {
       places = Listi::SavedPlaces::Load(SettingsPath("Lister_places").String());
     } catch (const std::exception &e) {
       placesError = e.what();
     }
-    Listi::SavedSearches searches;
     std::string searchesError;
     try {
       searches =
@@ -63,14 +133,17 @@ public:
     } catch (const std::exception &e) {
       searchesError = e.what();
     }
-    auto *window = CreateMainWindow(prefs, BMessenger(services), places,
-                                    placesError.empty(), searches, searchesError.empty());
-    mainWindow = BMessenger(window);
-    window->Show();
+    placesWritable = placesError.empty();
+    searchesWritable = searchesError.empty();
+    ready = true;
+    Drain();
+    if (browsers.empty())
+      Open({});
+    auto &firstWindow = browsers.begin()->second;
     if (settingsError.empty() && settings.what == 'none') {
       BMessage guide(Listi::kShowLayoutGuide);
       guide.AddBool("firstRun", true);
-      window->PostMessage(&guide);
+      firstWindow.SendMessage(&guide);
     }
     if (!settingsError.empty()) {
       settingsError =
@@ -92,22 +165,84 @@ public:
     }
   }
   bool QuitRequested() override {
+    for (const auto &entry : browsers) {
+      auto target = entry.second;
+      if (!target.IsValid())
+        continue;
+      if (!target.LockTarget())
+        return false;
+      BLooper *looper = nullptr;
+      target.Target(&looper);
+      const bool allowed = BrowserAllowsQuit(static_cast<BWindow *>(looper));
+      looper->Unlock();
+      if (!allowed)
+        return false;
+    }
     return InspectorEditorsAllowQuit() && FilePropertiesAllowQuit() && OpenWithAllowQuit() &&
            ArchiveEditorsAllowQuit() && BApplication::QuitRequested();
   }
   void MessageReceived(BMessage *m) override {
+    if (m->what == kNewBrowser) {
+      if (ready)
+        Drain();
+      return;
+    }
+    if (m->what == B_SILENT_RELAUNCH && prefs.separateWindows) {
+      Queue({});
+      return;
+    }
+    if (m->what == kBrowserClosed) {
+      browsers.erase(m->GetInt64("id", -1));
+      if (browsers.empty())
+        PostMessage(B_QUIT_REQUESTED);
+      return;
+    }
+    if (m->what == kSharedPreferences || m->what == kSavePreferences) {
+      if (m->what == kSharedPreferences) {
+        prefs.ApplyShared(*m);
+        Broadcast(m);
+      } else {
+        // Only the primary window supplies layout. Its copy of global fields
+        // may predate another window's edit still waiting for broadcast.
+        BMessage shared = prefs.SharedChanges();
+        prefs.Load(*m);
+        prefs.ApplyShared(shared);
+      }
+      BMessage saved = prefs.Save();
+      saved.what = kSavePreferences;
+      BMessenger origin;
+      if (m->FindMessenger("origin", &origin) == B_OK)
+        saved.AddMessenger("origin", origin);
+      BMessenger(services).SendMessage(&saved);
+      return;
+    }
     if (m->what == 'isav') {
       SendNotices(m->what, m);
       return;
     }
     if (m->what == kPlacesSaved || m->what == kSearchesSaved) {
-      mainWindow.SendMessage(m);
+      BMessage snapshot;
+      if (m->FindMessage("snapshot", &snapshot) == B_OK) {
+        if (m->what == kPlacesSaved)
+          places = Listi::SavedPlaces::FromMessage(snapshot);
+        else
+          searches = Listi::SavedSearches::FromMessage(snapshot);
+        Broadcast(m);
+      } else {
+        BMessenger origin;
+        if (m->FindMessenger("origin", &origin) == B_OK)
+          origin.SendMessage(m);
+      }
       return;
     }
     if (m->what == kServiceError) {
       BMessage error(*m);
       error.what = kInlineNotice;
-      mainWindow.SendMessage(&error);
+      BMessenger origin;
+      if (m->FindMessenger("origin", &origin) == B_OK)
+        origin.SendMessage(&error);
+      else
+        Broadcast(&error);
       return;
     }
     BApplication::MessageReceived(m);

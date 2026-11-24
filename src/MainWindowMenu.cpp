@@ -52,6 +52,9 @@ MainWindowMenu::MainWindowMenu() : BMenuBar("menu") {
 
 void MainWindowMenu::AddFilesMenu() {
   auto files = new BMenu("Files");
+  AddCommand(files, "New window", kNewBrowser, 'N', B_SHIFT_KEY);
+  AddCommand(files, "Open in new window", kSelectedBrowser);
+  files->AddSeparatorItem();
   AddCommand(files, "Copy", kClipboardCopy, 'C');
   AddCommand(files, "Cut", kClipboardCut, 'X');
   AddCommand(files, "Paste into active folder", kClipboardPaste, 'V');
@@ -91,7 +94,8 @@ void MainWindowMenu::AddFilesMenu() {
   files->AddItem(archives);
   AddCommand(files, "Properties...", kProperties, 'I', B_SHIFT_KEY);
   files->AddSeparatorItem();
-  AddCommand(files, "Quit", B_QUIT_REQUESTED, 'Q');
+  AddCommand(files, "Close window", B_QUIT_REQUESTED, 'W');
+  AddCommand(files, "Quit Listi", kQuitListi, 'Q');
   AddItem(files);
 }
 
