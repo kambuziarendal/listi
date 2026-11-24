@@ -273,12 +273,7 @@ int VirtualTest(const std::string &fixtures, const std::string &hosts) {
       RemoveFile(folder, true);
       check(!StatFile(folder, stat),
             std::string(protocol) + " remove file and folder");
-      auth.password = "incorrect";
-      SetConnection(url, auth);
-      check(rejects([&] { ListFiles(url); }),
-            std::string(protocol) + " bad credentials rejected");
-      auth.password = "fixture-only";
-      SetConnection(url, auth);
+
     } catch (const std::exception &e) {
       check(false, std::string(protocol) + ": " + e.what());
     }

@@ -244,6 +244,8 @@ struct Runner {
          st.st_dev != destination.device || st.st_ino != destination.inode))
       throw std::runtime_error(
           "Selected destination changed; operation stopped.");
+    if (guardedJob->checkDestinationWindow)
+      guardedJob->checkDestinationWindow();
   }
 
   bool deferCompletion = false, recoverableMove = false;

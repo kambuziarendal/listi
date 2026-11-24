@@ -2,6 +2,9 @@
 #include "WindowOverview.h"
 #include "WrappedLabel.h"
 #include "FileOperation.h"
+#include "JobSnapshot.h"
+#include "ReadWorker.h"
+#include "TransferCommand.h"
 #include <PopUpMenu.h>
 #include <stdexcept>
 #include <MenuItem.h>
@@ -28,6 +31,7 @@ namespace {
 constexpr uint32 kRaise = 'wrai', kApplyName = 'wset', kSaveName = 'wsnm',
                  kRefreshWindows = 'wrfs', kSelectWindow = 'wsel', kShowWindow = 'wshw';
 
+constexpr uint32 kProbeCopyFolder = 'pbcf', kCopyFolderReady = 'cfrd';
 struct WindowInfo {
   int64 id;
   BMessenger target;
@@ -35,6 +39,8 @@ struct WindowInfo {
   bool named;
   std::string setName;
   std::string copyFolder;
+  NodeIdentity copyNode;
+  int64 copyRevision;
 };
 std::mutex registryLock;
 std::atomic<int64> nextId{0};
@@ -203,6 +209,7 @@ WorkingWindow::WorkingWindow(BRect frame, const char *title, const char *type, u
   Publish();
 }
 WorkingWindow::~WorkingWindow() {
+  RetireReadWorker(copyProbe);
   if (nameDialog.IsValid()) {
     BMessage close(B_QUIT_REQUESTED);
     nameDialog.SendMessage(&close, static_cast<BHandler *>(nullptr), 0);
@@ -219,64 +226,122 @@ void WorkingWindow::Describe(const std::string &title, const std::string &path, 
   modified = dirty;
   Publish();
 }
-void WorkingWindow::SetCopyFolder(const std::string &path) {
-  if (copyFolder != path) {
+void WorkingWindow::SetCopyFolder(const std::string &path, const NodeIdentity &node) {
+  if (copyFolder != path || copyDevice != node.device || copyInode != node.inode) {
     copyFolder = path;
+    copyDevice = node.device;
+    copyInode = node.inode;
+    ++copyFolderRevision;
     Publish();
   }
 }
 
-static bool WritableLocalFolder(const std::string &path, NodeIdentity &node) {
-  struct stat st;
-  if (stat(path.c_str(), &st) || !S_ISDIR(st.st_mode))
-    return false;
-  BVolume volume(st.st_dev);
-  if (volume.InitCheck() != B_OK || volume.IsShared() || volume.IsReadOnly() ||
-      access(path.c_str(), W_OK | X_OK))
-    return false;
-  node = {int32_t(st.st_dev), int64_t(st.st_ino)};
-  return true;
+namespace {
+void CheckCopyWindow(int64 id, int64 revision) {
+  std::lock_guard<std::mutex> guard(registryLock);
+  auto found = windows.find(id);
+  if (found == windows.end() || found->second.copyRevision != revision)
+    throw std::runtime_error("The destination window closed or changed folders. Choose again.");
 }
 
-bool WorkingWindow::PickCopyFolder(Job &job) {
+class CopyFolderProbe : public ReadWorker {
+  BMessenger target;
+  Job job;
+  int64 request, window, revision;
+public:
+  CopyFolderProbe(BMessenger target, Job job, int64 request, int64 window, int64 revision)
+      : ReadWorker("copy destination reader"), target(target), job(std::move(job)),
+        request(request), window(window), revision(revision) {}
+  void MessageReceived(BMessage *message) override {
+    if (message->what != kProbeCopyFolder) {
+      ReadWorker::MessageReceived(message);
+      return;
+    }
+    BMessage result(kCopyFolderReady);
+    try {
+      CheckCopyWindow(window, revision);
+      const auto &folder = job.destination;
+      BVolume volume(job.expectedDestination.device);
+      if (volume.InitCheck() != B_OK || volume.IsShared() || volume.IsReadOnly() ||
+          access(folder.c_str(), W_OK | X_OK))
+        throw std::runtime_error("The destination folder is no longer writable.");
+      result = EncodeJob(PrepareTransfer(std::move(job)), kCopyFolderReady);
+      CheckCopyWindow(window, revision);
+    } catch (const std::exception &error) {
+      result.AddString("error", error.what());
+    }
+    result.AddInt64("request", request);
+    result.AddInt64("window", window);
+    result.AddInt64("revision", revision);
+    target.SendMessage(&result, static_cast<BHandler *>(nullptr), 50000);
+  }
+};
+}
+
+void WorkingWindow::PickCopyFolder(Job job) {
+  ++copyRequest;
+  pendingCopy.reset();
+  RetireReadWorker(copyProbe);
   std::vector<WindowInfo> snapshot;
   {
     std::lock_guard<std::mutex> guard(registryLock);
     for (const auto &item : windows)
-      if (item.first != id && !item.second.copyFolder.empty())
+      if (item.first != id && !item.second.copyFolder.empty() &&
+          item.second.copyNode.inode >= 0)
         snapshot.push_back(item.second);
   }
-  BPopUpMenu choices("Copy to window", false, false);
-  std::vector<NodeIdentity> nodes;
-  std::vector<WindowInfo> targets;
+  if (snapshot.empty())
+    throw std::runtime_error("Open another window on a local folder first.");
+  auto *choices = new BPopUpMenu("Copy to window", false, false);
   for (const auto &row : snapshot) {
-    NodeIdentity node;
-    if (!WritableLocalFolder(row.copyFolder, node))
-      continue;
     auto label = row.title + "  ·  #" + std::to_string(row.id) + "  ·  " + row.copyFolder;
-    choices.AddItem(new BMenuItem(label.c_str(), nullptr));
-    nodes.push_back(node);
-    targets.push_back(row);
+    auto *choice = new BMessage(kProbeCopyFolder);
+    choice->AddInt64("request", copyRequest);
+    choice->AddInt64("window", row.id);
+    choice->AddInt64("revision", row.copyRevision);
+    auto *item = new BMenuItem(label.c_str(), choice);
+    choices->AddItem(item);
   }
-  if (targets.empty())
-    throw std::runtime_error("Open another window on a writable local folder first.");
-  auto choice = choices.Go(BPoint(Frame().left + 24, Frame().top + 36), false, true, false);
-  if (!choice)
+  choices->SetTargetForItems(BMessenger(this));
+  choices->SetAsyncAutoDestruct(true);
+  pendingCopy = std::make_unique<Job>(std::move(job));
+  choices->Go(BPoint(Frame().left + 24, Frame().top + 36), true, true, true);
+}
+
+bool WorkingWindow::HandleCopyFolder(BMessage &message, Job &job) {
+  if (message.what != kProbeCopyFolder && message.what != kCopyFolderReady)
     return false;
-  const auto index = choices.IndexOf(choice);
-  const auto &selected = targets.at(index);
-  NodeIdentity current;
-  if (!WritableLocalFolder(selected.copyFolder, current) ||
-      current.device != nodes[index].device || current.inode != nodes[index].inode)
-    throw std::runtime_error("The destination folder changed or is no longer writable.");
-  {
-    std::lock_guard<std::mutex> guard(registryLock);
-    auto found = windows.find(selected.id);
-    if (found == windows.end() || found->second.copyFolder != selected.copyFolder)
-      throw std::runtime_error("The destination window closed or changed folders. Choose again.");
+  if (message.IsSourceRemote() || message.GetInt64("request", -1) != copyRequest)
+    return true;
+  const int64 window = message.GetInt64("window", -1);
+  const int64 revision = message.GetInt64("revision", -1);
+  if (message.what == kProbeCopyFolder) {
+    if (!pendingCopy)
+      return true;
+    auto selected = std::move(pendingCopy);
+    {
+      std::lock_guard<std::mutex> guard(registryLock);
+      auto found = windows.find(window);
+      if (found == windows.end() || found->second.copyRevision != revision)
+        throw std::runtime_error("The destination window closed or changed folders. Choose again.");
+      selected->destination = found->second.copyFolder;
+      selected->expectedDestination = found->second.copyNode;
+    }
+    copyProbe = new CopyFolderProbe(BMessenger(this), std::move(*selected),
+                                    copyRequest, window, revision);
+    if (!StartReadWorker(copyProbe) || copyProbe->PostMessage(kProbeCopyFolder) != B_OK) {
+      RetireReadWorker(copyProbe);
+      throw std::runtime_error("Cannot start destination reader. Try again.");
+    }
+  } else if (copyProbe) {
+    RetireReadWorker(copyProbe);
+    const char *error;
+    if (message.FindString("error", &error) == B_OK)
+      throw std::runtime_error(error);
+    CheckCopyWindow(window, revision);
+    job = DecodeJob(message);
+    job.checkDestinationWindow = [window, revision] { CheckCopyWindow(window, revision); };
   }
-  job.destination = selected.copyFolder;
-  job.expectedDestination = current;
   return true;
 }
 
@@ -287,7 +352,8 @@ void WorkingWindow::Publish() {
   if (title != Title())
     SetTitle(title.c_str());
   std::lock_guard<std::mutex> guard(registryLock);
-  windows[id] = {id, BMessenger(this), title, kind, location, !alias.empty(), setName, copyFolder};
+  windows[id] = {id, BMessenger(this), title, kind, location, !alias.empty(), setName, copyFolder,
+                 {copyDevice, copyInode}, copyFolderRevision};
   ++revision;
 }
 bool WorkingWindow::HandleWindowAction(BMessage *m) {

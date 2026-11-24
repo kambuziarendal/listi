@@ -42,6 +42,15 @@ bool WaitFor(const std::function<bool()> &condition) {
   return false;
 }
 
+bool MissingConnection(const std::string &url) {
+  try {
+    Listi::RequireConnection(url);
+    return false;
+  } catch (const std::runtime_error &) {
+    return true;
+  }
+}
+
 // The receiver stands in for the originating pane so no network is involved.
 bool CheckPopup(BApplication &app, const std::string &identity,
                 const std::string &knownHosts) {
@@ -84,7 +93,7 @@ bool CheckPopup(BApplication &app, const std::string &identity,
   auto popup = prompt();
   bool ok = popup && app.CountWindows() == 2 &&
             receiver->navigations == 0 &&
-            Listi::GetConnection(remote).username.empty();
+            MissingConnection(remote);
   if (popup && popup->Lock()) {
     auto *field = dynamic_cast<BTextControl *>(popup->FindView("unlock ssh key"));
     ok &= field && field->TextView()->IsTypingHidden();
@@ -101,7 +110,7 @@ bool CheckPopup(BApplication &app, const std::string &identity,
   auto *user = dynamic_cast<BTextControl *>(form->FindView("network username"));
   ok &= user && std::string(user->Text()) == "test-user" &&
         receiver->navigations == 0 && receiver->closes == 0 &&
-        Listi::GetConnection(remote).username.empty();
+        MissingConnection(remote);
   connect();
   popup = prompt();
   owner->Unlock();
@@ -139,7 +148,7 @@ bool CheckPopup(BApplication &app, const std::string &identity,
   auto *inlinePassphrase =
       dynamic_cast<BTextControl *>(form->FindView("key passphrase"));
   if (inlinePassphrase) {
-    inlinePassphrase->SetText("inline-key-passphrase");
+    inlinePassphrase->SetText("key-only-passphrase");
     connect();
     ok &= !prompt();
   } else {
@@ -148,7 +157,15 @@ bool CheckPopup(BApplication &app, const std::string &identity,
   owner->Unlock();
   ok &= WaitFor([&] { return receiver->navigations == 2 &&
                              receiver->closes == 2; });
-  ok &= Listi::GetConnection(remote).keyPassphrase == "inline-key-passphrase";
+  ok &= Listi::GetConnection(remote).keyPassphrase == "key-only-passphrase";
+  ok &= Listi::GetConnection("sftp://LISTI-PASSPHRASE-TEST.INVALID:22/other/entry").username ==
+        auth.username;
+  Listi::Connection second;
+  second.username = "other-fixture-user";
+  const auto secondRoute = "sftp://second-listi-test.invalid/";
+  ok &= Listi::SetConnection(secondRoute, second) &&
+        Listi::GetConnection(secondRoute).username == second.username &&
+        Listi::GetConnection(remote).username == auth.username;
   owner->Lock();
   owner->Quit();
   if (receiver->Lock())

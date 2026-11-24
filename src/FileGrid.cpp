@@ -69,6 +69,7 @@ class GridView : public FileGrid {
   std::map<std::string, std::unique_ptr<BBitmap>> thumbnails;
   std::set<std::string> pending;
   bool retrySubmission = false;
+  bigtime_t nextReaderAttempt = 0;
   RubberBand *band;
   Listi::TypeToSelect typeSelect;
   std::set<std::string> paintedSelection;
@@ -180,8 +181,7 @@ public:
     Listi::RetireReadWorker(loader);
   }
   void AttachedToWindow() override {
-    loader = new ThumbnailLoader(BMessenger(this), generation, replies, terminal);
-    Listi::StartReadWorker(loader);
+    nextReaderAttempt = 0;
     Update();
   }
   void DetachedFromWindow() override {
@@ -415,7 +415,7 @@ public:
     BView::KeyDown(bytes, length);
   }
   void Pulse() override {
-    if (retrySubmission) {
+    if (retrySubmission && (loader || system_time() >= nextReaderAttempt)) {
       retrySubmission = false;
       Invalidate();
     }
@@ -471,7 +471,7 @@ public:
         if (found != thumbnails.end()) {
           if (found->second)
             picture = found->second.get();
-        } else if (!pending.count(row->path) && loader && pending.size() < 64) {
+        } else if (!pending.count(row->path) && pending.size() < 64) {
           std::string lower = row->name.c_str();
           std::transform(lower.begin(), lower.end(), lower.begin(),
                          [](unsigned char c) { return std::tolower(c); });
@@ -482,13 +482,22 @@ public:
               ext == ".tiff" || ext == ".tif" || ext == ".avif" ||
               ext == ".heif" || ext == ".svg" || ext == ".ico" ||
               ext == ".tga") {
-            BMessage job(kThumbnail);
-            job.AddString("path", row->path.c_str());
-            job.AddInt64("serial", generation->load());
-            if (loader->PostMessage(&job) == B_OK)
-              pending.insert(row->path);
-            else
+            if (!loader && Window() && system_time() >= nextReaderAttempt) {
+              loader = new ThumbnailLoader(BMessenger(this), generation, replies, terminal);
+              if (!Listi::StartReadWorker(loader))
+                nextReaderAttempt = system_time() + 250000;
+            }
+            if (loader) {
+              BMessage job(kThumbnail);
+              job.AddString("path", row->path.c_str());
+              job.AddInt64("serial", generation->load());
+              if (loader->PostMessage(&job) == B_OK)
+                pending.insert(row->path);
+              else
+                retrySubmission = true;
+            } else {
               retrySubmission = true;
+            }
           }
         }
       }

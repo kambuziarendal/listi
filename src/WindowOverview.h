@@ -2,6 +2,7 @@
 #pragma once
 #include <Messenger.h>
 #include <Window.h>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -12,6 +13,8 @@ inline constexpr uint32 kNameWindow = 'wnam', kUseFolderName = 'waut',
 // Only independent working surfaces participate. Prompts, popup menus and
 // background loopers are not destinations; their existing ownership is unchanged.
 struct Job;
+struct NodeIdentity;
+class ReadWorker;
 class WorkingWindow : public BWindow {
 public:
   WorkingWindow(BRect, const char *title, const char *kind, uint32 flags);
@@ -20,8 +23,9 @@ public:
   void SetWorkingSetName(const std::string &value) { setName = value; Publish(); }
   const std::string &Alias() const { return alias; }
   void SetAlias(const std::string &value) { alias = value; Publish(); }
-  void SetCopyFolder(const std::string &path);
-  bool PickCopyFolder(Job &job);
+  void SetCopyFolder(const std::string &path, const NodeIdentity &);
+  void PickCopyFolder(Job job);
+  bool HandleCopyFolder(BMessage &, Job &);
   void Describe(const std::string &automaticTitle, const std::string &location,
                 bool modified = false);
   void MessageReceived(BMessage *) override;
@@ -33,6 +37,11 @@ private:
   int64 id;
   bool modified = false;
   BMessenger nameDialog;
+  std::unique_ptr<Job> pendingCopy;
+  ReadWorker *copyProbe = nullptr;
+  int64 copyRequest = 0, copyFolderRevision = 0;
+  int32 copyDevice = -1;
+  int64 copyInode = -1;
   void Publish();
 };
 

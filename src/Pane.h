@@ -101,6 +101,7 @@ public:
   }
   bool CanToggleTree() const;
   bool SidebarCanBeRestored() const;
+  Listi::VisitPosition::Identity FolderIdentity() const { return folderIdentity; }
   bool LocationValid() const { return locationValid; }
   void RefreshShelf();
   SidebarMode Sidebar() const { return prefs.Sidebar(id); }

@@ -204,6 +204,11 @@ echo "TEST installed Listi --self-test"
         if installed.count(marker) != 1:
             raise RuntimeError("Missing installed self-test start")
         receipts["validate_checks"](installed[installed.index(marker) + 1:])
+        with (output / "installed-multiwindow.log").open("wb") as log:
+            subprocess.run([*ssh, "cd ~/listi-ephemeral && python3 -u tests/multiwindow-installed.py"],
+                           stdout=log, stderr=subprocess.STDOUT, check=True, timeout=240)
+        multiwindow = (output / "installed-multiwindow.log").read_text().splitlines()
+        receipts["validate_installed_multiwindow"](multiwindow)
         version = next(line.split()[1] for line in Path("PackageInfo").read_text().splitlines()
                        if line.startswith("version "))
         name = f"listi-{version}-x86_64.hpkg"

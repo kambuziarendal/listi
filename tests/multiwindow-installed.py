@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise the installed Haiku app. Run in a private guest with Listi closed."""
 from collections import Counter
+from contextlib import ExitStack
 from pathlib import Path
 import subprocess
 import tempfile
@@ -47,12 +48,23 @@ def menu(index, name, *parents):
     hey(*args, "of", "MenuBar", "of", "Window", index)
 
 
-def launch(*args, cwd=None):
-    return subprocess.Popen([APP, *map(str, args)], cwd=cwd, stdin=subprocess.DEVNULL,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+def stop(process):
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
 
 
-def run(root):
+def run(root, cleanup):
+    def launch(*args, cwd=None):
+        process = subprocess.Popen([APP, *map(str, args)], cwd=cwd, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        cleanup.callback(stop, process)
+        return process
+
     first, second = map(str, (root / "alpha", root / "beta"))
     Path(first).mkdir()
     Path(second).mkdir()
@@ -78,7 +90,7 @@ def run(root):
     paths(first, first, second)
     launch("--new-window", "beta", cwd=root)
     paths(first, first, second, second)
-    subprocess.run(["open", APP], check=True)
+    subprocess.run(["open", APP], check=True, timeout=10)
     wait_for(lambda: len(windows()) == 5, "Tracker roster relaunch adds one browser")
     hey("set", "Active", "of", "Window", index(first), "to", "true")
     assert len(windows()) == 5
@@ -94,5 +106,8 @@ def run(root):
 
 
 if __name__ == "__main__":
+    print("TEST installed multiwindow", flush=True)
     with tempfile.TemporaryDirectory(prefix="listi-multi-", dir="/boot/home") as folder:
-        run(Path(folder))
+        with ExitStack() as cleanup:
+            run(Path(folder), cleanup)
+    print("PASS installed multiwindow", flush=True)

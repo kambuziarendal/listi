@@ -5,9 +5,11 @@
 // Real staging/dispatch code, deterministic fake network commit failures.
 #include "FileOperation.h"
 #include "VirtualFile.h"
+#include <fcntl.h>
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <sys/stat.h>
 #include <unistd.h>
 // The portable transport fixture has no Haiku BMessage or settings store.
 // Native tests link the real durable inventory; only its storage is mocked here.
@@ -34,13 +36,14 @@ void RecoveryRecord::NoteFailure(bool) noexcept {}
 }
 #endif
 namespace {
-struct Remote { std::string data; int64_t modified = 1; };
+struct Remote { std::string data; int64_t modified = 1; long nanoseconds = 0; };
 std::map<std::string, Remote> files;
 bool corruptUpload = false, denyReadback = false, cancelReadback = false;
 bool cancelAtReadyCheck = false;
 unsigned postCancelReadCalls = 0;
 bool commitFailed = false, expireDuringCleanup = false;
 size_t cleanupReadBytes = 0;
+bool editSmbSourceOnRead = false;
 bool truncateUpload = false, omitStageSize = false, growSourceOnRead = false;
 bool failCommit = false, failRollback = false, failPartCleanup = false,
      failBackupCleanup = false, cancelAfterBackup = false, cancelled = false,
@@ -72,7 +75,8 @@ bool StatNetwork(const Location &l, FileEntry &entry, const TransferControl &c,
   if (it == files.end()) return false;
   entry.path = l.URL(); entry.name = LocationLeaf(entry.path);
   entry.sizeKnown = !omitStageSize || !suffix(l.URL(), ".part");
-  entry.size = it->second.data.size(); entry.modified = it->second.modified;
+  entry.size = it->second.data.size();
+  entry.SetModification(it->second.modified, it->second.nanoseconds);
   return true;
 }
 std::vector<FileEntry> ListNetwork(const Location &l, const TransferControl &c) {
@@ -103,6 +107,10 @@ void ReadNetwork(const Location &l, const DataSink &sink, const TransferControl 
     sink(grown.data(), grown.size());
   } else {
     sink(data.data(), data.size());
+  }
+  if (editSmbSourceOnRead && l.scheme == "smb") {
+    data = "changed";
+    files.at(l.URL()).nanoseconds = 654000000;
   }
   c.Tick(data.size());
 }
@@ -205,6 +213,31 @@ int main() {
         files.at(destination).data == "old contents",
         "staging rejects actual bytes beyond the declared source size before upload");
   growSourceOnRead = false;
+  const std::string smb = "smb://fixture/in/edited";
+  const std::string downloaded = std::string(dir) + "/edited";
+  reset();
+  files[smb] = {"initial", 1, 123000000};
+  editSmbSourceOnRead = true;
+  r = RunVirtual(Job{Action::Copy, {smb}, dir}, hooks);
+  check(!r.completed && !done && !r.errors.empty() && access(downloaded.c_str(), F_OK),
+        "same-size SMB source edit with a distinct fractional revision is rejected");
+  editSmbSourceOnRead = false;
+  r = RunVirtual(Job{Action::Copy, {smb}, dir}, hooks);
+  const timespec referenceTime[] = {{0, UTIME_OMIT}, {1, 654000000}};
+  FileEntry local, expected;
+  expected.SetModification(0, 123400000);
+  const auto prior = expected;
+  expected.SetModification(0, 0);
+  check(prior.modifiedFraction == "1234" && expected.modifiedKnown &&
+            expected.modifiedFraction.empty() && !prior.SameModification(expected),
+        "epoch fractions normalize, distinguish revisions, and clear on reuse");
+  check(r.completed == 1 && r.errors.empty() &&
+            !utimensat(AT_FDCWD, source.c_str(), referenceTime, 0) &&
+            StatFile(source, expected) && StatFile(downloaded, local) &&
+            local.SameModification(expected) &&
+            local.ModifiedNanoseconds() == expected.ModifiedNanoseconds(),
+        "stable SMB download preserves the local filesystem timestamp precision");
+  unlink(downloaded.c_str());
   reset(); truncateUpload = true; r = RunVirtual(job, hooks);
   check(!r.completed && !done && !r.errors.empty() && files.size() == 2 && has(".part") && errorHas(r, ".part") &&
         files.at(destination).data == "old contents",

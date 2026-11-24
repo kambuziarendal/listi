@@ -70,6 +70,15 @@ int main() {
   check(h.RecentFolders().front() == "Trash" &&
             other.RecentFolders() == std::vector<std::string>({"Other"}),
         "recent folders exclude the volume overview and remain pane-local");
+  visit("@query:1");
+  visit("@set-query:2");
+  visit("sftp://fixture/folder");
+  travel(h.Back());
+  check(h.At(h.Position()) == "@set-query:2" && h.At(h.Back()) == "@query:1" &&
+            h.At(h.Forward()) == "sftp://fixture/folder" &&
+            h.RecentFolders()[0] == "sftp://fixture/folder" &&
+            h.RecentFolders()[1] == "Trash",
+        "generated and restored search tokens are visits, not recent folders");
   NavigationHistory repeated;
   for (int i = 0; i < 3; ++i) {
     const auto path = i == 1 ? "B" : "A";

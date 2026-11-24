@@ -488,6 +488,20 @@ void OperationQueue::ErrorInfo(const char *text) {
   display.SendMessage(&error);
 }
 int64 OperationQueue::Enqueue(const Listi::Job &j) {
+  try {
+    for (const auto &source : j.sources)
+      if (Listi::IsVirtual(source))
+        Listi::RequireConnection(source);
+    if (Listi::IsVirtual(j.destination))
+      Listi::RequireConnection(j.destination);
+    if (Listi::IsVirtual(j.destinationFolder))
+      Listi::RequireConnection(j.destinationFolder);
+  } catch (const std::exception &error) {
+    if (j.archivePasswordToken)
+      Listi::DiscardArchiveCreationPassword(j.archivePasswordToken);
+    ErrorInfo(error.what());
+    return 0;
+  }
   std::lock_guard<std::mutex> lock(mutex);
   return EnqueueLocked(j);
 }

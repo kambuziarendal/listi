@@ -554,6 +554,14 @@ void Pane::UpdateNavigation() {
   forward->SetEnabled(history.Forward() >= 0);
 }
 void Pane::StartNavigation(const std::string &request, int target, bool trash, bool restore) {
+  try {
+    if (Listi::IsVirtual(request))
+      Listi::RequireConnection(request);
+  } catch (const std::exception &error) {
+    restoring.reset();
+    SetNavigationError(error.what());
+    return;
+  }
   if (!restore && locationValid && !scanning)
     history.SavePosition(CaptureVisit());
   pendingVisit = restore ? restoring->pendingVisit
