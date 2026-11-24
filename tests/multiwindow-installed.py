@@ -18,7 +18,8 @@ def hey(*args):
 
 def windows():
     result = {}
-    for index in range(int(hey("count", "Window"))):
+    # hey can report a successful but empty count during roster startup/shutdown.
+    for index in range(int(hey("count", "Window") or 0)):
         try:
             result[index] = hey("get", "SourcePath", "of", "Window", index)
         except subprocess.CalledProcessError:
