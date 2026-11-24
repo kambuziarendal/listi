@@ -553,7 +553,7 @@ public:
     }
     if (m->what == kNewBrowser || m->what == kSelectedBrowser) {
       auto &pane = *panes[split->Source()];
-      std::string path = m->what == kNewBrowser ? pane.Path() : pane.SelectedFolder();
+      std::string path = m->what == kNewBrowser ? pane.SearchRoot() : pane.SelectedFolder();
       if (!path.empty() && openBrowser)
         openBrowser({path, {}, Frame().LeftTop() + BPoint(24, 24)});
       return;
@@ -763,6 +763,7 @@ public:
       OpenFolderCompare(pane.Path(), panes[1 - source]->Path());
       break;
     case kOpenPaths:
+      m->AddMessenger("origin", BMessenger(this));
       service.SendMessage(m);
       break;
     case kTerminal:
@@ -797,6 +798,7 @@ public:
         break;
       }
       BMessage launch(kOpenPaths);
+      launch.AddMessenger("origin", BMessenger(this));
       launch.AddString("path", pane.Path());
       launch.AddString("mode", m->what == Listi::kTerminalWindow ? "terminal"
                                                                : "command");

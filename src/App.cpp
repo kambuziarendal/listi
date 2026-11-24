@@ -67,7 +67,6 @@ class App : public BApplication {
       Queue({normalized.Path(), {}, {}});
   }
 
-
 public:
   bool Queue(BrowserRequest request) {
     std::lock_guard<std::mutex> guard(requestLock);
@@ -165,17 +164,27 @@ public:
     }
   }
   bool QuitRequested() override {
+    if (CurrentMessage() && CurrentMessage()->GetBool("lastBrowser", false)) {
+      Drain();
+      if (!browsers.empty())
+        return false;
+    }
     for (const auto &entry : browsers) {
       auto target = entry.second;
       if (!target.IsValid())
         continue;
-      if (!target.LockTarget())
+      if (target.LockTargetWithTimeout(500000) != B_OK)
         return false;
       BLooper *looper = nullptr;
       target.Target(&looper);
       const bool allowed = BrowserAllowsQuit(static_cast<BWindow *>(looper));
       looper->Unlock();
       if (!allowed)
+        return false;
+    }
+    if (services) {
+      BMessage fence(kDrainServices), reply;
+      if (BMessenger(services).SendMessage(&fence, &reply, 500000, 2000000) != B_OK)
         return false;
     }
     return InspectorEditorsAllowQuit() && FilePropertiesAllowQuit() && OpenWithAllowQuit() &&
@@ -193,8 +202,11 @@ public:
     }
     if (m->what == kBrowserClosed) {
       browsers.erase(m->GetInt64("id", -1));
-      if (browsers.empty())
-        PostMessage(B_QUIT_REQUESTED);
+      if (browsers.empty()) {
+        BMessage last(B_QUIT_REQUESTED);
+        last.AddBool("lastBrowser", true);
+        PostMessage(&last);
+      }
       return;
     }
     if (m->what == kSharedPreferences || m->what == kSavePreferences) {

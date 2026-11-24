@@ -137,6 +137,7 @@ bool Pane::HandleOpenCommand(
       OpenArchiveEditor(path, editor.String());
     } else {
       BMessage open(kOpenPaths);
+      open.AddMessenger("origin", BMessenger(Window()));
       open.AddString("path", path.c_str());
       open.AddString("mode", externalEdit ? "edit" : "system");
       if (externalEdit)

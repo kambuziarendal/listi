@@ -35,6 +35,11 @@ public:
       : BLooper("file viewer and launcher"), app(a),
         preferencesWritable(canSavePreferences) {}
   void MessageReceived(BMessage *m) override {
+    if (m->what == kDrainServices) {
+      BMessage reply(B_REPLY);
+      m->SendReply(&reply);
+      return;
+    }
     if (m->what == kImageDropProbe) {
       BMessenger target;
       if (m->FindMessenger("replyTo", &target) != B_OK)
@@ -187,6 +192,9 @@ public:
       }
       if (s != B_OK && s != B_ALREADY_RUNNING) {
         BMessage error(kServiceError);
+        BMessenger origin;
+        if (m->FindMessenger("origin", &origin) == B_OK)
+          error.AddMessenger("origin", origin);
         BString text("Could not open application: ");
         text << strerror(s);
         error.AddString("error", text);
@@ -196,6 +204,9 @@ public:
       return;
     } catch (const std::exception &e) {
       BMessage error(kServiceError);
+      BMessenger origin;
+      if (m->FindMessenger("origin", &origin) == B_OK)
+        error.AddMessenger("origin", origin);
       error.AddString("error", e.what());
       app.SendMessage(&error);
     }
