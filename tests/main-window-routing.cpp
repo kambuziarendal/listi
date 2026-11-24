@@ -134,7 +134,7 @@ static void CheckToolPlacement(BWindow *window) {
   notice.AddString("error", "Non-blocking file error");
   window->MessageReceived(&notice);
   assert(!window->FindView("question") && !bank->IsHidden(bank));
-  BMessage prompt(kTabRename);
+  BMessage prompt(Listi::kTabRename);
   window->MessageReceived(&prompt);
   assert(bank->IsHidden(bank) && !command->IsHidden(command));
   assert(!bottom->IsHidden(bottom) && toggle->IsMarked() && !fallback->IsEnabled());
