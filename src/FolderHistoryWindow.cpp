@@ -15,6 +15,7 @@
 #include <Messenger.h>
 #include <Path.h>
 #include <ScrollView.h>
+#include <Screen.h>
 #include <Slider.h>
 #include <StringView.h>
 #include <TextControl.h>
@@ -131,14 +132,17 @@ public:
       one = Button("Restore file…", kPickFile);
       all = Button("Restore folder…", kPickFolder);
       cancel = Button("Cancel", kCancel);
-      confirmRow = new BGroupView(B_HORIZONTAL);
+      confirmRow = new BGroupView(B_VERTICAL);
       copyPath = new BTextControl("restore path", "New copy:", "", nullptr);
       confirm = Button("Restore copy", kConfirm);
       back = Button("Cancel", kBack);
-      BLayoutBuilder::Group<>(confirmRow, B_HORIZONTAL).Add(copyPath).Add(back).Add(confirm);
-      controls.Add(confirmRow);
+      BLayoutBuilder::Group<>(confirmRow, B_VERTICAL, B_USE_SMALL_SPACING).Add(copyPath)
+          .AddGroup(B_HORIZONTAL).AddGlue().Add(back).Add(confirm).End();
+      controls.Add(confirmRow, 0);
       SetViewVisible(confirmRow, false);
-      controls.AddGroup(B_HORIZONTAL).Add(save).Add(cancel).AddGlue().Add(one).Add(all).End();
+      actions = new BGroupView(B_HORIZONTAL);
+      BLayoutBuilder::Group<>(actions, B_HORIZONTAL).Add(save).Add(cancel).AddGlue().Add(one).Add(all);
+      controls.Add(actions, 0);
     }
     SetViewVisible(choose, false);
     if (close) close->SetFlat(true);
@@ -267,9 +271,7 @@ private:
     refresh->SetEnabled(!task);
     choose->SetEnabled(!task);
     if (save) {
-      SetViewVisible(one, pendingPoint.empty());
-      SetViewVisible(all, pendingPoint.empty());
-      SetViewVisible(save, pendingPoint.empty());
+      SetViewVisible(actions, pendingPoint.empty());
       save->SetEnabled(!task && bool(store));
       SetViewVisible(cancel, Writing());
       cancel->SetEnabled(task && !task->cancel);
@@ -422,7 +424,7 @@ private:
   uint32 kind = 0;
   bool manual = false, configuredUnavailable = false;
   std::string pendingPoint, pendingFile;
-  BGroupView *confirmRow = nullptr;
+  BGroupView *confirmRow = nullptr, *actions = nullptr;
   BTextControl *copyPath = nullptr;
   BButton *confirm = nullptr, *back = nullptr;
   std::vector<std::string> points;
@@ -436,6 +438,10 @@ public:
       : BWindow(BRect(140, 100, 770, 520), "Folder history", B_TITLED_WINDOW,
                 B_AUTO_UPDATE_SIZE_LIMITS | B_ASYNCHRONOUS_CONTROLS), view(new HistoryView(source, -1)) {
     BLayoutBuilder::Group<>(this, B_VERTICAL, 0).Add(view);
+    GetLayout()->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
+    auto screen = BScreen(this).Frame();
+    ResizeTo(std::min(620.f, screen.Width() - 32), std::min(420.f, screen.Height() - 56));
+    MoveOnScreen();
   }
   bool QuitRequested() override { return !view->Writing(); }
 private:
