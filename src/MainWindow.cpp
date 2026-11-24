@@ -108,7 +108,7 @@ class MainWindow : public Listi::WorkingWindow {
   bool PromptBlocksCommand() {
     if (!actionArea->Pending())
       return false;
-    queue.ErrorInfo("Finish or cancel the open question first.");
+    actionArea->FocusQuestion();
     return true;
   }
   void CloseAction() {
@@ -614,8 +614,7 @@ public:
     }
     if (m->what == Listi::kFlatContext) {
       const int pane = m->GetInt32("pane", -1);
-      if (pane >= 0 && pane < 2 && split->Panel(pane).Current() == PanelPage::Flat &&
-          !PromptBlocksCommand()) {
+      if (pane >= 0 && pane < 2 && split->Panel(pane).Current() == PanelPage::Flat) {
         auto *view = split->Panel(pane).Page(PanelPage::Flat);
         split->FollowFocus(view);
         if (split->Source() == pane)
@@ -673,8 +672,7 @@ public:
         return;
       case kOpenSystem: case kClipboardCopy: case kClipboardCut: case kCopyPaths:
       case kAll: case kNone: case kInvert: case Listi::kAddToShelf:
-        if (!PromptBlocksCommand())
-          flat->MessageReceived(m);
+        flat->MessageReceived(m);
         return;
       }
     }
@@ -689,12 +687,7 @@ public:
       return;
     switch (m->what) {
     case kInlineNotice:
-      if (actionArea->Pending()) {
-        queue.ErrorInfo(m->GetString("error", "Operation failed"));
-        break;
-      }
-      AskInline(m->GetString("error", "Operation failed"), "OK",
-                BMessage(kInlineCancel));
+      queue.ErrorInfo(m->GetString("error", "Operation failed"));
       break;
     case kInlineClosed:
       if (!actionArea->Pending()) {
@@ -720,8 +713,6 @@ public:
       }
       break;
     case kContextMenu: {
-      if (PromptBlocksCommand())
-        break;
       const int32 owner = m->GetInt32("pane", -1);
       if (!split->ActivateFiles(owner))
         break;

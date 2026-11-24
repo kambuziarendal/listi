@@ -42,12 +42,24 @@ void InlineAction::Close() {
     delete child;
   }
 }
+void InlineAction::FocusQuestion() {
+  if (!pending)
+    return;
+  if (auto *address = FindView("network address"))
+    address->MakeFocus(true);
+  else if (name)
+    name->MakeFocus(true);
+  else if (auto *cancel = FindView("Cancel"))
+    cancel->MakeFocus(true);
+}
 bool InlineAction::Ask(const char *text, const char *button,
                        const BMessage &accepted, const char *initial,
                        const char *alternative, const char *third,
                        const std::vector<std::string> &choices) {
-  if (pending)
+  if (pending) {
+    FocusQuestion();
     return false;
+  }
   if (beforeOpen)
     beforeOpen();
   ++serial;
@@ -111,14 +123,16 @@ bool InlineAction::Ask(const char *text, const char *button,
   if (name) {
     name->MakeFocus(true);
     name->TextView()->SelectAll();
-  } else if (alternative || third || options) {
+  } else {
     cancel->MakeFocus(true);
   }
   return true;
 }
 bool InlineAction::Connect(BMessenger pane) {
-  if (pending)
+  if (pending) {
+    FocusQuestion();
     return false;
+  }
   if (beforeOpen)
     beforeOpen();
   ++serial;

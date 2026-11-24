@@ -19,6 +19,7 @@ public:
            const char *initial = nullptr, const char *alternative = nullptr,
            const char *third = nullptr,
            const std::vector<std::string> &choices = {});
+  void FocusQuestion();
   bool Connect(BMessenger pane);
   void Close();
   void MessageReceived(BMessage *) override;
