@@ -631,6 +631,7 @@ public:
       WorkspaceLayout savedLayout = prefs;
       split->RememberWeights(savedLayout, split->QuickView());
       savedLayout.Archive(snapshot);
+      snapshot.AddBool("visibleButtons", prefs.ActionButtonsVisible());
       snapshot.AddInt32("source", split->Source());
       snapshot.AddString("alias", Alias().c_str());
       snapshot.AddRect("frame", Frame());
@@ -1000,8 +1001,12 @@ BWindow *CreateMainWindow(const Preferences &prefs, BMessenger service,
                           const Listi::SavedPlaces &places, bool placesWritable,
                           const Listi::SavedSearches &searches, bool searchesWritable, BrowserRequest request, BrowserOpener open) {
   auto layout = prefs;
-  if (request.workingSet)
+  if (request.workingSet) {
     layout.WorkspaceLayout::Load(*request.workingSet);
+    bool visible;
+    if (!layout.SinglePane() && request.workingSet->FindBool("visibleButtons", &visible) == B_OK)
+      (layout.IsSmidja() ? layout.smidjaButtons : layout.tviskiptButtons) = visible;
+  }
   if (request.detached) {
     layout.workspace = Workspace::einn;
     layout.singlePane = 0;
