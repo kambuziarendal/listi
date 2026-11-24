@@ -114,10 +114,23 @@ SavedNavigationController::EditSearch(const BMessage &edit, BMessenger author) {
     if (!searchesWritable)
       throw std::runtime_error(
           "Saved searches could not be loaded. Their file is preserved; changes are disabled.");
-    if (pendingSearch || edit.GetInt64("revision", -1) != searchesRevision)
+    const int64 revision = edit.GetInt64("revision", -1);
+    const bool modifies = edit.GetBool("replace", false) || edit.GetBool("remove", false);
+    if (pendingSearch || revision < 0 || revision > searchesRevision)
       throw std::runtime_error(
           "The saved-search list changed or is being written. Please try again.");
 
+    // A different search can commit between the editor posting and our
+    // receiving its message. Validate the affected entry, not the whole list.
+    if (modifies && revision != searchesRevision) {
+      BMessage expected, actual;
+      const auto *current = searches.Find(edit.GetString("name", ""));
+      if (current)
+        current->WriteTo(actual);
+      if (!current || edit.FindMessage("expectedSearch", &expected) != B_OK ||
+          !actual.HasSameData(expected, true, true))
+        throw std::runtime_error("This saved search changed in another window.");
+    }
     auto next = searches;
     auto item = SavedSearch::FromMessage(edit);
     std::string chosen;

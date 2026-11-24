@@ -128,7 +128,10 @@ int main() {
   const auto stored = SavedSearches::FromMessage(committed->message);
   assert(stored.Find("Retry") && !stored.Find("Notes"));
   assert(!state.FinishSearchSave(searchReply));
-  rejected = state.EditSearch(search, author); // editor still has revision 0
+  BMessage staleReplace(search);
+  staleReplace.AddBool("replace", true);
+  staleReplace.ReplaceString("name", "Retry");
+  rejected = state.EditSearch(staleReplace, author); // no expected entry from revision 0
   assert(rejected && rejected->message.HasString("error") && !state.Saving());
 
   // Only the requesting editor gets the rejection. The other search windows
@@ -138,8 +141,8 @@ int main() {
   auto *right = new SaveRequests;
   for (auto *editor : {standalone, left, right})
     editor->Run();
-  search.AddMessenger("searchEditor", BMessenger(right));
-  state.HandleSearchMessage(search, BMessenger(standalone),
+  staleReplace.AddMessenger("searchEditor", BMessenger(right));
+  state.HandleSearchMessage(staleReplace, BMessenger(standalone),
                             {BMessenger(left), BMessenger(right)});
   for (auto *editor : {right, standalone, left}) {
     auto update = editor->Next();
@@ -203,6 +206,11 @@ int main() {
   auto accepted = other.FinishSearchSave(own);
   assert(accepted && accepted->author == author && !other.Saving());
   assert(SavedSearches::FromMessage(accepted->message).Items().size() == 2);
+
+  BMessage unrelated(search);
+  unrelated.ReplaceString("name", "Independent");
+  assert(!other.EditSearch(unrelated, author)); // revision 0 predates both commits
+  assert(requests->Next().what == kSaveSearches);
 
   // A failure to enqueue must not keep quit blocked or publish an unsaved edit.
   SavedNavigationController disconnected(BMessenger{}, {}, true, {}, true);

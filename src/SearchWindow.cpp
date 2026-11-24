@@ -485,6 +485,13 @@ public:
       edit.AddInt64("revision", storeRevision);
       edit.AddBool("remove", m->what == kForget);
       edit.AddBool("replace", !chosen.empty() && chosen == name->Text());
+      if (!chosen.empty() && chosen == name->Text()) {
+        if (const auto *previous = saved.Find(chosen)) {
+          BMessage expected;
+          previous->WriteTo(expected);
+          edit.AddMessage("expectedSearch", &expected);
+        }
+      }
       if (m->what == kForget)
         edit.AddString("name", name->Text());
       else {
