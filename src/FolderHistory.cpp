@@ -15,6 +15,7 @@
 #include <cstring>
 #include <filesystem>
 #include <mutex>
+#include <set>
 #include <stdexcept>
 #include <vector>
 
@@ -284,6 +285,21 @@ void SaveNode(int fd, int parent, const std::string &name, dev_t device,
   }
 }
 
+// Use an attribute on the exclusively created inode, rather than an
+// auxiliary pathname that could be replaced before we remove it. Existing
+// snapshots may have any root attribute name, including the preferred one.
+std::string RestoreMarker(const BMessage &entry) {
+  const std::string prefix = "Listi:RestoreIncomplete";
+  std::set<std::string> names;
+  BMessage attr;
+  for (int32 i = 0; entry.FindMessage("attr", i, &attr) == B_OK; ++i)
+    names.insert(attr.GetString("name", ""));
+  auto name = prefix;
+  for (size_t i = 1; names.count(name); ++i)
+    name = prefix + "-" + std::to_string(i);
+  return name;
+}
+
 bool Leaf(const std::string &name) {
   return !name.empty() && name != "." && name != ".." &&
       name.find('/') == std::string::npos;
@@ -435,16 +451,33 @@ void HistoryStore::Restore(const std::string &point, const std::string &destinat
   state->store->Verify();
   parent->Verify();
   Check(mkdirat(parent->Descriptor(), leaf.c_str(), 0700) == 0, "Create new copy at " + target.string());
+  const auto marker = RestoreMarker(root);
   try {
     FD output(openat(parent->Descriptor(), leaf.c_str(),
                      O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC), target);
+    const auto identity = Stat(output.fd);
+    PinnedDirectory copy(target, identity.st_dev, identity.st_ino);
+    constexpr char incomplete[] = "Incomplete Listi restore. Do not use as a finished copy.";
+    Check(fs_write_attr(output.fd, marker.c_str(), B_STRING_TYPE, 0,
+                        incomplete, sizeof(incomplete)) == sizeof(incomplete),
+          "Mark incomplete copy");
+    copy.Flush();
+    parent->Flush();
+
     RestoreNode(output.fd, state->store->Descriptor(), root, cancel, 0);
     CheckCancel(cancel);
     state->store->Verify();
+    copy.Verify();
     parent->Flush();
+    // Do not check cancellation after this commit point. The restored bytes,
+    // metadata and parent directory were already flushed with the marker.
+    Check(fs_remove_attr(output.fd, marker.c_str()) == 0, "Finish restored copy");
+    if (fsync(output.fd) != 0)
+      throw std::runtime_error(std::string("Copy complete; completion marker durability not confirmed: ") + strerror(errno));
   } catch (const std::exception &e) {
     throw std::runtime_error(std::string(e.what()) +
-        " The new folder may contain an incomplete copy: " + target.string());
+        " Check the new folder for an incomplete copy: " + target.string() +
+        " (BFS attribute " + marker + ").");
   }
 }
 }

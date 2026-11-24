@@ -8,12 +8,27 @@
 #include <filesystem>
 #include <fstream>
 #include <atomic>
+#include <OS.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <fs_attr.h>
 #include <sys/stat.h>
 namespace fs=std::filesystem;
 using Listi::HistoryStore;
+namespace {
+std::atomic_bool *cancelAfterWrite = nullptr;
+}
+
+extern "C" ssize_t __real_write(int, const void *, size_t);
+extern "C" ssize_t __wrap_write(int fd, const void *bytes, size_t count) {
+  auto written = __real_write(fd, bytes, count);
+  if (cancelAfterWrite && written > 0) {
+    *cancelAfterWrite = true;
+    cancelAfterWrite = nullptr;
+  }
+  return written;
+}
+
 int main() {
   char path[] = "/boot/home/listi-history-tests-XXXXXX";
   assert(mkdtemp(path));
@@ -45,6 +60,7 @@ int main() {
   attr(source/"dir/note","BEOS:TYPE",B_MIME_STRING_TYPE,"text/plain",11);
   attr(source/"dir","Project",B_STRING_TYPE,"alpha",6);
   attr(source/"pointer","Status",B_STRING_TYPE,"link",5);
+  attr(source, "Listi:RestoreIncomplete", B_STRING_TYPE, "user data", 10);
   HistoryStore history(source,store);
   std::atomic_bool cancel(false);
   auto count = [&] {
@@ -110,7 +126,19 @@ int main() {
   checkAttr(base/"two/dir/note","Status",B_STRING_TYPE,"approved",9);
   std::cout << "PASS independent copies preserve BFS MIME, int32, raw bytes, strings, directory and symlink attributes" << std::endl;
   reject([&]{ history.Restore(first,base/"one",cancel); }, "existing destination not overwritten");
-  cancel=true;
+  cancelAfterWrite = &cancel;
+  reject([&]{ history.Restore(first,base/"partial",cancel); }, "canceled after a payload write");
+  assert(cancel && !cancelAfterWrite && count() == 5);
+  constexpr char incomplete[] = "Incomplete Listi restore. Do not use as a finished copy.";
+  checkAttr(base/"partial", "Listi:RestoreIncomplete-1", B_STRING_TYPE,
+            incomplete, sizeof(incomplete));
+  checkAttr(base/"one", "Listi:RestoreIncomplete", B_STRING_TYPE, "user data", 10);
+  {
+    const int fd = open((base/"one").c_str(), O_RDONLY);
+    attr_info marker{};
+    assert(fd >= 0 && fs_stat_attr(fd, "Listi:RestoreIncomplete-1", &marker) != 0);
+    close(fd);
+  }
   reject([&]{ history.Save(cancel); }, "canceled save");
   assert(count()==5);
   cancel=false;

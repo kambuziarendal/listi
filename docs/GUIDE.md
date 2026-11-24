@@ -667,6 +667,12 @@ Canceling a save before publication leaves existing points readable. An
 interrupted save can leave complete, unreferenced blobs (or private temporary
 files after a process crash); there is no removal or retention action.
 An interrupted restore can leave an incomplete **new** folder; Listi reports
-its name and never removes or overwrites an existing destination. When a
+its path and never removes or overwrites an existing destination. Inspect an
+interrupted folder's BFS attributes (for example, with
+`catattr Listi:RestoreIncomplete /path/to/copy`). Listi writes this marker
+before restoring any contents and clears it only after the copy has been
+flushed. If the point already has that attribute, Listi uses the first unused
+numeric suffix instead. After a failure, restore to another new path; do not
+use a marked copy. Use a destination parent that other processes do not edit. When a
 connected history folder is gone or replaced, close the history window and
 reopen it to explicitly connect again.
