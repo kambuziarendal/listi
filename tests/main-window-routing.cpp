@@ -130,8 +130,11 @@ static void CheckToolPlacement(BWindow *window) {
   }
   assert(toggle && fallback && toggle->IsEnabled() && toggle->IsMarked());
   assert(!bank->IsHidden(bank) && !fallback->IsEnabled());
-  BMessage prompt(kInlineNotice);
-  prompt.AddString("error", "Temporary question");
+  BMessage notice(kInlineNotice);
+  notice.AddString("error", "Non-blocking file error");
+  window->MessageReceived(&notice);
+  assert(!window->FindView("question") && !bank->IsHidden(bank));
+  BMessage prompt(kTabRename);
   window->MessageReceived(&prompt);
   assert(bank->IsHidden(bank) && !command->IsHidden(command));
   assert(!bottom->IsHidden(bottom) && toggle->IsMarked() && !fallback->IsEnabled());
