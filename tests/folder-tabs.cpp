@@ -7,8 +7,11 @@
 #include "Pane.h"
 #include "SavedPlaces.h"
 #include "SavedSearches.h"
+#include "TerminalPanel.h"
 #include <Application.h>
+#include <Button.h>
 #include <MenuBar.h>
+#include <TextView.h>
 #include <Window.h>
 #include <cstdlib>
 #include <filesystem>
@@ -42,6 +45,31 @@ void Ready(BWindow &window) {
     window.Unlock();
   } while (system_time() < until);
   Check(false, "file panes complete navigation in time");
+}
+
+template <typename Condition>
+void WaitFor(BWindow &window, Condition ready, const char *description) {
+  const auto until = system_time() + 8000000;
+  while (!ready()) {
+    if (system_time() >= until)
+      Check(false, description);
+    window.Unlock();
+    snooze(20000);
+    window.Lock();
+  }
+  Check(true, description);
+}
+
+std::string ReadText(const fs::path &path) {
+  std::ifstream input(path);
+  return {std::istreambuf_iterator<char>(input), {}};
+}
+
+bool Enter(TerminalPanel &terminal, const char *command) {
+  BMessage text(B_KEY_DOWN), enter(B_KEY_DOWN);
+  text.AddString("bytes", command);
+  enter.AddString("bytes", "\n");
+  return terminal.HandleKey(&text) && terminal.HandleKey(&enter);
 }
 
 void CheckManyTabs(BWindow &window, const fs::path &left, const fs::path &right) {
@@ -192,6 +220,24 @@ int main() {
         "working set restores both panels and active named tab with fresh identity");
   restored->Quit();
   window->Lock();
+  std::ofstream(c/"two") << "existing destination";
+  // Hold a real file operation at its conflict prompt, not a timing-sensitive
+  // large copy. The shell also waits until we send input after detaching.
+  Command(*window, kCopy);
+  auto *replace = dynamic_cast<BButton *>(window->FindView("Replace"));
+  Check(replace, "original window exposes copy conflict controls");
+  WaitFor(*window, [&] { return !replace->IsHidden(); },
+          "copy waits for a conflict decision before detaching");
+  Command(*window, Listi::kLeftCLI);
+  auto *terminal = dynamic_cast<TerminalPanel *>(window->FindView(TerminalName(0)));
+  Check(terminal && terminal->Active() && terminal->StartFolder() == b.string(),
+        "start docked CLI in the tab to detach");
+  const auto session = terminal->SessionId();
+  Check(Enter(*terminal, "token=live; printf ready > ../cli-ready; read answer; "
+                         "printf '%s:%s' \"$token\" \"$answer\" > ../cli-answer"),
+        "send command that waits for input in the original window");
+  WaitFor(*window, [&] { return ReadText(root/"cli-ready") == "ready"; },
+          "CLI command has started before detaching");
   Command(*window, kTabDetach);
   Ready(*window);
   Check(bar.Count() == 1 && bar.ActiveId() == first, "detach leaves original tab active");
@@ -213,8 +259,45 @@ int main() {
   Check(value.id == copy && value.alias == "Work" && value.state.location == b.string() &&
         moved.Files().IsEinn() && moved.Files().SelectedPath() == (b/"two").string(),
         "detached Einn retains original tab state");
-  window->Unlock();
+  auto *status = dynamic_cast<BTextView *>(moved.Files().FindView("status"));
+  Check(status && std::string(status->Text()) ==
+                      "CLI sessions and file operations stay in the original window.",
+        "detached window explains where the running work stayed");
+  auto *childCLI = dynamic_cast<TerminalPanel *>(detached->FindView(TerminalName(0)));
+  Check(childCLI && !childCLI->Active(), "detaching the folder does not clone a CLI");
+  for (auto workspace : {Workspace::tviskipt, Workspace::askr, Workspace::smidja,
+                         Workspace::einn}) {
+    BMessage change(kWorkspace);
+    change.AddInt32("workspace", static_cast<int32>(workspace));
+    detached->MessageReceived(&change);
+    Ready(*detached);
+    BMessage query(B_GET_PROPERTY), reply;
+    query.AddSpecifier("Workspace");
+    const BMessenger child(detached);
+    detached->Unlock();
+    const auto queried = child.SendMessage(&query, &reply, 1000000, 1000000);
+    detached->Lock();
+    Check(queried == B_OK && std::string(reply.GetString("result", "")) ==
+                                  WorkspaceName(workspace) &&
+          moved.FolderBar().ActiveId() == copy &&
+          moved.Files().SelectedPath() == (b/"two").string(),
+          "detached workspace switch preserves the tab and selection");
+  }
+  Command(*detached, kInlineCancel);
+  Check(!replace->IsHidden() && terminal->Active() && terminal->SessionId() == session &&
+        ReadText(c/"two") == "existing destination" && !fs::exists(root/"cli-answer"),
+        "cancelling in the detached window leaves the original queue and CLI waiting");
   detached->Unlock();
+  Check(replace->Invoke() == B_OK && Enter(*terminal, "answer"),
+        "continue the copy and CLI from their original window");
+  WaitFor(*window, [&] {
+    return ReadText(c/"two") == "another file" &&
+           ReadText(root/"cli-answer") == "live:answer" && replace->IsHidden();
+  }, "original copy and CLI complete with the chosen destination and input");
+  BMessage closeCLI(Listi::kCloseTerminal);
+  closeCLI.AddInt64("terminal placement", terminal->Placement());
+  window->MessageReceived(&closeCLI);
+  window->Unlock();
   auto until = system_time() + 5000000;
   while (!fs::exists(c/"one") && system_time() < until) snooze(15000);
   std::string bytes;

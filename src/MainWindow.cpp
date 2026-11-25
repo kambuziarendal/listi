@@ -141,6 +141,7 @@ class MainWindow : public Listi::WorkingWindow {
   std::vector<BMessage> historyPairs;
   bool readingConfig = false, refreshConfig = false, automaticEnabled = false;
   std::string titleLocation;
+  std::string detachedWorkNotice;
   std::array<std::string, 2> tabLocations, probedFolders;
   bool sessionLayout = false;
   std::optional<bool> wasEinn;
@@ -204,6 +205,11 @@ class MainWindow : public Listi::WorkingWindow {
     split->Focus();
   }
   void UpdateTransferTarget() {
+    // Wait for the initial folder read so its progress does not erase the notice.
+    if (!detachedWorkNotice.empty() && !panes[0]->IsScanning()) {
+      panes[0]->ShowStatus(detachedWorkNotice.c_str());
+      detachedWorkNotice.clear();
+    }
     for (int side = 0; side < 2; ++side) {
       const auto *pane = panes[side];
       bool known = false;
@@ -348,7 +354,17 @@ class MainWindow : public Listi::WorkingWindow {
         bar.Rename(message.GetString("name", ""));
       return true;
     case kTabDetach: {
-      if (openBrowser && openBrowser({{}, bar.Snapshot(), Frame().LeftTop() + BPoint(24, 24)}))
+      if (!openBrowser)
+        break;
+      BrowserRequest request{{}, bar.Snapshot(), Frame().LeftTop() + BPoint(24, 24)};
+      const bool fileWork = queue.Busy() || clipboard.Busy();
+      if (HasCLIs())
+        request.detachedWorkNotice = fileWork
+            ? "CLI sessions and file operations stay in the original window."
+            : "CLI sessions stay with the original window.";
+      else if (fileWork)
+        request.detachedWorkNotice = "File operations continue in the original window.";
+      if (openBrowser(std::move(request)))
         bar.AfterDetach();
       break;
     }
@@ -624,9 +640,10 @@ public:
       MoveTo(*request.position);
       MoveOnScreen();
     }
-    if (request.detached)
+    if (request.detached) {
       split->Panel(0).FolderBar().Adopt(std::move(*request.detached));
-    else if (!request.path.empty())
+      detachedWorkNotice = std::move(request.detachedWorkNotice);
+    } else if (!request.path.empty())
       panes[split->Source()]->Navigate(request.path.c_str());
   }
   ~MainWindow() override {

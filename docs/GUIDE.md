@@ -640,7 +640,7 @@ Click a tab name to switch to it, or click its **×** to close that tab without 
 
 While browsing files, use **Command+Option+T** for a new tab, **Command+Option+[** and **Command+Option+]** to cycle, and **Command+Option+W** to close a tab. Command+T and Command+Shift+T still open the terminal. The tab strip is for navigation, not a file-drop target: drop onto the file view of a real folder. Switching tabs does not redirect an already queued copy.
 
-**Window → Detach tab to Einn window** opens a compact single-pane window and moves the active tab, including its navigation history, filter, view and selection. If you detach the only tab, the original pane opens your home folder. The new window keeps its own queue and uses session-local layout preferences; its layout does not change the initial browser’s saved workspace. Closing the original window does not close a detached file window. Folder tabs last for the session and are not saved worksets.
+**Window → Detach tab to Einn window** opens a compact single-pane window and moves the active tab, including its navigation history, filter, view and selection. If you detach the only tab, the original pane opens your home folder. The new window keeps its own queue and uses session-local layout preferences; its layout does not change the initial browser’s saved workspace. A running copy and any docked or floating CLI sessions belong to the original window; detaching a folder tab does not move or restart them. You can switch the detached window from Einn to any other workspace. Closing the original window does not close a detached file window. Folder tabs last for the session and are not saved worksets.
 
 ### Independent file windows
 
