@@ -54,6 +54,7 @@ void Preferences::Load(const BMessage &m) {
   }
   alwaysFolderTabs = m.GetBool("alwaysFolderTabs", false);
   separateWindows = m.GetBool("separateWindows", true);
+  operationsInWindow = m.GetBool("operationsInWindow", false);
   icons = m.GetBool("icons", true);
   size = m.GetBool("size", true);
   date = m.GetBool("date", true);
@@ -124,6 +125,8 @@ BMessage Preferences::SharedChanges(const Preferences *before) const {
     m.AddInt32("folderOpening", folderOpening);
   if (!before || separateWindows != before->separateWindows)
     m.AddBool("separateWindows", separateWindows);
+  if (!before || operationsInWindow != before->operationsInWindow)
+    m.AddBool("operationsInWindow", operationsInWindow);
   if (!before || alwaysFolderTabs != before->alwaysFolderTabs)
     m.AddBool("alwaysFolderTabs", alwaysFolderTabs);
   if (!before || icons != before->icons)
@@ -158,6 +161,7 @@ void Preferences::ApplyShared(const BMessage &m) {
   if (opening >= NewWindow && opening <= Ask)
     folderOpening = FolderOpening(opening);
   separateWindows = m.GetBool("separateWindows", separateWindows);
+  operationsInWindow = m.GetBool("operationsInWindow", operationsInWindow);
   alwaysFolderTabs = m.GetBool("alwaysFolderTabs", alwaysFolderTabs);
   icons = m.GetBool("icons", icons);
   size = m.GetBool("size", size);
@@ -190,7 +194,7 @@ class PreferencesWindow : public BWindow {
   BPopUpMenu *categories;
   BPopUpMenu *defaultModes[sizeof(kSettingsWorkspaces) /
                            sizeof(kSettingsWorkspaces[0])];
-  BPopUpMenu *folderOpening;
+  BPopUpMenu *folderOpening, *operationsPresentation;
   BCheckBox *icons, *size, *date, *buttons, *command, *separateWindows;
   BTextControl *family, *fontSize, *folders, *files, *links, *editor, *terminal;
 
@@ -322,11 +326,17 @@ public:
         .AddGlue();
     AddPage(appearance);
 
+    operationsPresentation = new BPopUpMenu("File operations");
+    operationsPresentation->AddItem(new BMenuItem("Integrated", nullptr));
+    operationsPresentation->AddItem(new BMenuItem("Separate window", nullptr));
+    operationsPresentation->ItemAt(p.operationsInWindow ? 1 : 0)->SetMarked(true);
     auto workflow = new BGroupView("Workflow", B_VERTICAL);
     BLayoutBuilder::Group<>(workflow)
         .SetInsets(B_USE_WINDOW_SPACING)
         .Add(buttons)
         .Add(command)
+        .Add(new BMenuField("operations presentation", "File operations:",
+                            operationsPresentation))
         .AddGlue();
     AddPage(workflow);
 
@@ -401,6 +411,7 @@ public:
     const Preferences before = prefs;
     prefs.folderOpening = Preferences::FolderOpening(folderOpening->IndexOf(folderOpening->FindMarked()));
     prefs.separateWindows = separateWindows->Value();
+    prefs.operationsInWindow = operationsPresentation->ItemAt(1)->IsMarked();
     prefs.font.SetFamilyAndStyle(family->Text(), nullptr);
     prefs.font.SetSize(n);
     prefs.icons = icons->Value();

@@ -101,6 +101,16 @@ int main(){
    }
    return matches == 1;
  };
+ window->Lock();
+ auto *operationsView = window->FindView("operations");
+ window->queue->SetSeparateWindow(true);
+ auto *popup = operationsView ? operationsView->Window() : nullptr;
+ if (!popup || popup == window || !popup->Lock())
+   return 2;
+ check(popup->IsHidden() && !window->FindView("operations"),
+       "separate presentation starts hidden and leaves no integrated duplicate");
+ popup->Unlock();
+ window->Unlock();
  failedWakes=100;
  std::vector<int64> ids;
  for (int i = 0; i < 20; ++i) {
@@ -117,12 +127,28 @@ int main(){
    successful &= ids[i] > 0 && finished(ids[i], 1000 + i, true, false, false);
  check(successful && std::set<int64>(ids.begin(), ids.end()).size() == ids.size(),
        "enqueue IDs remain unique and independent of tags at completion");
- auto *compactTitle = dynamic_cast<BStringView *>(window->FindView("operation"));
- auto *compactPath = dynamic_cast<BStringView *>(window->FindView("current-file"));
- auto *compactSummary = dynamic_cast<BStringView *>(window->FindView("summary"));
+ if (!popup->Lock())
+   return 2;
+ auto *compactTitle = dynamic_cast<BStringView *>(popup->FindView("operation"));
+ auto *compactPath = dynamic_cast<BStringView *>(popup->FindView("current-file"));
+ auto *compactSummary = dynamic_cast<BStringView *>(popup->FindView("summary"));
  check(compactTitle && std::string(compactTitle->Text()).find("Copied item19 to ") == 0 &&
            compactPath && compactPath->IsHidden() && compactSummary && compactSummary->IsHidden(),
        "ordinary success is one concise line with the destination");
+ check(!popup->IsHidden() && !window->FindView("operations"),
+       "operation activity opens the separate presentation automatically");
+ BMessage closePopup(B_QUIT_REQUESTED);
+ popup->DispatchMessage(&closePopup, popup);
+ check(popup->IsHidden(), "closing the popup hides it without destroying reports");
+ popup->Unlock();
+ window->queue->Show();
+ popup->Lock();
+ check(!popup->IsHidden() && popup->FindView("operation") == compactTitle,
+       "Operations reopens the same report after closing the popup");
+ popup->Unlock();
+ window->queue->SetSeparateWindow(false);
+ check(window->FindView("operations") == operationsView,
+       "integrated presentation restores the same view to its browser");
  window->Unlock();
  bool intact=true;for(int i=0;i<20;++i)intact&=bytes(root+"/out/item"+std::to_string(i))==std::string(32768,char('A'+i));check(intact,"all 20 destinations contain exact payloads");
 
@@ -178,6 +204,27 @@ int main(){
            oldCancelAll.GetInt64("operation", 0) == active &&
            conflictText.find("Destination exists") != std::string::npos,
        "active conflict and native controls carry the enqueue ID");
+ window->queue->SetSeparateWindow(true);
+ popup = operationsView->Window();
+ if (!popup || popup == window || !popup->Lock())
+   return 2;
+ popup->DispatchMessage(&closePopup, popup);
+ auto *skip = dynamic_cast<BButton *>(popup->FindView("Skip"));
+ BLooper *recipient = nullptr;
+ if (skip)
+   skip->Messenger().Target(&recipient);
+ check(!popup->IsHidden() && window->queue->Busy() && skip &&
+           recipient == popup &&
+           skip->Message()->GetInt64("request", 0) == oldConflict.GetInt64("request", -1),
+       "switching a live conflict preserves its visible choices and rebinds controls");
+ popup->Unlock();
+ window->queue->SetSeparateWindow(false);
+ recipient = nullptr;
+ if (skip)
+   skip->Messenger().Target(&recipient);
+ check(!summary->IsHidden() && recipient == window &&
+           std::string(summary->Text()) == conflictText,
+       "returning a live conflict to the browser preserves the decision");
  window->Unlock();
 
  auto removed = archiveJob("targeted.zip", 102);
@@ -236,9 +283,9 @@ int main(){
  check(pause->IsEnabled() && cancelJob->IsEnabled() &&
            conflictText == summary->Text(),
        "pending cancellation leaves the displayed active conflict alone");
- window->queue->View()->MessageReceived(&oldPause);
+ window->FindView("operations")->MessageReceived(&oldPause);
  check(std::string(pause->Label()) == "Resume", "active job can be paused");
- window->queue->View()->MessageReceived(&oldCancel);
+ window->FindView("operations")->MessageReceived(&oldCancel);
  check(!window->queue->CancelOperation(active) &&
            !window->queue->Answer(Decision::Replace,
                               oldConflict.GetInt64("request", 0)),
@@ -264,9 +311,9 @@ int main(){
  stale.AddString("title", "STALE JOB");
  window->queue->PresentEvent(stale);
  window->queue->PresentEvent(oldConflict);
- window->queue->View()->MessageReceived(&oldPause);
- window->queue->View()->MessageReceived(&oldCancel);
- window->queue->View()->MessageReceived(&oldCancelAll);
+ window->FindView("operations")->MessageReceived(&oldPause);
+ window->FindView("operations")->MessageReceived(&oldCancel);
+ window->FindView("operations")->MessageReceived(&oldCancelAll);
  check(cancelJob->Message()->GetInt64("operation", 0) == batchActive &&
            pause->IsEnabled() && std::string(pause->Label()) == "Pause" &&
            conflictText == summary->Text() &&
@@ -290,8 +337,8 @@ int main(){
        "transferring all estimated bytes does not imply the job committed");
  BMessage pauseBatch(*pause->Message());
  BMessage cancelBatch(*cancelAll->Message());
- window->queue->View()->MessageReceived(&pauseBatch);
- window->queue->View()->MessageReceived(&cancelBatch);
+ window->FindView("operations")->MessageReceived(&pauseBatch);
+ window->FindView("operations")->MessageReceived(&cancelBatch);
  check(!window->queue->Cancel(batchActive), "Cancel all rejects a repeat");
  window->Unlock();
  check(wait([&] {
@@ -332,16 +379,16 @@ int main(){
  auto *dismiss = notice ? dynamic_cast<BButton *>(notice->NextSibling()) : nullptr;
  BMessage error(kFileErrorSelected);
  error.AddString("error", "Unread transfer error");
- window->queue->View()->MessageReceived(&error);
+ window->FindView("operations")->MessageReceived(&error);
  window->queue->PresentEvent(retained);
  check(notice && !notice->Parent()->IsHidden() &&
            std::string(notice->Text()) == "Error: Unread transfer error (+1)" && dismiss,
        "later completion keeps unread transfer error visible");
  if (dismiss) {
-   window->queue->View()->MessageReceived(dismiss->Message());
+   window->FindView("operations")->MessageReceived(dismiss->Message());
    check(std::string(notice->Text()).find(destination) != std::string::npos,
          "next unread notice identifies the retained copy");
-   window->queue->View()->MessageReceived(dismiss->Message());
+   window->FindView("operations")->MessageReceived(dismiss->Message());
    check(notice && notice->Parent()->IsHidden(), "acknowledgment hides read error");
  }
  const std::string history = historyView ? historyView->Text() : "";
@@ -464,7 +511,7 @@ int main(){
        "a new job cannot be queued against the blocked volume");
 
  window->Lock();
- auto *progressView = window->queue->View();
+ auto *progressView = window->FindView("operations");
  BMessage dismissMessage('jder');
  for (int i = 0; i < 24; ++i)
    progressView->MessageReceived(&dismissMessage);

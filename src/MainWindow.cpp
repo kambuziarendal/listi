@@ -166,6 +166,7 @@ class MainWindow : public Listi::WorkingWindow {
   std::unique_ptr<Listi::TerminalDock> terminalDock;
   BMessenger cliQuitAlert;
   bool closeCLIOnQuit = false;
+  bool operationsWindowSuspended = false;
 
   void PublishPlaces() {
     for (auto pane : panes)
@@ -272,6 +273,7 @@ class MainWindow : public Listi::WorkingWindow {
     toolbar.Arrange();
     split->ApplyWorkspace();
     queue.SetCompact(prefs.SinglePane());
+    queue.SetSeparateWindow(prefs.operationsInWindow && !operationsWindowSuspended);
     if (switchSize) {
       const auto saved = einn ? einnFrame : wideFrame;
       if (saved.IsValid()) {
@@ -580,6 +582,8 @@ class MainWindow : public Listi::WorkingWindow {
       BMessage changes = prefs.SharedChanges(&before);
       changes.RemoveName("separateWindows");
       changes.RemoveName("alwaysFolderTabs");
+      changes.RemoveName("operationsInWindow");
+      queue.SetSeparateWindow(prefs.operationsInWindow && !operationsWindowSuspended);
       if (!changes.IsEmpty())
         Apply();
       else if (before.alwaysFolderTabs != prefs.alwaysFolderTabs)
@@ -758,6 +762,11 @@ public:
       return false;
     }
     return true;
+  }
+
+  void SuspendOperationsWindow(bool suspend) {
+    operationsWindowSuspended = suspend;
+    queue.SetSeparateWindow(prefs.operationsInWindow && !operationsWindowSuspended);
   }
 
   bool HasCLIs() const { return terminalDock->HasSessions(); }
@@ -1156,6 +1165,11 @@ public:
       break;
     case kQueueWake:
       for (auto &done : queue.TakeEvents()) {
+        if (done.what == kOperationErrorDismissed) {
+          for (auto *p : panes)
+            p->MessageReceived(&done);
+          continue;
+        }
         queue.PresentEvent(done);
         if (done.what != kJobDone)
           continue;
@@ -1268,4 +1282,9 @@ bool BrowserHasCLIs(BWindow *window) {
 bool CloseBrowserCLIs(BWindow *window) {
   auto *browser = dynamic_cast<MainWindow *>(window);
   return !browser || browser->CloseCLIs();
+}
+
+void SuspendBrowserOperationsWindow(BWindow *window, bool suspend) {
+  if (auto *browser = dynamic_cast<MainWindow *>(window))
+    browser->SuspendOperationsWindow(suspend);
 }

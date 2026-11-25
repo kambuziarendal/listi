@@ -8,6 +8,7 @@
 #include <mutex>
 #include <thread>
 class BView;
+class BGroupView;
 class BMessageRunner;
 class OperationQueue {
 public:
@@ -17,6 +18,7 @@ public:
   bool CanUndoBulkRename();
   int64 EnqueueBulkRenameUndo();
   void SetCompact(bool);
+  void SetSeparateWindow(bool);
   void Show();
   void Toggle();
   void Collapse();
@@ -45,6 +47,8 @@ public:
   bool Answer(Listi::Decision, int64 request);
 
 private:
+  friend class ProgressView;
+  void NotifyErrorDismissed(int64 operation, const char *path);
   struct QueuedJob {
     int64 operation = 0;
     Listi::Job job;
@@ -58,7 +62,10 @@ private:
   bool Proceed();
   Listi::Decision Ask(const std::string &, const Listi::CopyConflict * = nullptr,
                       const std::string *fatDestination = nullptr);
+  BGroupView *dock;
   class ProgressView *view;
+  class OperationWindow *popup = nullptr;
+  bool compact = false;
   BMessenger main, display;
   std::thread thread;
   std::mutex mutex;

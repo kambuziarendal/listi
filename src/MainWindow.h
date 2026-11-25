@@ -30,6 +30,7 @@ bool CheckSharedQuitBlockers();
 bool CheckBrowserQuitBlockers(BWindow *);
 bool BrowserHasCLIs(BWindow *);
 bool CloseBrowserCLIs(BWindow *);
+void SuspendBrowserOperationsWindow(BWindow *, bool suspend);
 void ShowQuitBlocker(const char *text);
 BMessenger ConfirmClosingCLIs(BMessenger recipient, uint32 command, bool wholeApp);
 BWindow *CreateMainWindow(const Preferences &, BMessenger service,

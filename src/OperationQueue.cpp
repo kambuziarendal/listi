@@ -7,6 +7,7 @@
 #include "VirtualFile.h"
 #include "ViewVisibility.h"
 #include <Application.h>
+#include <Autolock.h>
 #include <Button.h>
 #include <CheckBox.h>
 #include <MessageRunner.h>
@@ -20,6 +21,7 @@
 #include <ctime>
 #include <cstring>
 #include <limits>
+#include <optional>
 #include <set>
 #include <sys/stat.h>
 namespace {
@@ -294,6 +296,10 @@ public:
     UpdateVisibility();
   }
   void Toggle() { Expand(!expanded); }
+  bool WaitingForDecision() const { return choicesVisible; }
+  bool HasActivity() const {
+    return owner->Busy() || lastStarted || expanded || !unreadErrors.empty();
+  }
   void Dismiss() {
     if (choicesVisible) {
       owner->Answer(Listi::Decision::Abort, conflictRequest);
@@ -337,11 +343,7 @@ public:
                                       (path.empty() || error.path == path);
                              }),
               unreadErrors.end());
-          BMessage dismissed(kOperationErrorDismissed);
-          dismissed.AddInt64("operation", operation);
-          dismissed.AddString("path", path.c_str());
-          if (Window())
-            Window()->PostMessage(&dismissed);
+          owner->NotifyErrorDismissed(operation, path.c_str());
         }
       }
       ShowNextError();
@@ -547,12 +549,70 @@ public:
     UpdateVisibility();
   }
 };
-OperationQueue::OperationQueue(BMessenger m) : main(m) {
-  view = new ProgressView(this);
+namespace {
+// Byte updates and selection errors keep targeting the owner's looper even
+// while the live controls and their reports are moved to another window.
+class OperationsDock : public BGroupView {
+public:
+  explicit OperationsDock(OperationQueue &queue)
+      : BGroupView("operations dock", B_VERTICAL, 0), queue(queue) {}
+
+  void MessageReceived(BMessage *message) override {
+    if (message->what == kJobUpdate || message->what == kFileErrorSelected)
+      queue.PresentEvent(*message);
+    else
+      BGroupView::MessageReceived(message);
+  }
+
+private:
+  OperationQueue &queue;
+};
+} // namespace
+
+class OperationWindow : public BWindow {
+public:
+  OperationWindow(BWindow *owner, ProgressView *view)
+      : BWindow(BRect(0, 0, 775, 285), "Listi operations", B_TITLED_WINDOW_LOOK,
+                B_FLOATING_SUBSET_WINDOW_FEEL,
+                B_NOT_ZOOMABLE | B_NOT_MINIMIZABLE | B_CLOSE_ON_ESCAPE |
+                    B_AUTO_UPDATE_SIZE_LIMITS),
+        view(view) {
+    AddToSubset(owner);
+    BLayoutBuilder::Group<>(this, B_VERTICAL, 0).Add(view).AddGlue();
+    GetLayout()->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
+    CenterIn(owner->Frame());
+    MoveOnScreen();
+    AddShortcut('W', B_COMMAND_KEY, new BMessage(B_QUIT_REQUESTED));
+  }
+
+  void DispatchMessage(BMessage *message, BHandler *target) override {
+    // Application shutdown calls QuitRequested directly and must not be
+    // vetoed by the behavior of the title-bar close button.
+    if (message->what == B_QUIT_REQUESTED && target == this) {
+      HidePresentation();
+      return;
+    }
+    BWindow::DispatchMessage(message, target);
+  }
+
+  void HidePresentation() {
+    // Closing the presentation never cancels work or loses its reports;
+    // keep a decision visible until it is explicitly answered.
+    if (!view->WaitingForDecision() && !IsHidden())
+      Hide();
+  }
+
+private:
+  ProgressView *view;
+};
+
+OperationQueue::OperationQueue(BMessenger m)
+    : dock(new OperationsDock(*this)), view(new ProgressView(this)), main(m) {
+  dock->GroupLayout()->AddView(view);
 }
-BView *OperationQueue::View() { return view; }
+BView *OperationQueue::View() { return dock; }
 void OperationQueue::Start() {
-  display = BMessenger(view);
+  display = BMessenger(dock);
   BMessage poll(kQueueWake);
   eventTimer.reset(new BMessageRunner(main, &poll, 250000));
   if (eventTimer->InitCheck() != B_OK)
@@ -576,11 +636,67 @@ OperationQueue::~OperationQueue() {
       Listi::DiscardArchiveCreationPassword(queued.job.archivePasswordToken);
   if (thread.joinable())
     thread.join();
+  if (popup && popup->Lock())
+    popup->Quit();
 }
-void OperationQueue::SetCompact(bool value) { view->SetCompact(value); }
-void OperationQueue::Show() { view->Expand(true); }
-void OperationQueue::Toggle() { view->Toggle(); }
-void OperationQueue::Collapse() { view->Dismiss(); }
+void OperationQueue::SetCompact(bool value) {
+  compact = value;
+  if (!popup)
+    view->SetCompact(value);
+}
+void OperationQueue::SetSeparateWindow(bool value) {
+  if (value == (popup != nullptr))
+    return;
+  if (value) {
+    const bool show = view->HasActivity();
+    view->RemoveSelf();
+    dock->Hide();
+    view->SetCompact(false);
+    popup = new OperationWindow(dock->Window(), view);
+    if (show) {
+      view->Expand(true);
+      popup->Show();
+    } else {
+      popup->Run();
+    }
+    return;
+  }
+
+  if (popup->Lock()) {
+    view->RemoveSelf();
+    popup->Quit();
+    popup = nullptr;
+    dock->GroupLayout()->AddView(view);
+    dock->Show();
+    view->SetCompact(compact);
+  }
+}
+void OperationQueue::Show() {
+  std::optional<BAutolock> lock;
+  if (popup && !lock.emplace(popup).IsLocked())
+    return;
+  view->Expand(true);
+  if (popup) {
+    if (popup->IsHidden())
+      popup->Show();
+    popup->Activate();
+  }
+}
+void OperationQueue::Toggle() {
+  if (popup)
+    Show();
+  else
+    view->Toggle();
+}
+void OperationQueue::Collapse() {
+  if (!popup) {
+    view->Dismiss();
+    return;
+  }
+  BAutolock lock(popup);
+  if (lock.IsLocked())
+    popup->HidePresentation();
+}
 void OperationQueue::ErrorInfo(const char *text, int64 operation, const char *path) {
   BMessage error(kFileErrorSelected);
   error.AddString("error", text);
@@ -589,7 +705,10 @@ void OperationQueue::ErrorInfo(const char *text, int64 operation, const char *pa
   display.SendMessage(&error);
 }
 bool OperationQueue::ErrorDismissed(int64 operation, const char *path) const {
-  return view->ErrorDismissed(operation, path);
+  if (!popup)
+    return view->ErrorDismissed(operation, path);
+  BAutolock lock(popup);
+  return lock.IsLocked() && view->ErrorDismissed(operation, path);
 }
 int64 OperationQueue::Enqueue(const Listi::Job &j) {
   try {
@@ -768,9 +887,26 @@ std::vector<BMessage> OperationQueue::TakeEvents() {
   out.swap(events);
   return out;
 }
-void OperationQueue::PresentEvent(BMessage &done) {
-  // Called on the view's owning window thread, never by the worker.
-  view->MessageReceived(&done);
+void OperationQueue::PresentEvent(BMessage &event) {
+  // The browser receives all updates. In separate mode the popup looper
+  // also needs to be locked before touching its controls or their state.
+  std::optional<BAutolock> lock;
+  if (popup && !lock.emplace(popup).IsLocked())
+    return;
+  view->MessageReceived(&event);
+  if (popup && popup->IsHidden() &&
+      (event.what == kJobAccepted || event.what == kConflict ||
+       event.what == kJobDone || event.what == kFileErrorSelected ||
+       (event.what == kJobUpdate && event.GetBool("start", false)))) {
+    view->Expand(true);
+    popup->Show();
+  }
+}
+void OperationQueue::NotifyErrorDismissed(int64 operation, const char *path) {
+  BMessage dismissed(kOperationErrorDismissed);
+  dismissed.AddInt64("operation", operation);
+  dismissed.AddString("path", path);
+  Publish(dismissed);
 }
 bool OperationQueue::Answer(Listi::Decision d, int64 request) {
   {

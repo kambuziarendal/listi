@@ -137,7 +137,7 @@ Modified**, each ascending or descending. in the ordinary local Details view. Re
   terminal, starting in the active local folder. For example, `pwd` prints
   that folder’s path. The shell stays open after the command finishes.
   Showing the field does not start a shell or run anything.
-- **Operations:** reopen the progress window after hiding it; pause/resume,
+- **Operations:** file jobs appear at the bottom of the browser by default. To make progress, errors and conflict prompts easier to see, choose the separate window in Settings. The same job controls are available in either location: pause/resume,
   cancel and choose Replace/Skip/Abort when conflicts occur. Replace and Skip
   apply to just one collision unless you explicitly tick the repeat option. For a local copy
   between regular files, **Keep both** preserves the original and gives the

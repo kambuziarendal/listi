@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.38.0-32 (private test candidate)
+
+- Choose whether file operation progress, errors and decisions appear in the browser or in a separate window. Existing settings keep the integrated view.
+
 ## 0.38.0-31 (private USB test candidate)
 
 - After a removable disk reports an interrupted transfer, Listi blocks further access to the affected location across its windows. Switch to a local folder to continue. Safely reconnect and mount the disk before restarting Listi to use it again.

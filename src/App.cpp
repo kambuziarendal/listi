@@ -247,7 +247,27 @@ public:
       if (!closed)
         return false;
     }
-    if (!BApplication::QuitRequested()) {
+    // Haiku can close independently registered windows in either order.
+    // Return each popup's live view to its owner before the native quit loop.
+    const auto suspendOperations = [this](bool suspend) {
+      bool all = true;
+      for (const auto &entry : browsers) {
+        const auto &target = entry.second;
+        if (!target.IsValid())
+          continue;
+        if (target.LockTargetWithTimeout(500000) != B_OK) {
+          all = false;
+          continue;
+        }
+        BLooper *looper = nullptr;
+        target.Target(&looper);
+        SuspendBrowserOperationsWindow(static_cast<BWindow *>(looper), suspend);
+        looper->Unlock();
+      }
+      return all;
+    };
+    if (!suspendOperations(true) || !BApplication::QuitRequested()) {
+      suspendOperations(false);
       ShowQuitBlocker("A Listi window is not ready to close. Check open windows or wait for their work to finish, then try again.");
       return false;
     }
