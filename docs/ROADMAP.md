@@ -139,9 +139,6 @@ See the [workflow guide](GUIDE.md) for the controls and limitations.
 - Investigate Tracker add-on discovery, MIME matching and invocation from a
   non-Tracker host on Haiku, using a frozen selection. Prefer proven native
   compatibility to a new plugin API; defer execution until that contract works.
-- Extend folder comparison into a reviewable one-way sync plan before two-way
-  or remote writes. Distinguish new, changed and equal entries; absence alone
-  cannot distinguish a deletion from a new file without prior sync state.
 - Consider per-transfer network rate limits after measuring contention.
   After rename undo is proven, evaluate undo for creating a still-empty folder
   or restoring an unchanged Trash entry; do not promise general undo.
@@ -162,10 +159,49 @@ See the [workflow guide](GUIDE.md) for the controls and limitations.
 - **Make releases easier to follow and report against.** Maintain the [changelog](../CHANGELOG.md) with user-visible changes and compatibility notes; add SECURITY.md
   once a monitored private reporting route is confirmed. Keep reproduction
   instructions in the existing verification guide.
-- **Review the duplicate-finder prototype rather than importing it wholesale.**
-  Gate integration on native tests for changed files, hard links, unreadable
-  inputs and cancellation, followed by a read-only group-review flow. The
-  existing Duplicate command must still mean “make a copy.”
+## After beta1: candidates for prioritisation
+
+These seven ideas are for discussion after beta1 ships. They do not change the
+beta1 plan or its order. Until then they are documentation only: no
+implementation, prototypes, tests or preparatory refactoring. Consider the copy
+plan and BFS batch actions first; none of the seven is a release commitment.
+
+1. **Turn folder comparison into a copy plan.** Choose the copy direction, see
+   new, changed and identical files, inspect conflicts and select individual
+   entries. Show estimated space for the selection before sending it to the job
+   queue. The first version would recheck changed sources and copy only approved
+   entries. A comparison is not permission to write. Consider deletion or
+   mirroring separately: absence alone does not identify a deletion.
+2. **Apply BFS attributes to search results.** Preview the existing and proposed
+   typed values on selected hits across folders before applying a batch edit.
+   For example, tag selected photos with a project attribute, then open a saved
+   live query showing all photos with that tag.
+3. **Resume a Working Set.** Extend today's saved windows, tabs and layouts to
+   restore open tabs, the active panel, sort order, selected file and the
+   Smiðja terminal's working directory. Open the available parts even if a path
+   is missing: identify a missing folder and offer to locate it, leave a missing
+   file unselected, and show any fallback terminal directory. Do not recreate
+   missing files or replay shell commands or file operations.
+4. **Follow up on past operations.** Keep completed and interrupted jobs available
+   after restart. Distinguish what finished from what failed, and show any
+   recovery paths. Let the user prepare a new job from failed entries, with
+   source and destination visible for review before running it. A journal is
+   neither a backup nor an automatic retry or undo.
+5. **Compare folder history with the present.** Compare a saved folder version
+   with the current folder. In the Inspector, show a side-by-side text diff or
+   old and current image previews. Restore only selected files as new copies,
+   without overwriting current files. Comparison need not imply editing or
+   merging, and unsupported formats should be identified.
+6. **Find an action from the keyboard.** One shortcut opens a palette for
+   actions, folders and Working Sets. Use the active panel's context to offer
+   relevant choices.
+7. **Review duplicates in Flat View.** Search explicitly chosen locations,
+   group candidates by size and confirm identical contents with SHA-256. Show
+   each location and any differences in BFS attributes before the user chooses
+   which copies to keep. Review the existing prototype rather than importing it
+   wholesale; account for hard links, unreadable or changing files and
+   cancellation. Finding a match must never delete a file automatically.
+   The existing Duplicate command still means “make a copy.”
 
 ## Feature directions and current foundations
 
@@ -173,28 +209,22 @@ In this historical comparison, “Available now” means included in the 0.35.0 
 
 | Direction | Available now | Planned or exploratory work |
 |---|---|---|
-| Duplicate finder | SHA-256 folder comparison; Duplicate creates another copy | Search one or more chosen folders for duplicate contents and review groups |
+| Duplicate finder | SHA-256 folder comparison; Duplicate creates another copy | Review verified duplicate groups in Flat View after beta1 |
 | Bulk rename | Local preview, exact row overrides, swaps, collision checks and guarded undo | Broader rename transformations |
 | Miller columns and adaptive views | Four presets, optional Miller columns and opt-in compact buttons | Automatic file-view changes remain exploratory |
-| Directory synchronisation | Read-only recursive size/SHA-256 comparison | Previewed, conflict-aware one-way or two-way synchronisation |
+| Directory synchronisation | Read-only recursive size/SHA-256 comparison | Start with a reviewed one-way copy plan after beta1 |
 | Clipboard contents to a new file | Panel Paste accepts file references; pasting text or an image creates a new file without replacement | Explore additional clipboard formats when useful |
 | Rich built-in inspectors | Quick view, standalone viewer, native text editor, zoom/pan, offline JPEG EXIF and optional GPS display | Broader metadata and richer support for other formats |
-| Copy queues and pause | Per-job results, pause/resume and targeted cancellation | Persistent history is not implemented |
+| Copy queues and pause | Per-job results, pause/resume and targeted cancellation | A persistent operations journal is an after-beta1 candidate |
 | Automatic rules and drop folders | Manual file actions, search filters and live BFS queries | Opt-in sorting rules and configured drop targets for extract/rename/move workflows |
 | Colour coding and tags | Configurable file/folder/link colours and typed BFS attribute editing | Dedicated per-item labels, tag editing/filtering and optional colour rules |
-| Saved project sessions | Named layout profiles, four presets, saved places and folder view modes | Named sets of open locations, future tabs/cards, views, sorting and layout |
+| Saved project sessions | Named layout profiles, four presets, saved places and folder view modes | Extend Working Sets with session restoration after beta1 |
 | Git status in file lists | No built-in Git status display | Optional status badges or columns without blocking browsing |
-| Built-in text/file diff | Read-only folder comparison by size or SHA-256 | Side-by-side text differences and file-level comparison tools |
+| Built-in text/file diff | Read-only folder comparison by size or SHA-256 | Compare a saved version with current files after beta1 |
 
 ## More depth without more friction
 
-### Find duplicates and work with selections
-
-A duplicate finder should search explicitly chosen locations, narrow candidates
-by size, then verify content rather than equating a filename or size match with a
-duplicate. Show groups, origins and the reason for a match. Handle unreadable or
-changing files, links and cancellation honestly. Keep review separate from any
-cleanup action; finding a duplicate must never delete it automatically.
+### Work with selections
 
 Listi previews local bulk renames with search/replace,
 numbering, prefix/suffix, collision checks and guarded execution. Configurable
@@ -218,19 +248,6 @@ JPEG camera details and a separate, offline GPS display. Text editing is an
 explicit action on complete local files with guarded saves. Future format
 support should preserve those boundaries and distinguish unsupported metadata
 from a missing value. See [Inspect and edit a file](GUIDE.md#inspect-and-edit-a-file).
-
-Built-in text/file diff should complement existing folder comparison with
-readable side-by-side differences. Comparison and editing/merging are separate
-capabilities; support should be labelled rather than implying every document or
-binary format can be meaningfully diffed.
-
-### Synchronise with a plan, not a surprise
-
-Directory synchronisation should start with a proposed action list: direction,
-new or changed entries, and conflicts. Start with one-way copy/update and no
-automatic deletion. Recheck changed sources and let the user review before
-writing. Do not treat a successful folder comparison as permission to synchronise
-or delete. This follows the stronger job-result and conflict model.
 
 ### Turn repeated chores into opt-in workflows
 
@@ -306,8 +323,8 @@ WAN condition.
 
 ## Longer-term possibilities
 
-- **Conflict-aware recovery:** limited undo and a durable journal need a defined
-  scope. A job log is not a backup; recovery must not overwrite newer data.
+- **Conflict-aware recovery:** consider limited undo separately from the proposed
+  operations journal. Recovery must not overwrite newer data.
 - **Automation interfaces:** consider a local CLI or socket with explicit access
   boundaries. Scripting, hooks and plugins are not implied by an internal
   command registry or an optional rule editor.
