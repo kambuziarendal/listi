@@ -377,3 +377,7 @@ and back; closing it must return the previous folder without writing either one.
 ### Physical USB field report: 0.38.0-30, 2026-11-25
 
 The tester unplugged the stick during Copy and dismissed the visible errors. The file remained red with “Needs attention”. Screenshots in the open folder could still be viewed. Attempting to open another folder on the disconnected stick was followed by a Haiku kernel panic. The photographed trace shows a directory reader, Listi directory scan frames and the FAT filesystem path. The root cause and exact FAT variant are not established. No post-remount checksums or BFS outcome were reported. Physical disconnect qualification failed; beta remains on hold pending a fix and hardware verification.
+
+### Second physical USB field report, 2026-11-25
+
+During another transfer **to** the USB stick, the tester removed it and Listi froze. MímisSendir also crashed. The tester could switch to the workspace containing Telegram but not back, could not take a screenshot, and reported that Telegram subsequently crashed. The photo records the unsent account, not a debugger trace. The installed Listi revision, kernel state, file integrity and cause are unknown. Record this separately from the earlier panic and the ext4 reports. Beta remains blocked. Investigate on a disposable Haiku VM before requesting another hardware disconnect.
