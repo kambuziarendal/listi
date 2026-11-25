@@ -16,6 +16,7 @@ namespace Listi {
 namespace {
 
 constexpr uint32 kFocusFloating = 'tlfc';
+constexpr uint32 kUpdateTabLabel = 'tltb';
 
 class FloatingTerminal : public WorkingWindow {
 public:
@@ -47,6 +48,15 @@ public:
   void MessageReceived(BMessage *message) override {
     if (HandleWindowAction(message))
       return;
+    if (message->what == kUpdateTabLabel) {
+      BMessenger sender;
+      if (message->FindMessenger("owner", &sender) == B_OK && sender == owner &&
+          message->GetInt64("terminal placement", -1) == placement) {
+        Panel()->SetTabLabel(message->GetString("label", ""));
+        UpdateTitle();
+      }
+      return;
+    }
     if (message->what == kFocusFloating) {
       if (IsMinimized())
         Minimize(false);
@@ -58,12 +68,16 @@ public:
     BWindow::MessageReceived(message);
   }
 
-  void SetOwner(BMessenger receiver, int64 token) {
+  void SetOwner(BMessenger receiver, int lister, int64 token) {
     owner = receiver;
     placement = token;
-    Panel()->SetOwner(receiver, 0);
+    Panel()->SetOwner(receiver, lister);
     Panel()->SetPlacement(true, token);
-    Describe(TerminalName(0), std::string("Started in: ") + Panel()->StartFolder());
+    UpdateTitle();
+  }
+
+  void UpdateTitle() {
+    Describe(Panel()->DisplayTitle(), std::string("Started in: ") + Panel()->StartFolder());
   }
 
 private:
@@ -118,7 +132,8 @@ TerminalDock::~TerminalDock() {
 }
 
 std::optional<TerminalRestartPrompt>
-TerminalDock::Open(const BMessage &message, int lister, const char *directory) {
+TerminalDock::Open(const BMessage &message, int lister, const char *directory,
+                   int64 tabId, const std::string &tabLabel) {
   auto *terminalPanel = Docked(lister);
   if (!terminalPanel) {
     FocusFloating(lister);
@@ -129,7 +144,8 @@ TerminalDock::Open(const BMessage &message, int lister, const char *directory) {
   const bool here = message.what == kTerminal;
   const char *path = message.GetString("folder", directory);
   if (message.HasString("folder") &&
-      (message.GetInt64("session", -1) != terminalPanel->SessionId() ||
+      (message.GetInt64("tab", -1) != tabId ||
+       message.GetInt64("session", -1) != terminalPanel->SessionId() ||
        message.GetInt64("terminal placement", -1) !=
            terminalPanel->Placement()))
     return std::nullopt;
@@ -143,6 +159,7 @@ TerminalDock::Open(const BMessage &message, int lister, const char *directory) {
       BMessage accepted(message.what);
       accepted.AddString("folder", path);
       accepted.AddInt32("terminal lister", lister);
+      accepted.AddInt64("tab", tabId);
       accepted.AddInt64("session", terminalPanel->SessionId());
       accepted.AddInt64("terminal placement", terminalPanel->Placement());
       BString prompt("Close the current CLI and start a new shell in ");
@@ -156,6 +173,10 @@ TerminalDock::Open(const BMessage &message, int lister, const char *directory) {
         PostMainWindowNotice(detail);
         return std::nullopt;
       }
+      sessions[lister].tabId = tabId;
+      sessions[lister].lastTabLabel = tabLabel;
+      sessions[lister].closedTab = false;
+      terminalPanel->SetTabLabel(tabLabel);
       terminalPanel->SetPlacement(false, sessions[lister].placement = ++generation);
     }
   }
@@ -203,14 +224,42 @@ int64 TerminalDock::OpenPlacement(int lister) const {
   return session.visible || session.detached.IsValid() ? session.placement : 0;
 }
 
-// Both browser loopers are locked; the destination is a newly created Einn.
+int64 TerminalDock::OpenPlacement(int lister, int64 tabId) const {
+  return OwnerTab(lister) == tabId ? OpenPlacement(lister) : 0;
+}
+
+void TerminalDock::UpdateTabLabel(int lister, const std::string &label) {
+  auto &session = sessions[lister];
+  if (!OpenPlacement(lister))
+    return;
+  const bool closed = label.empty();
+  if (closed == session.closedTab && (closed || session.lastTabLabel == label))
+    return;
+  const auto display = closed ? session.lastTabLabel + " (closed)" : label;
+  if (session.panel) {
+    session.panel->SetTabLabel(display);
+  } else {
+    BMessage update(kUpdateTabLabel);
+    update.AddMessenger("owner", owner);
+    update.AddInt64("terminal placement", session.placement);
+    update.AddString("label", display.c_str());
+    if (session.detached.SendMessage(&update, static_cast<BHandler *>(nullptr), 0) != B_OK)
+      return;
+  }
+  if (!closed)
+    session.lastTabLabel = label;
+  session.closedTab = closed;
+}
+
+// The browser loopers are locked (they may be the same looper).
 // Leave the original session in place until the destination can accept it.
-bool TerminalDock::TransferTo(int64 requested, TerminalDock &destination) {
+bool TerminalDock::TransferTo(int64 requested, TerminalDock &destination, int targetLister) {
   const int lister = FindSession(requested);
-  if (lister < 0 || !OpenPlacement(lister) || destination.OpenPlacement(0))
+  if (lister < 0 || targetLister < 0 || targetLister > 1 ||
+      !OpenPlacement(lister) || destination.OpenPlacement(targetLister))
     return false;
   auto &source = sessions[lister];
-  auto &target = destination.sessions[0];
+  auto &target = destination.sessions[targetLister];
   auto *placeholder = target.panel;
   if (!placeholder)
     return false;
@@ -229,13 +278,14 @@ bool TerminalDock::TransferTo(int64 requested, TerminalDock &destination) {
       return false;
     }
     split->Window()->Sync();
-    if (!destination.band->GroupLayout()->AddView(0, panel)) {
+    const int32 targetIndex = destination.band->GroupLayout()->IndexOfView(placeholder);
+    if (!destination.band->GroupLayout()->AddView(targetIndex, panel)) {
       band->GroupLayout()->AddView(index, panel);
       replacement->RemoveSelf();
       return false;
     }
     target.panel = panel;
-    panel->SetOwner(destination.owner, 0);
+    panel->SetOwner(destination.owner, targetLister);
     panel->SetDockSide(destination.side);
     panel->SetPlacement(false, target.placement = ++destination.generation);
     target.visible = true;
@@ -247,7 +297,8 @@ bool TerminalDock::TransferTo(int64 requested, TerminalDock &destination) {
     BLooper *looper = nullptr;
     source.detached.Target(&looper);
     auto *floating = static_cast<FloatingTerminal *>(looper);
-    floating->SetOwner(destination.owner, target.placement = ++destination.generation);
+    floating->Panel()->SetTabLabel(source.DisplayLabel());
+    floating->SetOwner(destination.owner, targetLister, target.placement = ++destination.generation);
     target.detached = source.detached;
     target.panel = nullptr;
     floating->Unlock();
@@ -255,6 +306,11 @@ bool TerminalDock::TransferTo(int64 requested, TerminalDock &destination) {
 
   placeholder->RemoveSelf();
   delete placeholder;
+  target.tabId = source.tabId;
+  target.lastTabLabel = std::move(source.lastTabLabel);
+  target.closedTab = source.closedTab;
+  source.tabId = -1;
+  source.closedTab = false;
   source.detached = {};
   source.panel = replacement.release();
   source.visible = false;
@@ -383,7 +439,7 @@ bool TerminalDock::Float(int64 requested) {
   session.panel = nullptr;
   session.visible = false;
   UpdateVisibility();
-  window->Describe(TerminalName(lister), std::string("Started in: ") + panel->StartFolder());
+  window->UpdateTitle();
   window->Show();
   return true;
 }
@@ -409,6 +465,7 @@ bool TerminalDock::ReturnPanel(int lister) {
   }
   session.panel = returning;
   session.visible = true;
+  returning->SetTabLabel(session.DisplayLabel());
   returning->SetDockSide(side);
   returning->SetPlacement(false, session.placement = ++generation);
   session.detached = {};
@@ -434,6 +491,9 @@ bool TerminalDock::Close(int64 requested) {
   if (!session.visible && !ReturnPanel(lister))
     return false;
   session.panel->Stop();
+  session.tabId = -1;
+  session.lastTabLabel.clear();
+  session.closedTab = false;
   session.panel->SetPlacement(false, session.placement = ++generation);
   session.panel->Hide();
   session.visible = false;

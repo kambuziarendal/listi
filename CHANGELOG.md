@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.38.0-35 (private test candidate)
+
+- The CLI identifies its owning folder tab. Right-click a tab to move it across the window or detach it to Einn.
+- Window → Move tab to window moves the active tab to a selected Listi window without closing other tabs or interrupting jobs in the source window.
+
 ## 0.38.0-34 (private test candidate)
 
 - The separate Operations window is a normal Haiku window rather than a floating palette. Stack or tile it, or leave it behind the browser. It comes forward when a job needs a decision.

@@ -9,7 +9,7 @@ enum : uint32 {
   kTabNew = 'tbne', kTabDuplicate = 'tbdu', kTabClose = 'tbcl', kTabReopen = 'tbre',
   kTabRename = 'tbrn', kTabNamed = 'tbna', kTabLeft = 'tbml', kTabRight = 'tbmr',
   kTabPrevious = 'tbpr', kTabNext = 'tbnx', kTabChoose = 'tbch',
-  kTabDetach = 'tbdt', kTabAlways = 'tbal'
+  kTabDetach = 'tbdt', kTabOpposite = 'tbop', kTabContext = 'tbcx', kTabAlways = 'tbal'
 };
 struct FolderTab {
   int64 id;
@@ -27,7 +27,10 @@ public:
   BMessage ArchiveTabs();
   void RestoreTabs(const BMessage &);
   void Adopt(FolderTab tab);
-  void AfterDetach();
+  std::optional<FolderTab> CopyTab(int64 id);
+  void InsertTransferred(FolderTab tab);
+  void ReleaseTab(int64 id);
+  std::string DescribeTab(int64 id) const;
   void Rename(const std::string &);
   void SetShown(bool filesPage, bool always);
   void UpdateLabel();

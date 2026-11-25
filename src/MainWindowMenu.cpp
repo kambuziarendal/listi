@@ -11,9 +11,9 @@
 #include "ShelfWindow.h"
 #include "WorkspaceActions.h"
 #include "WorkspaceEditor.h"
-#include "WindowOverview.h"
 #include "WorkingSets.h"
 #include <MenuItem.h>
+#include "WindowOverview.h"
 
 namespace {
 BMenuItem *AddCommand(BMenu *menu, const char *label, uint32 action,
@@ -45,6 +45,8 @@ MainWindowMenu::MainWindowMenu() : BMenuBar("menu") {
   AddCommand(tabs, "Move tab left", Listi::kTabLeft);
   AddCommand(tabs, "Move tab right", Listi::kTabRight);
   AddCommand(windows, "Detach tab to Einn window", Listi::kTabDetach);
+  tabDestinations = new BMenu("Move tab to window");
+  windows->AddItem(tabDestinations);
   AddCommand(tabs, "Close tab", Listi::kTabClose);
   AddCommand(tabs, "Reopen closed tab", Listi::kTabReopen);
   tabs->AddSeparatorItem();
@@ -55,6 +57,23 @@ MainWindowMenu::MainWindowMenu() : BMenuBar("menu") {
   AddCommand(help, "About Listi…", kAboutListi);
   AddCommand(help, "Layout introduction…", Listi::kShowLayoutGuide);
   AddItem(help);
+}
+
+void MainWindowMenu::SetTabDestinations(int64 sourceWindow, int side, int64 tab, bool enabled) {
+  while (auto *item = tabDestinations->RemoveItem(int32(0)))
+    delete item;
+  if (enabled) {
+    for (const auto &choice : Listi::WorkingSetChoices()) {
+      if (choice.id == sourceWindow)
+        continue;
+      auto *message = new BMessage(kMoveTabToWindow);
+      message->AddMessenger("destination", choice.target);
+      message->AddInt32("pane", side);
+      message->AddInt64("tab", tab);
+      tabDestinations->AddItem(new BMenuItem(choice.label.c_str(), message));
+    }
+  }
+  tabDestinations->SetEnabled(tabDestinations->CountItems() > 0);
 }
 
 void MainWindowMenu::AddFilesMenu() {

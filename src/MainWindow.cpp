@@ -13,6 +13,7 @@
 #include "WorkingSets.h"
 #include <atomic>
 #include <MenuItem.h>
+#include <PopUpMenu.h>
 #include "LayoutIntroduction.h"
 #include "FolderHistory.h"
 #include "AutomaticHistory.h"
@@ -206,6 +207,11 @@ class MainWindow : public Listi::WorkingWindow {
     }
     split->Focus();
   }
+  void RefreshTerminalTabLabel(int side) {
+    const auto id = terminalDock->OwnerTab(side);
+    if (id > 0)
+      terminalDock->UpdateTabLabel(side, split->Panel(side).FolderBar().DescribeTab(id));
+  }
   void UpdateTransferTarget() {
     // Wait for the initial folder read so its progress does not erase the notice.
     if (!detachedWorkNotice.empty() && !panes[0]->IsScanning()) {
@@ -235,6 +241,7 @@ class MainWindow : public Listi::WorkingWindow {
       if (tabLocations[side] != panes[side]->Path()) {
         tabLocations[side] = panes[side]->Path();
         split->Panel(side).FolderBar().UpdateLabel();
+        RefreshTerminalTabLabel(side);
       }
     }
     const int source = split->Source();
@@ -330,6 +337,7 @@ class MainWindow : public Listi::WorkingWindow {
     case kTabNew: case kTabDuplicate: case kTabClose: case kTabReopen:
     case kTabRename: case kTabNamed: case kTabLeft: case kTabRight:
     case kTabNext: case kTabPrevious: case kTabChoose: case kTabDetach: case kTabAlways:
+    case kTabContext: case kTabOpposite:
       break;
     default:
       return false;
@@ -340,7 +348,31 @@ class MainWindow : public Listi::WorkingWindow {
     if (!split->ActivateFiles(side))
       return true;
     auto &bar = split->Panel(side).FolderBar();
+    const int64 id = message.GetInt64("tab", bar.ActiveId());
     switch (message.what) {
+    case kTabContext: {
+      BPoint where;
+      if (bar.DescribeTab(id).empty() || message.FindPoint("where", &where) != B_OK)
+        return true;
+      BPopUpMenu context("Folder tab", false, false);
+      auto *move = new BMenuItem(side == 0 ? "Move tab to right pane" : "Move tab to left pane",
+                                 new BMessage(kTabOpposite));
+      context.AddItem(move);
+      move->SetEnabled(!panes[1 - side]->IsHidden() &&
+                       split->Panel(1 - side).Current() == PanelPage::Files);
+      context.AddItem(new BMenuItem("Detach tab to Einn window", new BMessage(kTabDetach)));
+      context.AddSeparatorItem();
+      auto *close = new BMenuItem("Close tab", new BMessage(kTabClose));
+      context.AddItem(close);
+      close->SetEnabled(bar.Count() > 1);
+      if (auto *selected = context.Go(where, false, true)) {
+        BMessage action(selected->Message()->what);
+        action.AddInt32("pane", side);
+        action.AddInt64("tab", id);
+        PostMessage(&action);
+      }
+      return true;
+    }
     case kTabAlways: {
       prefs.alwaysFolderTabs = !prefs.alwaysFolderTabs;
       BMessage delta(kSharedPreferences);
@@ -364,26 +396,93 @@ class MainWindow : public Listi::WorkingWindow {
     case kTabNamed:
       if (message.GetInt64("tab", -1) == bar.ActiveId())
         bar.Rename(message.GetString("name", ""));
-      return true;
-    case kTabDetach: {
-      if (!openBrowser)
+      break;
+    case kTabOpposite: {
+      auto tab = bar.CopyTab(id);
+      const int other = 1 - side;
+      if (!tab || !split->ActivateFiles(other))
         break;
-      BrowserRequest request{{}, bar.Snapshot(), Frame().LeftTop() + BPoint(24, 24)};
-      request.cliPlacement = terminalDock->OpenPlacement(side);
+      const auto placement = terminalDock->OpenPlacement(side, id);
+      if (placement && !terminalDock->TransferTo(placement, *terminalDock, other)) {
+        split->SetSource(side);
+        queue.ErrorInfo("Cannot move the CLI to the opposite pane. The tab and CLI have not moved.");
+        break;
+      }
+      split->Panel(other).FolderBar().InsertTransferred(std::move(*tab));
+      bar.ReleaseTab(id);
+      break;
+    }
+    case kTabDetach: {
+      auto tab = bar.CopyTab(id);
+      if (!tab || !openBrowser)
+        break;
+      BrowserRequest request{{}, std::move(tab), Frame().LeftTop() + BPoint(24, 24)};
+      request.cliPlacement = terminalDock->OpenPlacement(side, id);
       if (request.cliPlacement)
         request.cliSource = BMessenger(this);
       if (queue.Busy() || clipboard.Busy())
         request.detachedWorkNotice = "File operations continue in the original window.";
       if (openBrowser(std::move(request)))
-        bar.AfterDetach();
+        bar.ReleaseTab(id);
       break;
     }
     default:
       bar.Change(message.what, message.GetInt64("tab", -1));
     }
+    for (int index = 0; index < 2; ++index)
+      RefreshTerminalTabLabel(index);
     split->RefreshPanels();
     split->Focus();
     return true;
+  }
+
+  void MoveTabToWindow(const BMessage &message) {
+    if (PromptBlocksCommand())
+      return;
+    const int side = message.GetInt32("pane", -1);
+    if (side != 0 && side != 1)
+      return;
+    auto &bar = split->Panel(side).FolderBar();
+    auto tab = bar.CopyTab(message.GetInt64("tab", -1));
+    if (!tab)
+      return;
+    BMessenger address;
+    if (message.FindMessenger("destination", &address) != B_OK ||
+        !address.IsTargetLocal() || address == BMessenger(this) ||
+        address.LockTargetWithTimeout(250000) != B_OK) {
+      queue.ErrorInfo("The destination window is busy or closed. The tab has not moved.");
+      return;
+    }
+    BLooper *looper = nullptr;
+    address.Target(&looper);
+    struct UnlockWindow {
+      BLooper *looper;
+      ~UnlockWindow() { looper->Unlock(); }
+    } unlock{looper};
+    auto *target = dynamic_cast<MainWindow *>(looper);
+    if (!target || target->actionArea->Pending()) {
+      queue.ErrorInfo("The destination window cannot accept a tab right now.");
+      return;
+    }
+    const int dest = target->split->Source();
+    if (target->split->Panel(dest).Current() != PanelPage::Files) {
+      queue.ErrorInfo("Select a file panel in the destination window first.");
+      return;
+    }
+    const auto placement = terminalDock->OpenPlacement(side, tab->id);
+    if (placement && !terminalDock->TransferTo(placement, *target->terminalDock, dest)) {
+      queue.ErrorInfo("Cannot move the CLI to that panel. The tab and CLI have not moved.");
+      return;
+    }
+    const auto id = tab->id;
+    target->split->Panel(dest).FolderBar().InsertTransferred(std::move(*tab));
+    bar.ReleaseTab(id);
+    RefreshTerminalTabLabel(side);
+    target->RefreshTerminalTabLabel(dest);
+    split->RefreshPanels();
+    target->split->RefreshPanels();
+    target->split->Focus();
+    target->Activate();
   }
 
   bool HandleNavigation(BMessage *m) {
@@ -677,7 +776,9 @@ public:
             transferred = source->terminalDock->TransferTo(request.cliPlacement, *terminalDock);
           looper->Unlock();
         }
-        if (!transferred) {
+        if (transferred)
+          RefreshTerminalTabLabel(0);
+        else {
           if (!detachedWorkNotice.empty())
             detachedWorkNotice += " ";
           detachedWorkNotice += "CLI not transferred. Check the original window.";
@@ -735,6 +836,7 @@ public:
     const bool flat = page == PanelPage::Flat;
     const auto &bar = split->Panel(split->Source()).FolderBar();
     const bool filePage = page == PanelPage::Files;
+    menu->SetTabDestinations(WindowId(), split->Source(), bar.ActiveId(), filePage);
     menu->FindItem(kCopyToWindow)->SetEnabled(filePage || flat);
     for (uint32 cmd : {Listi::kTabNew, Listi::kTabDuplicate, Listi::kTabRename,
                        Listi::kTabDetach, Listi::kTabAlways})
@@ -825,6 +927,10 @@ public:
       historyPairs = Listi::HistoryPairs(*m);
       automaticEnabled = m->GetBool("enabled", false);
       if (refreshConfig) { refreshConfig = false; ReadHistoryConfig(); }
+      return;
+    }
+    if (m->what == kMoveTabToWindow) {
+      MoveTabToWindow(*m);
       return;
     }
     if (m->what == kQuitListi) {
@@ -928,6 +1034,7 @@ public:
         return;
       }
       split->Panel(side).FolderBar().OpenDirectory(path);
+      RefreshTerminalTabLabel(side);
       if (IsMinimized()) Minimize(false);
       Activate();
       split->Focus();
@@ -1226,7 +1333,9 @@ public:
         PostMainWindowNotice("Open a local folder before starting a terminal.");
         break;
       }
-      if (auto prompt = terminalDock->Open(*m, lister, panes[lister]->Path()))
+      const auto &tabs = split->Panel(lister).FolderBar();
+      if (auto prompt = terminalDock->Open(*m, lister, panes[lister]->Path(),
+                                           tabs.ActiveId(), tabs.DescribeTab(tabs.ActiveId())))
         AskInline(prompt->text.String(), "Start new CLI", prompt->accepted);
       break;
     }

@@ -9,6 +9,7 @@
 #include <GroupLayout.h>
 #include <OS.h>
 #include <SplitView.h>
+#include <StringView.h>
 #include <Window.h>
 #include <cmath>
 #include <cstdlib>
@@ -109,7 +110,7 @@ public:
 
   TerminalPanel *Start(const fs::path &path, int lister = 0) {
     const BMessage open(lister == 0 ? kLeftCLI : kRightCLI);
-    dock->Open(open, lister, path.c_str());
+    dock->Open(open, lister, path.c_str(), 100 + lister, "Tab 1: work");
     auto *panel = dock->Docked(lister);
     return panel && panel->Active() ? panel : nullptr;
   }
@@ -118,14 +119,16 @@ public:
     auto *panel = dock->Docked(0);
     const auto session = panel->SessionId();
     const auto folder = panel->StartFolder();
-    auto prompt = dock->Open(BMessage(kTerminal), 0, otherPath.c_str());
+    auto prompt = dock->Open(BMessage(kTerminal), 0, otherPath.c_str(), 111, "Tab 2: other");
     if (!prompt || prompt->accepted.GetInt64("session", -1) != session ||
         prompt->accepted.GetInt64("terminal placement", -1) != panel->Placement() ||
         std::string(prompt->accepted.GetString("folder", "")) != otherPath)
       return false;
-    if (prompt->accepted.ReplaceInt64("terminal placement", -1) != B_OK)
+    dock->Open(prompt->accepted, 0, otherPath.c_str(), 222, "Tab 3: changed");
+    if (panel->SessionId() != session ||
+        prompt->accepted.ReplaceInt64("terminal placement", -1) != B_OK)
       return false;
-    return !dock->Open(prompt->accepted, 0, otherPath.c_str()) &&
+    return !dock->Open(prompt->accepted, 0, otherPath.c_str(), 111, "Tab 2: other") &&
            panel->Active() && panel->StartFolder() == folder &&
            panel->SessionId() == session;
   }
@@ -134,10 +137,10 @@ public:
     auto *panel = dock->Docked(lister);
     const auto session = panel->SessionId();
     const auto original = panel->StartFolder();
-    auto prompt = dock->Open(BMessage(kTerminal), lister, target.c_str());
+    auto prompt = dock->Open(BMessage(kTerminal), lister, target.c_str(), 100 + lister, "Tab 1: work");
     if (!prompt || (removeTarget && !fs::remove(target)))
       return false;
-    dock->Open(prompt->accepted, lister, target.c_str());
+    dock->Open(prompt->accepted, lister, target.c_str(), 100 + lister, "Tab 1: work");
     return panel->Active() &&
            panel->SessionId() == session + (removeTarget ? 0 : 1) &&
            panel->StartFolder() == (removeTarget ? original : target.string());
@@ -147,6 +150,31 @@ public:
     return split->Orientation() == direction &&
            split->GetLayout()->IndexOfView(FindView("file panels")) ==
                workspaceIndex;
+  }
+
+  void RenameTab(int lister, const char *label) { dock->UpdateTabLabel(lister, label); }
+
+  bool CheckOwnerLabel(int lister) {
+    auto *panel = dock->Docked(lister);
+    if (!panel || dock->OpenPlacement(lister, 999) ||
+        dock->OpenPlacement(lister, 100 + lister) != panel->Placement())
+      return false;
+    auto *label = dynamic_cast<BStringView *>(panel->FindView("terminal location"));
+    dock->UpdateTabLabel(lister, "Tab 2: renamed");
+    if (!label || std::string(label->Text()).find("Tab 2: renamed") == std::string::npos)
+      return false;
+    dock->UpdateTabLabel(lister, "");
+    if (std::string(label->Text()).find("Tab 2: renamed (closed)") == std::string::npos)
+      return false;
+    dock->UpdateTabLabel(lister, "Tab 1: work");
+    return true;
+  }
+
+  bool MoveWithinWindow(int source, int target, TerminalPanel *expected, int64 tabId) {
+    const auto token = dock->OpenPlacement(source, tabId);
+    return token && dock->TransferTo(token, *dock, target) &&
+        dock->Docked(target) == expected && dock->OpenPlacement(target, tabId) &&
+        !dock->OpenPlacement(source) && expected->Active();
   }
 
   bool TransferRightCLI(Owner &destination) {
@@ -236,7 +264,7 @@ bool Click(const BMessenger &target, const char *label,
 BMessenger Floating(BApplication &app, int lister = 0) {
   for (int32 i = 0; i < app.CountWindows(); ++i) {
     auto *window = app.WindowAt(i);
-    if (window && !std::strcmp(window->Title(), TerminalName(lister)))
+    if (window && std::string(window->Title()) == std::string(TerminalName(lister)) + " | Tab 1: work")
       return BMessenger(window);
   }
   return {};
@@ -295,6 +323,8 @@ int main() {
             return panel != nullptr;
           }),
           "start CLI in the file window");
+    Check(WithWindow(main, [&](BWindow &) { return owner->CheckOwnerLabel(0); }),
+          "tab-specific CLI tracks rename, reorder, close and reopen without changing owner");
     Check(WithWindow(main, [&](BWindow &) {
             return owner->RejectStaleRestart(rightFixture.path);
           }),
@@ -357,6 +387,18 @@ int main() {
           }),
           "Detach CLI moves the same live view and focuses it");
     auto detached = Floating(app);
+    Check(WithWindow(main, [&](BWindow &) {
+            owner->RenameTab(0, "Tab 2: detached");
+            return true;
+          }) && Until([&] {
+            return WithWindow(detached, [&](BWindow &window) {
+              return std::string(window.Title()) == "Left CLI | Tab 2: detached";
+            });
+          }), "floating CLI title follows the owning tab's new name");
+    Check(WithWindow(main, [&](BWindow &) {
+            owner->RenameTab(0, "Tab 1: work");
+            return true;
+          }), "restore original tab label");
     Check(Click(main, "Detach CLI", nullptr, 1) && Until([&] {
             return PanelMatches(Floating(app, 1), right, 1, true, 1);
           }),
@@ -455,6 +497,10 @@ int main() {
     Check(moving.IsValid() && Click(moving, "Dock CLI") && Until([&] {
             return !moving.IsValid() && PanelMatches(next, right, 2, true);
           }), "the transferred floating CLI docks into the new owner's left slot");
+    Check(WithWindow(next, [&](BWindow &) {
+            return destination->MoveWithinWindow(0, 1, right, 101) &&
+                   destination->MoveWithinWindow(1, 0, right, 101);
+          }), "same-window moves to either lister preserve the CLI and its originating tab");
     Check(next.SendMessage(B_QUIT_REQUESTED) == B_OK &&
               Until([&] { return !next.IsValid(); }), "close the new CLI owner");
   } catch (const std::exception &e) {

@@ -132,9 +132,37 @@ void FolderTabs::Restore() {
   pane.RestoreNavigation(tabs[active].state);
   Rebuild();
 }
-void FolderTabs::AfterDetach() {
-  Remove(active);
+std::optional<FolderTab> FolderTabs::CopyTab(int64 id) {
+  if (id == ActiveId())
+    return Snapshot();
+  for (const auto &tab : tabs)
+    if (tab.id == id)
+      return tab;
+  return std::nullopt;
+}
+void FolderTabs::InsertTransferred(FolderTab tab) {
+  SaveActive();
+  Insert(std::move(tab));
   Restore();
+}
+void FolderTabs::ReleaseTab(int64 id) {
+  for (size_t i = 0; i < Count(); ++i) {
+    if (tabs[i].id != id)
+      continue;
+    const bool wasActive = i == active;
+    Remove(i);
+    if (wasActive)
+      Restore();
+    else
+      Rebuild();
+    return;
+  }
+}
+std::string FolderTabs::DescribeTab(int64 id) const {
+  for (size_t i = 0; i < Count(); ++i)
+    if (tabs[i].id == id)
+      return "Tab " + std::to_string(i + 1) + ": " + LabelAt(i);
+  return {};
 }
 void FolderTabs::Rename(const std::string &label) {
   tabs[active].alias = label;
@@ -359,7 +387,20 @@ FolderTabs::Action FolderTabs::ActionAt(BPoint point) const {
 
 void FolderTabs::MouseDown(BPoint point) {
   const auto *event = Window()->CurrentMessage();
-  if (!event || !(event->GetInt32("buttons", 0) & B_PRIMARY_MOUSE_BUTTON))
+  const int32 buttons = event ? event->GetInt32("buttons", 0) : 0;
+  if (buttons & B_SECONDARY_MOUSE_BUTTON) {
+    pressed = {};
+    const auto action = ActionAt(point);
+    if (action.id != -1) {
+      BMessage menu(kTabContext);
+      menu.AddInt32("pane", side);
+      menu.AddInt64("tab", action.id);
+      menu.AddPoint("where", ConvertToScreen(point));
+      Window()->PostMessage(&menu);
+    }
+    return;
+  }
+  if (!(buttons & B_PRIMARY_MOUSE_BUTTON))
     return;
   pressed = ActionAt(point);
   if (pressed.command)

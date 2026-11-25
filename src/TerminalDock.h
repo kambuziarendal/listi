@@ -27,13 +27,17 @@ public:
   // Opening in another directory can require a confirmed restart. The
   // returned prompt captures both the shell and its current placement.
   std::optional<TerminalRestartPrompt> Open(const BMessage &request, int lister,
-                                            const char *directory);
+                                            const char *directory, int64 tabId,
+                                            const std::string &tabLabel);
   bool ApplyPlacement(const BMessage &request);
   TerminalPanel *Docked(int lister) const;
   bool HasSessions() const { return sessions[0].visible || sessions[1].visible ||
       sessions[0].detached.IsValid() || sessions[1].detached.IsValid(); }
   int64 OpenPlacement(int lister) const;
-  bool TransferTo(int64 placement, TerminalDock &destination);
+  int64 OpenPlacement(int lister, int64 tabId) const;
+  int64 OwnerTab(int lister) const { return sessions[lister].tabId; }
+  void UpdateTabLabel(int lister, const std::string &label);
+  bool TransferTo(int64 placement, TerminalDock &destination, int targetLister = 0);
   bool HasFocus() const;
   bool FocusFloating(int lister);
   bool Float(int64 placement);
@@ -50,6 +54,12 @@ private:
     BMessenger detached;
     int64 placement = 0;
     bool visible = false;
+    int64 tabId = -1;
+    std::string lastTabLabel;
+    bool closedTab = false;
+    std::string DisplayLabel() const {
+      return closedTab ? lastTabLabel + " (closed)" : lastTabLabel;
+    }
   };
 
   int FindSession(int64 placement) const;

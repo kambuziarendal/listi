@@ -352,6 +352,42 @@ int main() {
   Check(rightBar.Count() == 2 && rightBar.ActiveId() == rightFirst,
         "a close target from another pane never falls back to the active tab");
   checkWidths("targeted closes and reopen in the right pane preserve the split");
+  Check(rightBar.DescribeTab(rightSecond) == "Tab 1: beta",
+        "inactive tab description includes its current index and label");
+  Command(*window, kTabOpposite, 1, rightSecond);
+  Ready(*window);
+  Check(rightBar.ActiveId() == rightFirst && rightBar.Count() == 1 &&
+        target.Path() == c.string() && bar.ActiveId() == rightSecond && bar.Count() == 2 &&
+        files.SelectedPath() == (b/"two").string(),
+        "opposite-side action moves the clicked background tab without replacing either live tab");
+  Command(*window, kTabOpposite, 1, rightSecond);
+  Check(rightBar.Count() == 1 && bar.Count() == 2,
+        "a stale opposite-side target does not move a different tab");
+  Command(*window, kLeftCLI);
+  auto *movingCLI = dynamic_cast<TerminalPanel *>(window->FindView(TerminalName(0)));
+  Check(movingCLI && movingCLI->Active(), "start a CLI for the tab moving between panes");
+  const auto movingSession = movingCLI->SessionId();
+  Command(*window, kRightCLI);
+  Command(*window, kTabOpposite, 0, rightSecond);
+  Check(bar.ActiveId() == rightSecond && rightBar.ActiveId() == rightFirst &&
+        movingCLI->SessionId() == movingSession && rightCLI->Active(),
+        "busy destination leaves both tabs and their CLI sessions intact");
+  closeCLI.SetInt64("terminal placement", rightCLI->Placement());
+  window->MessageReceived(&closeCLI);
+  Command(*window, kTabChoose, 0, first);
+  Command(*window, kTabOpposite, 0, rightSecond);
+  Ready(*window);
+  Check(bar.ActiveId() == first && rightBar.ActiveId() == rightSecond &&
+        window->FindView(TerminalName(1)) == movingCLI &&
+        movingCLI->Active() && movingCLI->SessionId() == movingSession,
+        "moving a background tab carries its live CLI to the opposite pane");
+  Command(*window, kTabDetach, 1, rightFirst);
+  Check(pending && pending->detached && pending->detached->id == rightFirst &&
+        !pending->cliPlacement && rightBar.ActiveId() == rightSecond && movingCLI->Active(),
+        "detaching a clicked background tab never takes another tab's CLI");
+  pending.reset();
+  closeCLI.SetInt64("terminal placement", movingCLI->Placement());
+  window->MessageReceived(&closeCLI);
   Check(window->QuitRequested(), "original may close independently");
   window->Quit();
   detached->Lock();

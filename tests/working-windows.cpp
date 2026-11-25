@@ -4,6 +4,7 @@
 #include "ReadWorker.h"
 #include "ImagePreview.h"
 #include "MainWindow.h"
+#include "MainWindowMenu.h"
 #include "PanelTools.h"
 #include "Pane.h"
 #include "SavedPlaces.h"
@@ -144,6 +145,41 @@ public:
     }
   }
 };
+
+void CheckMoveToWindow() {
+  Preferences prefs;
+  prefs.workspace = Workspace::einn;
+  auto *source = CreateMainWindow(prefs, {}, {}, false, {}, false);
+  auto *target = CreateMainWindow(prefs, {}, {}, false, {}, false);
+  BMessenger from(source), to(target);
+  source->Show();
+  target->Show();
+  int64 id = 0;
+  Check(With(from, [&](BWindow &w) {
+    auto &bar = static_cast<PanelTools *>(w.FindView("first panel tools"))->FolderBar();
+    bar.OpenDirectory("/boot/system");
+    bar.Rename("Transferred");
+    id = bar.ActiveId();
+    w.MenusBeginning();
+    auto *item = w.KeyMenuBar()->FindItem(kMoveTabToWindow);
+    const bool invoked = item && static_cast<BInvoker *>(item)->Invoke() == B_OK;
+    w.MenusEnded();
+    return invoked;
+  }), "invoke the chosen destination from the native Window menu");
+  Check(Wait([&] { return With(to, [&](BWindow &w) {
+    auto &bar = static_cast<PanelTools *>(w.FindView("first panel tools"))->FolderBar();
+    return bar.Count() == 2 && bar.ActiveId() == id && bar.Snapshot().alias == "Transferred";
+  }); }), "destination keeps its original tab and accepts the selected tab identity");
+  Check(With(from, [&](BWindow &w) {
+    auto &bar = static_cast<PanelTools *>(w.FindView("first panel tools"))->FolderBar();
+    return bar.Count() == 1 && !bar.CopyTab(id);
+  }), "source window and its other tab remain open");
+  Check(With(from, [](BWindow &w) { return w.QuitRequested(); }), "source ready to close");
+  Check(from.SendMessage(B_QUIT_REQUESTED) == B_OK, "source close request delivered");
+  Check(Wait([&] { return !from.IsValid(); }), "source window closes independently");
+  to.SendMessage(B_QUIT_REQUESTED);
+  Check(Wait([&] { return !to.IsValid(); }), "destination window closes");
+}
 
 void CheckContextDetach() {
   Preferences prefs;
@@ -336,5 +372,6 @@ int main() {
   main->Lock();
   main->Quit();
   CheckCopyWindows();
+  CheckMoveToWindow();
   CheckContextDetach();
 }

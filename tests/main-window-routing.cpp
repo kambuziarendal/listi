@@ -373,10 +373,10 @@ static void CheckWindowCLIQuit(BApplication &app) {
     }
     assert(false && "Timed out waiting for CLI quit state");
   };
-  auto findWindow = [&](const char *title) {
+  auto findWindow = [&](const std::string &title, bool prefix = false) {
     for (int32 i = 0; i < app.CountWindows(); ++i) {
       auto *candidate = app.WindowAt(i);
-      if (candidate && candidate->Title() && std::string(candidate->Title()) == title)
+      if (candidate && candidate->Title() && (prefix ? std::string(candidate->Title()).find(title) == 0 : candidate->Title() == title))
         return BMessenger(candidate);
     }
     return BMessenger{};
@@ -393,7 +393,7 @@ static void CheckWindowCLIQuit(BApplication &app) {
     return active;
   };
   wait([&] {
-    detached = findWindow(Listi::TerminalName(1));
+    detached = findWindow(std::string(Listi::TerminalName(1)) + " | Tab 1: ", true);
     return hasCLI(owner, 0) && hasCLI(detached, 1) && hasCLI(survivor, 0);
   });
 

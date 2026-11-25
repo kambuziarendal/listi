@@ -594,7 +594,7 @@ TerminalPanel::TerminalPanel(BMessenger owner, int lister)
       position(new BButton("terminal position", "Move right", nullptr)),
       move(new BButton("Detach CLI", nullptr)),
       close(new BButton("Close CLI", nullptr)) {
-  location->SetTruncation(B_TRUNCATE_MIDDLE);
+  location->SetTruncation(B_TRUNCATE_END);
   location->SetExplicitMinSize(BSize(0, B_SIZE_UNSET));
   location->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
   BLayoutBuilder::Group<>(this)
@@ -619,13 +619,26 @@ TerminalPanel::TerminalPanel(BMessenger owner, int lister)
 
 void TerminalPanel::SetOwner(BMessenger owner, int lister) {
   SetName(TerminalName(lister));
-  BString title(Name());
+  RefreshLocation();
+  for (auto *button : {position, move, close})
+    button->SetTarget(owner);
+}
+
+std::string TerminalPanel::DisplayTitle() const {
+  return tabLabel.empty() ? std::string(Name()) : std::string(Name()) + " | " + tabLabel;
+}
+
+void TerminalPanel::SetTabLabel(const std::string &label) {
+  tabLabel = label;
+  RefreshLocation();
+}
+
+void TerminalPanel::RefreshLocation() {
+  BString title(DisplayTitle().c_str());
   if (!startFolder.empty())
     title << "   Started in: " << startFolder.c_str();
   location->SetText(title);
   location->SetToolTip(title);
-  for (auto *button : {position, move, close})
-    button->SetTarget(owner);
 }
 
 void TerminalPanel::SetDockSide(TerminalSide side) {
@@ -681,10 +694,7 @@ int TerminalPanel::Start(const char *path) {
     return error;
   ++sessionId;
   startFolder = path;
-  BString title(Name());
-  title << "   Started in: " << path;
-  location->SetText(title);
-  location->SetToolTip(title);
+  RefreshLocation();
   return 0;
 }
 

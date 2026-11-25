@@ -48,11 +48,14 @@ public:
   void Stop();
   bool HandleKey(BMessage *message);
   void SetOwner(BMessenger owner, int lister);
+  void SetTabLabel(const std::string &label);
+  std::string DisplayTitle() const;
   void SetPlacement(bool floating, int64 generation);
   void SetDockSide(TerminalSide side);
 
 private:
-  std::string startFolder;
+  void RefreshLocation();
+  std::string startFolder, tabLabel;
   int64 sessionId = 0;
   int64 placement = 0;
   bool floating = false;

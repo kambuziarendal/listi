@@ -2,6 +2,8 @@
 #pragma once
 #include <MenuBar.h>
 
+constexpr uint32 kMoveTabToWindow = 'mtow';
+
 struct WorkspaceAction;
 struct WorkspaceLayout;
 
@@ -14,6 +16,7 @@ class MainWindowMenu : public BMenuBar {
 public:
   MainWindowMenu();
 
+  void SetTabDestinations(int64 sourceWindow, int side, int64 tab, bool enabled);
   void SetTransferDirection(const char *direction);
   void SetWorkspace(const WorkspaceLayout &layout, bool quickView);
   void SetFolderTree(bool available, bool visible);
@@ -36,5 +39,6 @@ private:
   BMenuItem *einnMenu, *askrMenu, *tviskiptMenu, *smidjaMenu;
   BMenuItem *previewMenu, *inspectorDockItem, *quickViewMenu, *flatViewItem, *bankToggle,
             *fullBankToggle, *treeToggle;
+  BMenu *tabDestinations;
   BMenu *fileView, *compactActions;
 };
