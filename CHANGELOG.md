@@ -1,9 +1,9 @@
 # Changelog
 
-## 0.38.0-29 (local candidate)
+## 0.38.0-30 (local candidate)
 
 - Detach the live Inspector, move or resize its window, and dock it again without losing the selection or an open text draft.
-
+- Network and archive downloads retain local publication details and metadata warnings in the job report. A queued archive extraction no longer publishes a partial result when its private copy fails.
 - Open a saved history store directly to restore a new copy even when the original folder is gone. This mode cannot save new versions.
 - Manual and automatic folder history verify reused file contents before accepting a version. Large collections of BFS attributes are bounded during capture; restoring a symbolic link preserves its modification time.
 - When detaching a folder tab during a CLI session or file operation, the new window identifies the original window as the owner of that work.
