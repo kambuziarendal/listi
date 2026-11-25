@@ -173,6 +173,12 @@ struct Runner {
     else
       result.errors.push_back(error);
   }
+  void RecordOutcome(EntryOutcome entry) {
+    if (hooks.report)
+      hooks.report->WriteOutcome(entry, false);
+    else
+      result.outcomes.push_back(std::move(entry));
+  }
   bool replaceAll = false, skipAll = false;
   size_t visited = 0;
   TransferControl Control(const std::string &p, bool bytes = true) {
@@ -349,6 +355,17 @@ struct Runner {
       Job publish{Action::Copy, {temp.path}, ParentLocation(dst)};
       publish.expectedDestination = directories.at(publish.destination);
       auto done = Run(publish, local);
+      result.copyLimitations |= done.copyLimitations;
+      // Replace already counted skipped conflicts. Completion is counted by
+      // RunVirtual once per selected root, not once per published child.
+      // A containing archive job must not report its private staging paths.
+      if (!hooks.privateStaging) {
+        for (auto &entry : done.outcomes) {
+          entry.source = src;
+          entry.destination = dst;
+          RecordOutcome(std::move(entry));
+        }
+      }
       if (!done.interruptedCopyFolder.empty())
         throw RemovableCopyInterrupted(done.errors.empty() ?
             "Removable destination flush interrupted." : done.errors.front(),
@@ -371,20 +388,14 @@ struct Runner {
     Sha256 expected;
     const auto stagedBytes = Stage(src, source, temp, Control(src, false), &expected);
     EntryOutcome entry{src, dst, "unprocessed", "", UploadVerification{}};
-    auto record = [&] {
-      if (hooks.report)
-        hooks.report->WriteOutcome(entry, false);
-      else
-        result.outcomes.push_back(std::move(entry));
-    };
     try {
       PublishUpload(src, dst, target, exists, temp, expected, stagedBytes,
                     control, entry);
     } catch (...) {
-      record();
+      RecordOutcome(std::move(entry));
       throw;
     }
-    record();
+    RecordOutcome(std::move(entry));
   }
   void PublishUpload(const std::string &src, const std::string &dst,
                      const FileEntry &target, bool exists, const TempFile &temp,
