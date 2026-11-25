@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.38.0-22 alpha](https://github.com/kambuziarendal/listi/releases/tag/v0.38.0-22)
+## [0.38.0-23 alpha](https://github.com/kambuziarendal/listi/releases/tag/v0.38.0-23)
 
 - Added local BFS folder versions and an optional low-priority Deskbar history helper. Browse saved points by date in a window or in the opposite panel. Restore a single regular file or an entire folder into a new path.
 - Added named working sets with a preview, Copy to window, guided setup, compact Einn transitions and Mini icons. Restored searches stay out of Recent folders; unchanged results still report a stopped live search.

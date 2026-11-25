@@ -29,7 +29,7 @@ Everyday responsiveness and trustworthy file operations come before new workflow
    “Cancellation requested; waiting for device”, not “Cancelled”. Prevent a
    second write to the same target until the first is resolved. Check the
    original, previously copied files and the reported outcome after remount.
-2. **Search and independent tabs have shipped in the 0.38.0-13 test package.** A pane can show a live BFS search as a navigable file list. Each pane supports independent folder tabs, including detach. Named working sets, their folder preview, compact Einn windows and the opt-in BFS history helper are included in 0.38.0-22; see the [versioned feature overview](FEATURES.md#what-changed-since-0380-12).
+2. **Search and independent tabs have shipped in the 0.38.0-13 test package.** A pane can show a live BFS search as a navigable file list. Each pane supports independent folder tabs, including detach. Named working sets, their folder preview, compact Einn windows and the opt-in BFS history helper are included in 0.38.0-23; see the [versioned feature overview](FEATURES.md#what-changed-since-0380-12).
 3. **Paired navigation remains a goal.** Link two folder roots by relative path only when requested. If a peer folder is missing, say so and leave it in place; never create or sync files while browsing.
 
 **Keep the architecture lister-first.** Let folders and queries feed the same
@@ -207,7 +207,7 @@ Miller columns are a file view, independent of the workspace. Each workspace sta
 in Details and has a configurable default view. Explore adaptive views only
 with explicit user control and sensible minimum sizes.
 
-Named working sets in 0.38.0-22 already reopen selected windows, tabs and layouts without replaying operations. Readable, BeOS-inspired folder cards and linked navigation between paired roots remain goals.
+Named working sets in 0.38.0-23 already reopen selected windows, tabs and layouts without replaying operations. Readable, BeOS-inspired folder cards and linked navigation between paired roots remain goals.
 
 ### Inspect files without leaving the task
 

@@ -1,6 +1,6 @@
-# Usability review: 0.38.0-22
+# Usability review: 0.38.0-23
 
-These 25 changes address findings from the earlier desktop reviews and hands-on feedback. The table describes implemented behaviour, not 25 independent physical-device passes. See the [alpha release notes](https://github.com/kambuziarendal/listi/releases/tag/v0.38.0-22) for the checks performed on the shipped package.
+These 25 changes address findings from the earlier desktop reviews and hands-on feedback. The table describes implemented behaviour, not 25 independent physical-device passes. See the [alpha release notes](https://github.com/kambuziarendal/listi/releases/tag/v0.38.0-23) for the checks performed on the shipped package.
 
 | # | What to try in the alpha |
 | --- | --- |

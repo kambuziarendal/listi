@@ -1,6 +1,6 @@
 # Workflow guide
 
-This guide describes the [0.38.0-22 alpha for Haiku x86_64](../README.md#install). New to Listi? Start with the [feature tour](FEATURES.md). Try file operations on disposable copies and keep independent backups.
+This guide describes the [0.38.0-23 alpha for Haiku x86_64](../README.md#install). New to Listi? Start with the [feature tour](FEATURES.md). Try file operations on disposable copies and keep independent backups.
 
 ## Window names and layouts
 

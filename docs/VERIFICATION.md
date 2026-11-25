@@ -4,9 +4,9 @@ Listi is alpha software that works directly on files. Tests provide evidence for
 specific cases, not proof that every filesystem, server or archive variant is
 safe. Use disposable fixtures and independent backups.
 
-## 0.38.0-22 alpha
+## 0.38.0-23 alpha
 
-The [release notes](https://github.com/kambuziarendal/listi/releases/tag/v0.38.0-22) identify the source, package digest and checks for this revision. The package is the tested binary, not a rebuild of the documentation branch. Local native tests run inside Haiku; they are not physical USB tests or hosted CI results. In particular, a successful copy to NTFS does not establish safe removal if the mounted volume still reports “device busy.”
+The [release notes](https://github.com/kambuziarendal/listi/releases/tag/v0.38.0-23) identify the source, package digest and checks for this revision. The package is the tested binary, not a rebuild of the documentation branch. Local native tests run inside Haiku; they are not physical USB tests or hosted CI results. In particular, a successful copy to NTFS does not establish safe removal if the mounted volume still reports “device busy.”
 
 ## Folder refresh measurements (0.38.0 development)
 
