@@ -103,6 +103,7 @@ struct Runner {
     std::string path, mount, folder;
     NodeIdentity node;
     bool removable = false, ntfs = false, fat = false, attributes = false;
+    bool writableExt = false;
   };
   std::map<dev_t, BackingDevice> backingDevices;
   std::string interruptedFolder;
@@ -117,6 +118,10 @@ struct Runner {
       backing.ntfs = strcasecmp(info.fsh_name, "ntfs") == 0;
       backing.fat = strcasecmp(info.fsh_name, "fat") == 0;
       backing.attributes = (info.flags & B_FS_HAS_ATTR) != 0;
+      backing.writableExt = !(info.flags & B_FS_IS_READONLY) &&
+          (!strcasecmp(info.fsh_name, "ext2") ||
+           !strcasecmp(info.fsh_name, "ext3") ||
+           !strcasecmp(info.fsh_name, "ext4"));
       if (strncmp(info.device_name, "/dev/disk/", 10) == 0) {
         backing.path = info.device_name;
         backing.removable = (info.flags & B_FS_IS_REMOVABLE) ||
@@ -358,7 +363,15 @@ struct Runner {
   }
   void Attributes(const std::string &src, const std::string &dst,
                   bool verifyMerge = false, int destinationFD = -1,
-                  bool destinationAttributesUnavailable = false, dev_t fatVolume = -1) {
+                  dev_t destinationVolume = -1) {
+    const bool destinationAttributesUnavailable = destinationFD >= 0 &&
+        destinationVolume >= 0 &&
+        NtfsAttributesUnavailable(destinationFD, destinationVolume, dst);
+    const bool fatDestination =
+        destinationFD >= 0 && destinationVolume >= 0 && FatCopy(destinationVolume);
+    const dev_t fatVolume = fatDestination ? destinationVolume : -1;
+    const bool allowExtOmission = destinationVolume >= 0 && PlainCopy() &&
+        backingDevices.at(destinationVolume).writableExt;
     BNode from(src.c_str()), to;
     if (destinationFD < 0)
       to.SetTo(dst.c_str());
@@ -369,6 +382,7 @@ struct Runner {
     std::vector<char> buf(65536);
     std::vector<char> existing(verifyMerge ? buf.size() : 0);
     bool omitted = false;
+    bool wroteAttribute = false;
     while ((status = from.GetNextAttrName(name)) == B_OK) {
       Check();
       if (fatVolume >= 0) {
@@ -397,27 +411,49 @@ struct Runner {
             target.type != info.type || target.size != info.size)
           throw std::runtime_error(dst + ": folder merge would lose source attribute " +
                                    name + "; source retained");
-      } else if (info.size == 0)
+        if (info.size == 0)
+          continue;
+      } else if (info.size == 0 && !allowExtOmission) {
         throw std::runtime_error(
             src + ": zero-length attribute cannot be preserved: " + name);
+      }
       off_t pos = 0;
-      while (pos < info.size) {
-        ssize_t n = from.ReadAttr(name, info.type, pos, buf.data(),
-                                  std::min<off_t>(buf.size(), info.size - pos));
-        if (n <= 0)
+      do {
+        const ssize_t n = info.size == 0 ? 0 :
+            from.ReadAttr(name, info.type, pos, buf.data(),
+                          std::min<off_t>(buf.size(), info.size - pos));
+        if (info.size != 0 && n <= 0)
           throw std::runtime_error(src + ": could not read attribute " + name);
         if (verifyMerge) {
           if (to.ReadAttr(name, info.type, pos, existing.data(), n) != n ||
               memcmp(existing.data(), buf.data(), n) != 0)
             throw std::runtime_error(dst + ": folder merge would change attribute " +
                                      name + "; source retained");
-        } else if ((destinationFD >= 0
-                        ? fs_write_attr(destinationFD, name, info.type, pos, buf.data(), n)
-                        : to.WriteAttr(name, info.type, pos, buf.data(), n)) != n)
-          throw std::runtime_error(dst + ": could not preserve attribute " +
-                                   name);
+        } else {
+          // A zero-byte write does not reliably create an attribute on
+          // Haiku; only try it to detect the EXT driver's lack of support.
+          const ssize_t written = destinationFD >= 0
+              ? fs_write_attr(destinationFD, name, info.type, pos, buf.data(), n)
+              : to.WriteAttr(name, info.type, pos, buf.data(), n);
+          const auto writeError = destinationFD >= 0 ? errno : written;
+          // The Haiku EXT driver exposes read-only extended attributes on
+          // writable volumes. Only accept its specific create-attribute error,
+          // and only before any attribute data was written.
+          if (written < 0 && writeError == EROFS && allowExtOmission && !wroteAttribute) {
+            CopyNotice(src, "Haiku cannot write attributes on this EXT destination; source attributes were not copied.");
+            return;
+          }
+          if (written != n)
+            throw std::runtime_error(dst + ": could not preserve attribute " + name +
+                                     (written < 0 ? ": " + std::string(strerror(writeError))
+                                                  : ": short write"));
+          if (n == 0)
+            throw std::runtime_error(
+                src + ": zero-length attribute cannot be preserved: " + name);
+          wroteAttribute = true;
+        }
         pos += n;
-      }
+      } while (pos < info.size);
     }
     if (status != B_ENTRY_NOT_FOUND)
       throw std::runtime_error(src + ": could not enumerate attributes");
@@ -432,9 +468,7 @@ struct Runner {
       CopyNotice(src, "Haiku does not expose source attributes or Windows permissions on this NTFS driver; used destination creation permissions.");
       return false;
     }
-    Attributes(src, dst, false, out,
-               NtfsAttributesUnavailable(out, targetVolume, dst),
-               FatCopy(targetVolume) ? targetVolume : -1);
+    Attributes(src, dst, false, out, targetVolume);
     return true;
   }
   bool SetCopyMode(int fd, mode_t mode, dev_t volume, const std::string &path) {
@@ -830,12 +864,9 @@ struct Runner {
       }
       Guard();
       if (!existed) {
-        bool useSourceMode = true;
-        if (NtfsCopy(st.st_dev) || ntfsDirectory || FatCopy(before.st_dev))
-          useSourceMode = OrdinaryAttributes(src, dst, dirfd(dir.get()),
-                                             directory.Descriptor(), st.st_dev, before.st_dev);
-        else
-          Attributes(src, dst);
+        const bool useSourceMode =
+            OrdinaryAttributes(src, dst, dirfd(dir.get()), directory.Descriptor(),
+                               st.st_dev, before.st_dev);
         if (useSourceMode && !SetCopyMode(directory.Descriptor(), st.st_mode, before.st_dev, dst))
           PermissionNotice(src);
         struct timespec times[2] = {st.st_atim, st.st_mtim};
@@ -932,7 +963,7 @@ struct Runner {
                               stagingIdentity.st_dev);
       if (S_ISLNK(st.st_mode)) {
         // BNode opens the link itself, including a dangling link.
-        Attributes(src, tmp);
+        Attributes(src, tmp, false, -1, stagingIdentity.st_dev);
         struct timespec times[2] = {st.st_atim, st.st_mtim};
         if (utimensat(AT_FDCWD, tmp.c_str(), times, AT_SYMLINK_NOFOLLOW))
           Fail(tmp);
@@ -945,10 +976,8 @@ struct Runner {
             !SameEntry(opened, st))
           throw std::runtime_error(src + ": source changed before copying");
         auto copyAttributes = [&] {
-          if (NtfsCopy(st.st_dev) || ntfsTarget || FatCopy(stagingIdentity.st_dev))
-            return OrdinaryAttributes(src, tmp, in.n, out.n, st.st_dev, stagingIdentity.st_dev);
-          Attributes(src, tmp);
-          return true;
+          return OrdinaryAttributes(src, tmp, in.n, out.n, st.st_dev,
+                                    stagingIdentity.st_dev);
         };
         const bool removableSource =
             backingDevices.at(st.st_dev).removable;

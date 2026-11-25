@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.38.0-33 (private test candidate)
+
+- Open Disks panels update automatically when Haiku mounts or unmounts a volume.
+- On ext4 volumes without Haiku Trash, Listi offers permanent deletion only after explicit confirmation.
+- Copying to ext4 can complete when the Haiku driver cannot write file attributes. Listi reports the omitted metadata.
+
 ## 0.38.0-32 (private test candidate)
 
 - Choose whether file operation progress, errors and decisions appear in the browser or in a separate window. Existing settings keep the integrated view.

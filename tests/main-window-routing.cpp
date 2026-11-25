@@ -910,7 +910,7 @@ int main(int argc, char **argv) {
     actions.ShowAddPicker(*pane, BMessenger(window));
   }
   send(kDelete);
-  assert(promptButton("Move to Trash"));
+  waitFor([&] { return promptButton("Move to Trash"); });
   send(kInlineCancel);
   assert(!promptButton("Move to Trash"));
   const auto originalMarker = marker + ".original";
@@ -1002,6 +1002,59 @@ int main(int argc, char **argv) {
     assert(be_clipboard->Commit(true) == B_OK);
     be_clipboard->Unlock();
     puts("Clipboard: queued confirmation retained original bytes; next paste available");
+  }
+
+  // Optional native fixture on a disposable ext4 volume, not a mock.
+  if (const char *ext4 = getenv("LISTI_TEST_EXT4_DIR")) {
+    std::string fixture = std::string(ext4) + "/Listi-trash-XXXXXX";
+    assert(mkdtemp(fixture.data()));
+    const auto torrent = fixture + "/test.torrent";
+    const auto original = fixture + "/original";
+    auto writeTorrent = [&] { assert(std::ofstream(torrent) << "fixture"); };
+    writeTorrent();
+    Listi::Job job;
+    job.action = Listi::Action::Trash;
+    job.sources = {torrent};
+    const auto direct = Listi::Run(job, {});
+    assert(direct.completed == 0 && direct.errors.size() == 1);
+    assert(direct.errors.front().find("Haiku has no Trash on this ext4 volume") !=
+           std::string::npos);
+    assert(access(torrent.c_str(), F_OK) == 0);
+
+    pane->Navigate(fixture.c_str());
+    waitFor([&] { return !pane->IsScanning(); });
+    auto ask = [&] {
+      assert(pane->MatchPattern("*.torrent", true) == 1);
+      send(kDelete);
+      waitFor([&] { return promptButton("Delete permanently"); });
+      const auto *question = dynamic_cast<BTextView *>(window->FindView("question"));
+      assert(question && std::string(question->Text()).find("No Trash on ext4 volumes") !=
+                         std::string::npos);
+      assert(promptButton("Cancel") && !promptButton("Move to Trash"));
+    };
+    ask();
+    send(kInlineCancel);
+    assert(!promptButton("Delete permanently"));
+    assert(access(torrent.c_str(), F_OK) == 0);
+
+    ask();
+    assert(rename(torrent.c_str(), original.c_str()) == 0);
+    writeTorrent();
+    assert(promptButton("Delete permanently")->Invoke() == B_OK);
+    waitFor([&] { return !promptButton("Delete permanently"); });
+    // The old inode and the new occupant must both survive this confirmation.
+    pane->Reload();
+    waitFor([&] { return !pane->IsScanning(); });
+    assert(access(torrent.c_str(), F_OK) == 0 && access(original.c_str(), F_OK) == 0);
+
+    ask();
+    assert(promptButton("Delete permanently")->Invoke() == B_OK);
+    waitFor([&] { return access(torrent.c_str(), F_OK) != 0; });
+    assert(access(original.c_str(), F_OK) == 0);
+    pane->Navigate(sourcePath.c_str());
+    waitFor([&] { return !pane->IsScanning(); });
+    assert(unlink(original.c_str()) == 0 && rmdir(fixture.c_str()) == 0);
+    puts("ext4 Trash: no silent fallback, Cancel, stale identity and explicit permanent delete OK");
   }
 
   // Simulate a lost mount with normal directories. Neither a stale pane

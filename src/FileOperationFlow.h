@@ -44,8 +44,8 @@ private:
   BMessenger owner;
   ArchiveActions archiveActions;
   BMessenger bulkRenameWindow;
-  ReadWorker *restoreProbe = nullptr;
-  int64 restoreRequest = 0;
+  ReadWorker *trashProbe = nullptr;
+  int64 trashRequest = 0;
 };
 
 } // namespace Listi
