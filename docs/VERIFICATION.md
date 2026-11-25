@@ -20,7 +20,7 @@ Pre-release hands-on testing on Haiku identified failures that scripted checks h
 
 ### Physical USB disconnect during copy
 
-**Disconnecting a physical USB disk during a copy has not been tested.** The steps below are a plan, not a result.
+The first physical test on 0.38.0-30 ended in a kernel panic; see the [field report](#physical-usb-field-report-0380-30-2026-11-25). The steps below describe the intended checks.
 
 1. Use disposable files and a spare USB disk. Record checksums for the source, a file already on the USB disk and an earlier completed copy.
 2. Start **Copy** in Listi. Unplug the USB disk while it is still being written to, then click **Cancel**. Record whether the window responds, the job's exact status and how long it stays in that state.
@@ -373,3 +373,7 @@ Open it to check the explanation. Return the same store, navigate to an
 unconfigured folder and back in the same window: its count must recover without
 switching applications. In the neighbouring preview, step to the older version
 and back; closing it must return the previous folder without writing either one.
+
+### Physical USB field report: 0.38.0-30, 2026-11-25
+
+The tester unplugged the stick during Copy and dismissed the visible errors. The file remained red with “Needs attention”. Screenshots in the open folder could still be viewed. Attempting to open another folder on the disconnected stick was followed by a Haiku kernel panic. The photographed trace shows a directory reader, Listi directory scan frames and the FAT filesystem path. The root cause and exact FAT variant are not established. No post-remount checksums or BFS outcome were reported. Physical disconnect qualification failed; beta remains on hold pending a fix and hardware verification.

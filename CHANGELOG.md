@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.38.0-31 (private USB test candidate)
+
+- After a removable disk reports an interrupted transfer, Listi blocks further access to the affected location across its windows. Switch to a local folder to continue. Safely reconnect and mount the disk before restarting Listi to use it again.
+- This is an application-side mitigation for the physical disconnect reported on revision 30. It is not a Haiku kernel fix. Physical verification is still pending.
+
 ## 0.38.0-30 (local candidate)
 
 - Detach the live Inspector, move or resize its window, and dock it again without losing the selection or an open text draft.

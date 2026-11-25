@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "Pane.h"
+#include "UnavailableVolume.h"
 #include <Window.h>
 #include <Entry.h>
 #include <Roster.h>
@@ -124,6 +125,10 @@ bool Pane::HandleOpenCommand(
   }
 
   const auto path = SelectedPath();
+  if (Listi::InterruptedVolumes().Contains(path)) {
+    ShowStatus(Listi::kUnavailableVolumeText);
+    return true;
+  }
   if (path.empty()) {
     PostMainWindowNotice(missingSelection);
   } else if (action == kFileTypeIcon) {

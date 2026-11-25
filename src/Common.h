@@ -109,6 +109,8 @@ enum : uint32 {
   kFileErrorSelected = 'ferr',
   kJobDone = 'jdon',
   kQueueWake = 'qwke',
+  kVolumeUnavailable = 'vuna',
+  kOperationErrorDismissed = 'oeam',
   kPause = 'paus',
   kAbort = 'abor',
   kConflict = 'conf',

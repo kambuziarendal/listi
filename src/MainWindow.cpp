@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include <stdexcept>
+#include "UnavailableVolume.h"
 #include "../build/ListiBuildIdentity.h"
 #include "FileClipboard.h"
 #include <Alert.h>
@@ -528,7 +529,8 @@ class MainWindow : public Listi::WorkingWindow {
       if (m->GetInt32("pane", -1) == split->Source() || split->HasPanelPreview())
         split->UpdatePreviews();
       if (m->GetInt32("pane", -1) == split->Source() && m->HasString("operationError"))
-        queue.ErrorInfo(m->GetString("operationError", ""));
+        queue.ErrorInfo(m->GetString("operationError", ""), m->GetInt64("operation", 0),
+                        m->GetString("path", ""));
       break;
     case kPaneDisplay:
       split->RememberPaneDisplay(*m);
@@ -1014,6 +1016,12 @@ public:
       queue.ErrorInfo("Choose a real folder for this action, not a search list.");
       return;
     }
+    if ((needsOtherFolder && Listi::InterruptedVolumes().Contains(
+                          panes[prefs.SinglePane() ? source : 1 - source]->Path())) ||
+        (needsCurrentFolder && Listi::InterruptedVolumes().Contains(panes[source]->Path()))) {
+      queue.ErrorInfo(Listi::kUnavailableVolumeText);
+      return;
+    }
     if ((panelTransfer || writesHere) && !destination.LocationValid() &&
         !destination.IsScanning()) {
       queue.ErrorInfo("Choose an available destination folder, or reconnect the disk and reload.");
@@ -1133,8 +1141,18 @@ public:
       break;
     }
     case kFileProgress:
+      if (m->GetInt32("state", 0) == 3 &&
+          queue.ErrorDismissed(m->GetInt64("operation", 0), m->GetString("path", "")))
+        break;
+      [[fallthrough]];
+    case kOperationErrorDismissed:
       for (auto p : panes)
         p->MessageReceived(m);
+      break;
+    case kVolumeUnavailable:
+      for (auto *pane : panes)
+        pane->MessageReceived(m);
+      split->UpdatePreviews();
       break;
     case kQueueWake:
       for (auto &done : queue.TakeEvents()) {
@@ -1142,6 +1160,9 @@ public:
         if (done.what != kJobDone)
           continue;
         clipboard.JobFinished(done);
+        if (queue.ErrorDismissed(done.GetInt64("operation", 0),
+                                 done.GetString("onlyFailedFile", "")))
+          done.AddBool("errorDismissed", true);
         for (auto p : panes)
           p->MessageReceived(&done);
         shelf.Refresh();

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "DirectoryScanner.h"
+#include "UnavailableVolume.h"
 #include "ReadWorker.h"
 #include "Common.h"
 #include "FileOperation.h"
@@ -78,7 +79,9 @@ public:
       reply.AddInt64("serial", serial);
       reply.AddString("path", path);
       reply.AddInt32("iconSize", pixels);
-      if (pixels == 16 || pixels == 96) {
+      if ((pixels == 16 || pixels == 96) &&
+          !Listi::InterruptedVolumes().ContainsResolved(path) &&
+          !Listi::InterruptedVolumes().ContainsDevice(m->GetInt64("device", -1))) {
         if (Listi::IsVirtual(path)) {
           ReadVirtualIcon(m->GetString("name", ""), m->GetBool("directory", false), pixels, reply);
         } else {
@@ -106,6 +109,14 @@ public:
     if (generation->load() != serial)
       return;
     BString path = m->GetString("path", "");
+    if (Listi::InterruptedVolumes().ContainsResolved(path.String())) {
+      BMessage failed(kScanDone);
+      failed.AddInt64("serial", serial);
+      failed.AddString("path", path);
+      failed.AddString("error", Listi::kUnavailableVolumeText);
+      Complete(failed, serial);
+      return;
+    }
     bool icons = m->GetBool("icons", true);
     int32 iconPixels = m->GetInt32("iconSize", 16);
     if (m->GetBool("trash", false)) {
@@ -146,7 +157,8 @@ public:
     };
     auto row = [&](const char *full, const char *label, bool parent = false,
                    int directory = -1, const struct stat *opened = nullptr) {
-      if (deliveryFailed || generation->load() != serial)
+      if (deliveryFailed || generation->load() != serial ||
+          Listi::InterruptedVolumes().Contains(full))
         return;
       struct stat st;
       if ((directory < 0 ? lstat(full, &st)
@@ -161,7 +173,7 @@ public:
       bool link = S_ISLNK(st.st_mode);
       bool dir = S_ISDIR(st.st_mode);
       struct stat resolved;
-      const bool resolvedLink = link &&
+      const bool resolvedLink = link && !Listi::InterruptedVolumes().ContainsResolved(full) &&
           (directory < 0 ? stat(full, &resolved)
                          : fstatat(directory, label, &resolved, 0)) == 0;
       if (resolvedLink)
@@ -273,6 +285,8 @@ public:
       BVolume volume;
       while (!deliveryFailed && generation->load() == serial &&
              roster.GetNextVolume(&volume) == B_OK) {
+        if (Listi::InterruptedVolumes().ContainsDevice(volume.Device()))
+          continue;
         BDirectory root;
         BEntry e;
         BPath p;
@@ -286,6 +300,8 @@ public:
       char resolved[PATH_MAX];
       if (!realpath(path.String(), resolved)) {
         done.AddString("error", strerror(errno));
+      } else if (Listi::InterruptedVolumes().Contains(resolved)) {
+        done.AddString("error", Listi::kUnavailableVolumeText);
       } else {
         if (generation->load() != serial)
           return;

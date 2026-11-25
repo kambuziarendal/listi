@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "ReadWorker.h"
+#include "UnavailableVolume.h"
 #include "SearchWorker.h"
 #include "FileSearch.h"
 #include <MessageRunner.h>
@@ -60,13 +61,17 @@ class SearchWorker : public Listi::ReadWorker {
       return ok;
     };
     SearchSummary summary;
-    if (!initial && !SameSearchEntry(root))
+    if (Listi::InterruptedVolumes().Contains(request.root))
+      summary.error = Listi::kUnavailableVolumeText;
+    else if (!initial && !SameSearchEntry(root))
       summary.error =
           "Search folder moved, disappeared or was replaced. Start a new search.";
     else
       summary = SearchFiles(
           request, [&] { return Alive(); },
           [&](const SearchHit &hit) {
+            if (Listi::InterruptedVolumes().Contains(hit.path))
+              return true;
             BMessage item;
             if (paneRows) {
               struct stat st;
@@ -77,7 +82,8 @@ class SearchWorker : public Listi::ReadWorker {
               item.AddInt32("kind", S_ISLNK(st.st_mode) ? 2 : S_ISDIR(st.st_mode) ? 1 : 0);
               struct stat target;
               item.AddBool("directory", S_ISDIR(st.st_mode) ||
-                  (S_ISLNK(st.st_mode) && stat(hit.path.c_str(), &target) == 0 && S_ISDIR(target.st_mode)));
+                  (S_ISLNK(st.st_mode) && !Listi::InterruptedVolumes().ContainsResolved(hit.path) &&
+                   stat(hit.path.c_str(), &target) == 0 && S_ISDIR(target.st_mode)));
             } else if (request.flat) {
               item.AddInt64("size", hit.size);
               item.AddInt64("date", hit.modified);
@@ -135,7 +141,8 @@ public:
         Send(failed);
         return;
       }
-      if (request.predicate && m->GetBool("live", false)) {
+      if (request.predicate && m->GetBool("live", false) &&
+          !Listi::InterruptedVolumes().ContainsResolved(request.root)) {
         char path[PATH_MAX];
         struct stat st;
         if (realpath(request.root.c_str(), path) && !stat(path, &st)) {

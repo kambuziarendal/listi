@@ -20,7 +20,8 @@ public:
   void Show();
   void Toggle();
   void Collapse();
-  void ErrorInfo(const char *);
+  void ErrorInfo(const char *, int64 operation = 0, const char *path = "");
+  bool ErrorDismissed(int64 operation, const char *path = "") const;
   BView *View();
   void Start();
   // Critical state is retained until the owning UI consumes it. Notifications are

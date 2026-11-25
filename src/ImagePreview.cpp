@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "ReadWorker.h"
+#include "UnavailableVolume.h"
 #include "StagingSpace.h"
 #include "AdaptiveScrollView.h"
 #include "ImagePreview.h"
@@ -229,6 +230,8 @@ public:
     try {
       c.Check();
       const std::string source = m->GetString("path", "");
+      if (Listi::InterruptedVolumes().ContainsResolved(source))
+        throw std::runtime_error(Listi::kUnavailableVolumeText);
       CachedPreview file(source, c);
       Inspector::Input input(file.path);
       kind = Inspector::Identify(Listi::LocationLeaf(source), input);
@@ -475,7 +478,8 @@ void ImagePreview::DetachedFromWindow() {
   replies->Clear();
   BView::DetachedFromWindow();
 }
-bool ImagePreview::ShowFile(const std::string &p) {
+bool ImagePreview::ShowFile(const std::string &selection) {
+  const std::string p = Listi::InterruptedVolumes().Contains(selection) ? "" : selection;
   if (editor) {
     // Selection and listing updates can arrive while a draft is open.
     // Keep the document pinned, but restore the newest preview on exit.
@@ -487,6 +491,8 @@ bool ImagePreview::ShowFile(const std::string &p) {
   }
   if (path == p && !submissionFailed)
     return true;
+  if (Listi::InterruptedVolumes().Contains(path))
+    Listi::RetireReadWorker(loader);
   path = p;
   photoView = {};
   draggingPhoto = false;
@@ -500,7 +506,7 @@ bool ImagePreview::ShowFile(const std::string &p) {
   return true;
 }
 bool ImagePreview::BeginEditing(const std::string &p) {
-  if (p.empty() || Listi::IsVirtual(p))
+  if (p.empty() || Listi::IsVirtual(p) || Listi::InterruptedVolumes().Contains(p))
     return false;
   if (editor && (path == p || !CloseEditor()))
     return path == p;
@@ -549,6 +555,12 @@ void ImagePreview::Request(int requestedPage, bool playback) {
   int64 serial = ++*generation;
   terminal->Take();
   replies->Clear();
+  if (Listi::InterruptedVolumes().Contains(path)) {
+    Listi::RetireReadWorker(loader);
+    path.clear();
+    kind = Inspector::Kind::Unknown;
+    playing = false;
+  }
   if (!loader && Window() && !path.empty()) {
     loader = new Loader(BMessenger(this), generation, replies, terminal);
     Listi::StartReadWorker(loader);
@@ -641,7 +653,8 @@ void ImagePreview::MessageReceived(BMessage *m) {
       Request(1);
     return;
   case kFileAction: {
-    if (!ready || path.empty() || Listi::IsVirtual(path))
+    if (!ready || path.empty() || Listi::IsVirtual(path) ||
+        Listi::InterruptedVolumes().Contains(path))
       return;
     if (kind == Inspector::Kind::Audio || kind == Inspector::Kind::Video) {
       entry_ref ref;

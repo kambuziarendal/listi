@@ -277,6 +277,10 @@ public:
       Queue({});
       return;
     }
+    if (m->what == kVolumeUnavailable) {
+      Broadcast(m);
+      return;
+    }
     if (m->what == kBrowserClosed) {
       browsers.erase(m->GetInt64("id", -1));
       if (browsers.empty()) {

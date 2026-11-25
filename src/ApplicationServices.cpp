@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "ApplicationServices.h"
+#include "UnavailableVolume.h"
 #include "Common.h"
 #include "ImageConvert.h"
 #include "JobSnapshot.h"
@@ -137,6 +138,8 @@ public:
     try {
       BString path = m->GetString("path", ""),
               mode = m->GetString("mode", "open");
+      if (Listi::InterruptedVolumes().ContainsResolved(path.String()))
+        throw std::runtime_error(Listi::kUnavailableVolumeText);
       BMessenger pane;
       m->FindMessenger("pane", &pane);
       if (mode == "open") {

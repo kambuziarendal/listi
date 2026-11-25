@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "FileSearch.h"
+#include "UnavailableVolume.h"
 #include "VirtualFile.h"
 #include <UnicodeChar.h>
 #include <Entry.h>
@@ -90,6 +91,10 @@ SearchSummary SearchFiles(const SearchRequest &request,
   }
   char resolved[PATH_MAX];
   struct stat rootStat;
+  if (InterruptedVolumes().ContainsResolved(request.root)) {
+    out.error = kUnavailableVolumeText;
+    return out;
+  }
   if (!realpath(request.root.c_str(), resolved) || stat(resolved, &rootStat)) {
     out.error = strerror(errno);
     return out;
@@ -225,7 +230,7 @@ SearchSummary SearchFiles(const SearchRequest &request,
       ++out.visited;
       std::string path =
           current.path + (current.path == "/" ? "" : "/") + item->d_name;
-      if (excluded(path) || IsListiPrivateEntry(path))
+      if (InterruptedVolumes().Contains(path) || excluded(path) || IsListiPrivateEntry(path))
         continue;
       struct stat st;
       if (lstat(path.c_str(), &st)) {

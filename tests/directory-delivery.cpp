@@ -4,6 +4,7 @@
 #include "VirtualFile.h"
 #include "Common.h"
 #include "Pane.h"
+#include "UnavailableVolume.h"
 #include <Window.h>
 #include <Application.h>
 #include <Directory.h>
@@ -336,15 +337,25 @@ int main() {
    snooze(20000);
  }
  check(converged, "pre-completion creation and removal converge without manual reload");
+ // This simulated lost volume must be independent of the healthy folder
+ // used by the ordinary blocked-opendir test below. The latch lasts until exit.
+ const auto lostFolder = root + "/removed-volume";
+ if (mkdir(lostFolder.c_str(), 0700) != 0 ||
+     !(std::ofstream(lostFolder + "/entry") << "disconnected file"))
+   return 4;
+ char canonicalLost[PATH_MAX];
+ if (!realpath(lostFolder.c_str(), canonicalLost))
+   return 4;
  window->Lock();
  holdNextRows = true;
- pane->Navigate(folder.c_str());
+ pane->Navigate(canonicalLost);
  window->Unlock();
  check(acquire_sem_etc(held, 1, B_RELATIVE_TIMEOUT, 5000000) == B_OK,
        "old reader is blocked before media loss");
  window->Lock();
+ InterruptedVolumes().Block(canonicalLost);
  BMessage interrupted(kJobDone);
- interrupted.AddString("interruptedCopyFolder", pane->Path());
+ interrupted.AddString("interruptedCopyFolder", canonicalLost);
  pane->MessageReceived(&interrupted);
  BMessage unrelated(kJobDone);
  pane->MessageReceived(&unrelated);

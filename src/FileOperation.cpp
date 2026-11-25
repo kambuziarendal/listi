@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "FileOperation.h"
+#include "UnavailableVolume.h"
 #include "JobReportStore.h"
 #include "BulkRename.h"
 #include "DirectoryFinalization.h"
@@ -64,8 +65,15 @@ std::string Canonical(const std::string &p) {
     throw std::runtime_error(p + ": " + strerror(errno));
   return out;
 }
+class FilesystemError : public std::runtime_error {
+public:
+  FilesystemError(const std::string &path, int error)
+      : std::runtime_error(path + ": " + strerror(error)), path(path), error(error) {}
+  const std::string path;
+  const int error;
+};
 void Fail(const std::string &p) {
-  throw std::runtime_error(p + ": " + strerror(errno));
+  throw FilesystemError(p, errno);
 }
 dirent *NextEntry(DIR *directory, const std::string &path) {
   errno = 0;
@@ -92,7 +100,7 @@ struct Runner {
   std::string guardedSource;
   std::map<std::string, size_t> outcomeIndex;
   struct BackingDevice {
-    std::string path, mount;
+    std::string path, mount, folder;
     NodeIdentity node;
     bool removable = false, ntfs = false, fat = false, attributes = false;
   };
@@ -105,6 +113,7 @@ struct Runner {
       if (fs_stat_dev(volume, &info))
         throw std::runtime_error(folder + ": volume is no longer available.");
       BackingDevice backing;
+      backing.folder = folder;
       backing.ntfs = strcasecmp(info.fsh_name, "ntfs") == 0;
       backing.fat = strcasecmp(info.fsh_name, "fat") == 0;
       backing.attributes = (info.flags & B_FS_HAS_ATTR) != 0;
@@ -138,11 +147,29 @@ struct Runner {
           "check both volumes after reconnecting.";
       if (backing.removable) {
         interruptedFolder = backing.mount.empty() ? folder : backing.mount;
+        InterruptedVolumes().Block(interruptedFolder, volume);
         throw RemovableCopyInterrupted(message);
       }
       throw std::runtime_error(message);
     }
     backing.node = {st.st_dev, st.st_ino};
+  }
+  void CheckRemovableFailure(const std::runtime_error &failure) {
+    const auto *error = dynamic_cast<const FilesystemError *>(&failure);
+    for (const auto &[volume, backing] : backingDevices) {
+      if (!backing.removable)
+        continue;
+      const auto &folder = backing.mount.empty() ? backing.folder : backing.mount;
+      if (error && IsRemovableIOError(error->error) &&
+          (error->path == folder ||
+           error->path.compare(0, folder.size() + 1, folder + "/") == 0)) {
+        InterruptedVolumes().Block(folder, volume);
+        throw RemovableCopyInterrupted(error->what(), folder);
+      }
+      // Some filesystem wrappers report an ordinary runtime_error. Check
+      // devfs, not the mount that may still answer stale cached metadata.
+      CheckDevice(volume, folder);
+    }
   }
   void CheckDestinationDevice(dev_t volume) {
     CheckDevice(volume, guardedJob->destination);
@@ -951,9 +978,25 @@ struct Runner {
             permissions = StagingPermissions::KeepCreationMode;
           else if (ntfsTarget)
             permissions = StagingPermissions::PreserveIfSupported;
-          const bool modeSet = WriteRemovableStagingFile(
-              std::exchange(in.n, -1), std::exchange(out.n, -1), st,
-              checkpoint, true, permissions, ntfsTarget);
+          bool modeSet;
+          try {
+            modeSet = WriteRemovableStagingFile(
+                std::exchange(in.n, -1), std::exchange(out.n, -1), st,
+                checkpoint, true, permissions, ntfsTarget);
+          } catch (const RemovableCopyInterrupted &) {
+            // A checkpoint identifies its endpoint. A failed read/write or
+            // unresolved syscall does not, so suspend each removable endpoint.
+            if (!InterruptedVolumes().Contains(interruptedFolder)) {
+              if (removableSource)
+                InterruptedVolumes().Block(interruptedFolder, st.st_dev);
+              const auto &target = backingDevices.at(stagingIdentity.st_dev);
+              if (target.removable)
+                InterruptedVolumes().Block(
+                    target.mount.empty() ? guardedJob->destination : target.mount,
+                    stagingIdentity.st_dev);
+            }
+            throw;
+          }
           interruptedFolder.clear();
           if (!modeSet)
             PermissionNotice(src);
@@ -1072,7 +1115,16 @@ struct Runner {
       throw;
     } catch (...) {
       bool cancelled = false;
-      try { throw; } catch (const Cancelled &) { cancelled = true; } catch (...) {}
+      try { throw; }
+      catch (const Cancelled &) { cancelled = true; }
+      catch (const std::runtime_error &error) {
+        try {
+          CheckRemovableFailure(error);
+        } catch (const RemovableCopyInterrupted &) {
+          recovery.NoteFailure(false);
+          throw;
+        }
+      } catch (...) {}
       recovery.NoteFailure(cancelled);
       const auto device = backingDevices.find(stagingIdentity.st_dev);
       if (device != backingDevices.end() && device->second.removable)
@@ -1168,6 +1220,15 @@ struct Runner {
       deferCompletion = job.action == Action::Move;
       try {
         guardedSource = source;
+        const bool transfer = job.action == Action::Copy || job.action == Action::Move ||
+                              job.action == Action::Duplicate;
+        if (transfer) {
+          if (job.expectedDestination.device >= 0)
+            CheckDestinationDevice(job.expectedDestination.device);
+          const auto expected = job.expectedSources.find(source);
+          if (expected != job.expectedSources.end())
+            CheckSourceDevice(expected->second.device);
+        }
         Guard();
         // Do not allow volume roots, parent pseudoentries or empty paths to be
         // removed.
@@ -1335,11 +1396,30 @@ struct Runner {
         }
       } catch (const RemovableCopyInterrupted &e) {
         result.interruptedCopyFolder = e.folder.empty() ? interruptedFolder : e.folder;
+        if (!InterruptedVolumes().Contains(result.interruptedCopyFolder)) {
+          for (const auto &[device, backing] : backingDevices)
+            if (backing.removable && !backing.mount.empty() &&
+                backing.mount == result.interruptedCopyFolder)
+              InterruptedVolumes().Block(result.interruptedCopyFolder, device);
+          InterruptedVolumes().Block(result.interruptedCopyFolder);
+        }
         Problem(source, e.what());
         if (h.fileFailed)
           h.fileFailed(source, e.what());
         throw; // Later selected roots must not enter the disconnected mount.
       } catch (const std::runtime_error &e) {
+        if (job.action == Action::Copy || job.action == Action::Move ||
+            job.action == Action::Duplicate) {
+          try {
+            CheckRemovableFailure(e);
+          } catch (const RemovableCopyInterrupted &lost) {
+            result.interruptedCopyFolder = lost.folder.empty() ? interruptedFolder : lost.folder;
+            Problem(source, lost.what());
+            if (h.fileFailed)
+              h.fileFailed(source, lost.what());
+            throw;
+          }
+        }
         Problem(source, e.what());
         AddError(e.what());
         if (h.fileFailed)

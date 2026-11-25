@@ -10,6 +10,7 @@
 #include "../src/MainWindow.h"
 #include "../src/MainWindowMenu.h"
 #include "../src/Pane.h"
+#include "../src/UnavailableVolume.h"
 #include "../src/PanelTools.h"
 #include "../src/PaneSidebar.h"
 #include "../src/SavedPlaces.h"
@@ -1002,6 +1003,26 @@ int main(int argc, char **argv) {
     be_clipboard->Unlock();
     puts("Clipboard: queued confirmation retained original bytes; next paste available");
   }
+
+  // Simulate a lost mount with normal directories. Neither a stale pane
+  // nor a separate pane may start reading another folder below that mount.
+  pane->Navigate(elsewhere.c_str());
+  rightPane->Navigate(sourcePath.c_str());
+  waitFor([&] { return !pane->IsScanning() && !rightPane->IsScanning(); });
+  assert(pane->LocationValid() && rightPane->LocationValid());
+  Listi::InterruptedVolumes().Block(pane->Path());
+  BMessage volumeUnavailable(kVolumeUnavailable);
+  window->MessageReceived(&volumeUnavailable);
+  assert(!pane->LocationValid() && !pane->IsScanning() && pane->Selected().empty());
+  waitFor([&] { return !rightPane->IsScanning(); });
+  assert(rightPane->LocationValid());
+  pane->Reload();
+  assert(!pane->IsScanning());
+  rightPane->Navigate((elsewhere + "/subfolder").c_str());
+  assert(!rightPane->IsScanning() && sourcePath == rightPane->Path());
+  pane->Navigate(sourcePath.c_str());
+  waitFor([&] { return !pane->IsScanning(); });
+  assert(pane->LocationValid() && sourcePath == pane->Path());
 
   assert(rmdir(created.c_str()) == 0 && rmdir(elsewhere.c_str()) == 0);
   assert(unlink(file.c_str()) == 0 && rmdir(temp) == 0);

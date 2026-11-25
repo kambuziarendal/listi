@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: MIT
 // Park a staged-file flush without needing a particular USB driver failure.
 #include "RemovableCopy.h"
+#include "UnavailableVolume.h"
+#ifdef __HAIKU__
+#include <Errors.h>
+#endif
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -21,6 +25,11 @@ std::mutex mutex;
 std::condition_variable changed;
 bool entered = false, release = false, returned = false;
 std::atomic<int> park{-1}, failRead{-1};
+#ifdef __HAIKU__
+constexpr int kSimulatedDiskError = B_DEV_NOT_READY;
+#else
+constexpr int kSimulatedDiskError = EIO;
+#endif
 bool stallWrite = false;
 std::atomic<int> stallRead{-1};
 std::atomic<int> writeCalls{0};
@@ -62,7 +71,7 @@ extern "C" ssize_t __wrap_read(int fd, void *bytes, size_t count) {
   if (fd == stallRead.load())
     Hold();
   if (fd == failRead.load()) {
-    errno = EIO;
+    errno = kSimulatedDiskError;
     return -1;
   }
   return __real_read(fd, bytes, count);
@@ -170,5 +179,21 @@ int main() {
   Require(interrupted && fcntl(out, F_GETFD) == -1 &&
               std::filesystem::file_size(root / "read-error") == 0,
           "removable read failure suspends the endpoint before devfs notices");
+  Require(!Listi::IsRemovableIOError(ENOSPC) && !Listi::IsRemovableIOError(EACCES),
+          "ordinary space and permission errors do not suspend a volume");
+  Listi::UnavailableVolumes volumes;
+  volumes.Block("/USB Disk/", 123);
+  Require(volumes.Contains("/USB Disk") && volumes.Contains("//USB Disk/./other") &&
+              volumes.Contains("/USB Disk/../boot/home") &&
+              volumes.Contains("archive:///USB%20Disk/test.zip!/") &&
+              volumes.ContainsDevice(123) && !volumes.ContainsDevice(124) &&
+              !volumes.Contains("/USB Disk backup") && !volumes.Contains("/boot/home") &&
+              !volumes.Contains("sftp://example/USB%20Disk"),
+          "a detached volume covers alternate spellings, descendants and archive backings, but not independent paths");
+  const auto alias = root / "alias";
+  std::filesystem::create_directory_symlink("/USB Disk", alias);
+  Require(volumes.ContainsResolved((alias / "subdirectory").string()) &&
+              !volumes.ContainsResolved(root.string()),
+          "a local symlink to a detached volume is recognized without querying its target");
   std::filesystem::remove_all(root);
 }

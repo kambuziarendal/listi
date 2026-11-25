@@ -35,3 +35,13 @@ These 25 changes address findings from the earlier desktop reviews and hands-on 
 On the target hardware, repeat the attributed FAT copy and the Inspector sequence above using disposable files. Compare the destination contents and the visible state, not just the status text. For a usability study, ask someone unfamiliar with Listi to predict a transfer destination, keep both conflicting files and restore one file without hints. Record wrong predictions separately from wrong clicks; repeat with keyboard-only input and a narrow window.
 
 References: [Haiku Tracker](https://www.haiku-os.org/docs/userguide/en/tracker.html), [Haiku shortcuts](https://www.haiku-os.org/docs/userguide/en/keyboard-shortcuts.html), [usability heuristics](https://www.nngroup.com/articles/ten-usability-heuristics/), [GNOME feedback guidance](https://developer.gnome.org/hig/patterns/feedback/notifications.html).
+
+## Open feedback from 0.38.0-30 testing
+
+- [ ] Remove the “Inspector” heading inside both the docked panel and the detached window. Keep the detached window title.
+- [ ] Keep “Select a file to inspect” when nothing is selected, aligned near the bottom edge with a small inset.
+- [ ] Use Listi’s normal panel background instead of white. Outline the docked Inspector with a thin frame.
+- [ ] Make the upper-right button more compact in both the docked Inspector panel and the detached Inspector window.
+- [ ] After physical USB removal during Copy, dismissing all visible errors left the file red with “Needs attention”. Make it clear whether an action is still pending or only an acknowledged failure remains.
+- [ ] Beta blocker: invalidate disconnected-volume panes and prevent new scans and opens against stale entries. In the physical -30 test, screenshots remained viewable after unplug; navigating to another folder then ended in the Haiku kernel debugger. This does not establish that reads reached the removed device.
+- [ ] Add “Open in Listi” to the Tracker context menu for folders without changing the system file associations.

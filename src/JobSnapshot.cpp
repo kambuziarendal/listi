@@ -1,11 +1,16 @@
 // SPDX-License-Identifier: MIT
 #include "JobSnapshot.h"
+#include "UnavailableVolume.h"
 #include "VirtualFile.h"
 #include <sys/stat.h>
 #include <algorithm>
 namespace Listi {
 void FreezeLocalJob(Job &job, const std::string &folder) {
+  if (InterruptedVolumes().Contains(folder))
+    throw std::runtime_error(kUnavailableVolumeText);
   for (const auto &path : job.sources) {
+    if (InterruptedVolumes().Contains(path))
+      throw std::runtime_error(kUnavailableVolumeText);
     if (IsVirtual(path))
       continue;
     struct stat st;

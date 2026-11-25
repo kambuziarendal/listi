@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "OperationQueue.h"
+#include "UnavailableVolume.h"
 #include "ArchiveJobs.h"
 #include "ArchivePasswords.h"
 #include "BulkRename.h"
@@ -439,7 +440,61 @@ int main(){
            window->queue->Report(historyIds[1]) && window->queue->Report(historyIds.back()),
        "history expires the oldest completed reports at its explicit limit");
 
- window->queue->Enqueue(job(0,401));check(wait([&]{return window->conflicts.size()==5;}),"shutdown fixture is genuinely waiting at conflict");
+ // Simulate the post-I/O-failure state without touching faulty media.
+ const auto holdForDetach = window->queue->Enqueue(job(0, 400));
+ if (!wait([&] { return window->conflicts.size() == 5; }))
+   return 2;
+ const auto unavailable = root + "/detached";
+ mkdir(unavailable.c_str(), 0700);
+ mkdir((unavailable + "/nested").c_str(), 0700);
+ Job blocked{Action::Copy, {one}, unavailable + "/nested"};
+ FreezeLocalJob(blocked, blocked.destination);
+ blocked.tag = 401;
+ const auto blockedId = window->queue->Enqueue(blocked);
+ Job healthy{Action::MakeDirectory, {}, root + "/detached-sibling"};
+ const auto healthyId = window->queue->Enqueue(healthy);
+ InterruptedVolumes().Block(unavailable);
+ check(window->queue->CancelOperation(holdForDetach) &&
+           wait([&] { return finished(blockedId, 401, false, false, false) &&
+                             finished(healthyId, 0, true, false, false); }) &&
+           access((blocked.destination + "/" + Leaf(one)).c_str(), F_OK) != 0 &&
+           access(healthy.destination.c_str(), F_OK) == 0,
+       "a waiting job cannot enter the interrupted volume; independent local work still runs");
+ check(window->queue->Enqueue(blocked) == 0,
+       "a new job cannot be queued against the blocked volume");
+
+ window->Lock();
+ auto *progressView = window->queue->View();
+ BMessage dismissMessage('jder');
+ for (int i = 0; i < 24; ++i)
+   progressView->MessageReceived(&dismissMessage);
+ auto reportFileError = [&](const char *path) {
+   BMessage error(kFileErrorSelected);
+   error.AddInt64("operation", 9001);
+   error.AddString("path", path);
+   error.AddString("error", path);
+   progressView->MessageReceived(&error);
+ };
+ reportFileError("first file");
+ reportFileError("second file");
+ progressView->MessageReceived(&dismissMessage);
+ check(window->queue->ErrorDismissed(9001, "first file") &&
+           !window->queue->ErrorDismissed(9001, "second file") &&
+           !window->queue->ErrorDismissed(9001),
+       "acknowledging one file before completion does not acknowledge the rest of the operation");
+ BMessage failure(kJobDone);
+ failure.AddInt64("operation", 9001);
+ failure.AddString("issue", "Multiple files failed");
+ progressView->MessageReceived(&failure);
+ check(std::string(compactTitle->Text()) == "Needs attention",
+       "a multi-file failure remains visible after one early acknowledgement");
+ progressView->MessageReceived(&dismissMessage);
+ progressView->MessageReceived(&dismissMessage);
+ check(std::string(compactTitle->Text()) == "Failure acknowledged",
+       "dismissing the final alert clears Needs attention without reporting success");
+ window->Unlock();
+
+ window->queue->Enqueue(job(0,402));check(wait([&]{return window->conflicts.size()==6;}),"shutdown fixture is genuinely waiting at conflict");
  window->Lock();
  clearReports->Invoke();
  window->Unlock();

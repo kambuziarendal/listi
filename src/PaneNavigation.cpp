@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "Pane.h"
+#include "UnavailableVolume.h"
 #include "FileDetails.h"
 #include "FileGrid.h"
 #include "MillerColumns.h"
@@ -169,6 +170,9 @@ bool Pane::HandleQueryReply(BMessage &message) {
       row->path = hit.GetString("path", "");
       row->name = Leaf(row->path);
       row->device = hit.GetInt64("device", -1);
+      if (Listi::InterruptedVolumes().ContainsDevice(row->device) ||
+          Listi::InterruptedVolumes().Contains(row->path))
+        continue;
       row->node = hit.GetInt64("node", -1);
       row->kind = hit.GetInt32("kind", 0);
       row->directory = hit.GetBool("directory", false);

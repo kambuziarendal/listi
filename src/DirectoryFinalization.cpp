@@ -91,8 +91,7 @@ bool PinnedDirectory::Flush(const std::function<void()> &checkpoint,
     } catch (const RemovableCopyInterrupted &failure) {
       throw interruption(failure.what());
     }
-    if (error == EIO || error == ENODEV || error == ENXIO ||
-        closeError == EIO || closeError == ENODEV || closeError == ENXIO)
+    if (IsRemovableIOError(error) || IsRemovableIOError(closeError))
       throw interruption(
           "Removable directory flush failed. Durability after restart is unknown.");
   } else
