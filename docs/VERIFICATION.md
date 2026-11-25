@@ -4,6 +4,10 @@ Listi is alpha software that works directly on files. Tests provide evidence for
 specific cases, not proof that every filesystem, server or archive variant is
 safe. Use disposable fixtures and independent backups.
 
+## 0.38.0-37 alpha
+
+The Haiku x86_64 package self-test passed (58 checks). In a Haiku VM, after a clean BFS unmount and remount, switching to the former background tab showed Disks instead of reopening the old path. Native folder-tabs, main-window-routing, removable-copy and operation-queue cases exited successfully. These results do not establish safe removal during writes. See the [FAT incident record](#physical-usb-disconnect-during-copy).
+
 ## 0.38.0-23 alpha
 
 The [release notes](https://github.com/kambuziarendal/listi/releases/tag/v0.38.0-23) identify the source, package digest and checks for this revision. The package is the tested binary, not a rebuild of the documentation branch. Local native tests run inside Haiku; they are not physical USB tests or hosted CI results. In particular, a successful copy to NTFS does not establish safe removal if the mounted volume still reports “device busy.”

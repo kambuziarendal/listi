@@ -1,6 +1,6 @@
 # Workflow guide
 
-This guide describes the [0.38.0-23 alpha for Haiku x86_64](../README.md#install). New to Listi? Start with the [feature tour](FEATURES.md). Try file operations on disposable copies and keep independent backups.
+This guide describes the [0.38.0-37 alpha for Haiku x86_64](../README.md#install). New to Listi? Start with the [feature tour](FEATURES.md). Try file operations on disposable copies and keep independent backups.
 
 ## Window names and layouts
 
@@ -313,7 +313,7 @@ can cancel a selected waiting job, or choose **Cancel all** to discard waiting
 jobs and request cancellation of the running one. A cancellation request does
 not mean an in-flight write has stopped, and it does not undo completed work.
 See the [virtual USB result](VERIFICATION.md#0361-3-package-results) and the
-[physical USB test, not yet run](VERIFICATION.md#physical-usb-disconnect-during-copy).
+[physical USB incident record](VERIFICATION.md#physical-usb-disconnect-during-copy).
 
 Cancelling an upload does not start another
 download to verify or remove temporary files. If the old destination has

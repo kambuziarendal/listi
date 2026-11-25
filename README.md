@@ -19,13 +19,13 @@ The [feature tour](docs/FEATURES.md) covers Mini icons, compact Einn windows, wo
 
 ## Install
 
-Download the **[0.38.0-23 alpha test candidate for Haiku x86_64](https://github.com/kambuziarendal/listi/releases/tag/v0.38.0-23)**. Open the HPKG in HaikuDepot, or install it from the download folder:
+Download the **[0.38.0-37 alpha test candidate for Haiku x86_64](https://github.com/kambuziarendal/listi/releases/tag/v0.38.0-37)**. Open the HPKG in HaikuDepot, or install it from the download folder:
 
 ```sh
-pkgman install ./listi-0.38.0-23-x86_64.hpkg
+pkgman install ./listi-0.38.0-37-x86_64.hpkg
 ```
 
-This is alpha software. See the release notes for what was tested, and try it on copies of your files. To transfer files between disks, use **Copy**, remount the destination and check the copy before removing the original. In 0.36.1-3 a virtual USB disconnect could leave a regular-file copy waiting after **Cancel**. Newer candidates isolate staged data writes and flushes on USB destinations so a stalled request cannot later publish the file. The [physical USB test](docs/VERIFICATION.md#physical-usb-disconnect-during-copy) has not been run.
+This is alpha software. See the release notes for what was tested, and try it on copies of your files. To transfer files between disks, use **Copy**, remount the destination and check the copy before removing the original. In 0.36.1-3 a virtual USB disconnect could leave a regular-file copy waiting after **Cancel**. Newer candidates isolate staged data writes and flushes on USB destinations so a stalled request cannot later publish the file. See the [physical USB incident and VM findings](docs/VERIFICATION.md#physical-usb-disconnect-during-copy); interrupted FAT writes remain unsafe.
 
 ## Basic workflow
 

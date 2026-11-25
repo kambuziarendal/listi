@@ -2,7 +2,12 @@
 
 Listi can be a small folder window, a two-panel copying desk, or a workspace with a file list, preview and shell. Start with one task; you don't need to configure a workspace to use it.
 
-[Install the Haiku x86_64 alpha](../README.md#install) · [What's new in 0.38.0-23](../CHANGELOG.md) · [Workflow guide](GUIDE.md)
+[Install the Haiku x86_64 alpha](../README.md#install) · [What's new in 0.38.0-37](../CHANGELOG.md) · [Workflow guide](GUIDE.md)
+
+**New since revision 23.** Right-click a folder tab to move it to the other panel or detach it to Einn. Its running CLI follows the tab. To combine work from two windows, choose **Window > Move tab to window**. The separate Operations window supports Haiku Stack & Tile and comes forward when a job needs a decision. The Inspector can dock or detach without discarding an open draft.
+
+Open Disks panels now follow mount changes. On ext4, an ordinary copy can finish with a warning about omitted Haiku attributes. On a volume without Trash, permanent deletion requires explicit confirmation.
+
 
 [Browse](#browse-in-a-window-that-fits) · [Find and select](#find-and-select-the-right-files) · [Transfer](#copy-move-and-recover) · [Restore versions](#go-back-to-an-earlier-version) · [Preview and edit](#look-inside-a-file) · [Organise](#organise-files-across-folders) · [Archives and servers](#work-inside-archives-and-on-servers) · [Haiku tools](#use-haikus-tools-without-losing-your-place)
 

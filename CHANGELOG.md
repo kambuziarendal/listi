@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.38.0-37 (private test candidate)
+## [0.38.0-37 alpha](https://github.com/kambuziarendal/listi/releases/tag/v0.38.0-37)
+
+This public package includes the changes in revisions 24 through 37 listed below. Interrupted FAT writes can still crash Haiku; finish the copy and unmount before disconnecting the drive.
 
 - Suspended folder tabs no longer reopen a retired location after Haiku reports its volume was unmounted.
 
