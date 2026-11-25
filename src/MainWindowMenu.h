@@ -17,7 +17,8 @@ public:
   void SetTransferDirection(const char *direction);
   void SetWorkspace(const WorkspaceLayout &layout, bool quickView);
   void SetFolderTree(bool available, bool visible);
-  void SetPreview(const WorkspaceLayout &layout, bool showingQuickView);
+  void SetPreview(const WorkspaceLayout &layout, bool showingQuickView,
+                  bool inspectorDetached = false);
   void SetFileActions(int32 viewMode, bool flat, bool canOpenFlatView,
                       bool canSaveClipboard, bool canUndoBulkRename);
   void SetFunctionButtonState(bool available, bool requested, bool overflow,
@@ -33,7 +34,7 @@ private:
 
   BMenuItem *saveClipboardTextItem, *saveClipboardImageItem, *undoBulkRenameItem;
   BMenuItem *einnMenu, *askrMenu, *tviskiptMenu, *smidjaMenu;
-  BMenuItem *previewMenu, *quickViewMenu, *flatViewItem, *bankToggle,
+  BMenuItem *previewMenu, *inspectorDockItem, *quickViewMenu, *flatViewItem, *bankToggle,
             *fullBankToggle, *treeToggle;
   BMenu *fileView, *compactActions;
 };

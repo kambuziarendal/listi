@@ -4,6 +4,7 @@
 #include "AdaptiveScrollView.h"
 #include "ImagePreview.h"
 #include "WindowOverview.h"
+#include "WorkspaceSplit.h"
 #include "ViewVisibility.h"
 #include "BitmapMailbox.h"
 #include "Common.h"
@@ -430,6 +431,7 @@ ImagePreview::ImagePreview(bool standalone)
   closeQuickView->ResizeTo(closeQuickView->Bounds().Height(), closeQuickView->Bounds().Height());
   closeQuickView->SetName("close quick view");
   closeQuickView->SetToolTip("Close Quick view (Esc)");
+  dockControl = addButton("↗", Listi::kDetachInspector);
 }
 ImagePreview::~ImagePreview() {
   if (!textScroll->Parent())
@@ -440,6 +442,7 @@ ImagePreview::~ImagePreview() {
 }
 void ImagePreview::AttachedToWindow() {
   closeQuickView->SetTarget(Window());
+  dockControl->SetTarget(Window());
   fileAction->SetTarget(this);
   detachEditor->SetTarget(this);
   doneEditing->SetTarget(this);
@@ -454,7 +457,12 @@ void ImagePreview::AttachedToWindow() {
   loader = new Loader(BMessenger(this), generation, replies, terminal);
   Listi::StartReadWorker(loader);
   if (!path.empty() && !editor)
-    Request(1);
+    Request(page);
+}
+void ImagePreview::AllAttached() {
+  BView::AllAttached();
+  if (editor)
+    RefreshInspectorEditorTarget(editor);
 }
 void ImagePreview::DetachedFromWindow() {
   StopWatching(BMessenger(be_app), 'isav');
@@ -462,6 +470,7 @@ void ImagePreview::DetachedFromWindow() {
   // that posts completed reads to the token from the previous layout.
   ++*generation;
   Listi::RetireReadWorker(loader);
+  playing = false;
   terminal->Take();
   replies->Clear();
   BView::DetachedFromWindow();
@@ -808,6 +817,17 @@ void ImagePreview::SetQuickViewCloseVisible(bool visible) {
     FrameResized(Bounds().Width(), Bounds().Height());
 }
 
+void ImagePreview::SetDockControl(bool floating) {
+  dockControl->SetName(floating ? "dock inspector" : "detach inspector");
+  dockControl->SetLabel(floating ? "↙" : "↗");
+  dockControl->SetToolTip(floating ? "Dock Inspector in its browser"
+                                  : "Detach Inspector to its own window");
+  dockControl->SetMessage(new BMessage(floating ? Listi::kDockInspector
+                                                : Listi::kDetachInspector));
+  Listi::SetViewVisible(dockControl, true);
+  FrameResized(Bounds().Width(), Bounds().Height());
+}
+
 void ImagePreview::FrameResized(float, float) {
   LayoutControls();
   Invalidate();
@@ -828,7 +848,11 @@ void ImagePreview::LayoutControls() {
   const float width = Bounds().Width(), height = Bounds().Height();
   const float closeLeft = width - closeQuickView->Bounds().Width() - 5;
   closeQuickView->MoveTo(std::max(0.f, closeLeft), 3);
-  const float actionsRight = closeQuickView->IsHidden(closeQuickView) ? width : closeLeft;
+  float actionsRight = closeQuickView->IsHidden(closeQuickView) ? width : closeLeft;
+  if (!dockControl->IsHidden(dockControl)) {
+    actionsRight -= dockControl->Bounds().Width() + 4;
+    dockControl->MoveTo(std::max(0.f, actionsRight), 3);
+  }
   photoActions->MoveTo(std::max(0.f, actionsRight - photoActions->Bounds().Width() - 8), 3);
   fileAction->MoveTo(std::max(0.f, actionsRight - fileAction->Bounds().Width() - 8), 3);
   const float doneLeft = actionsRight - doneEditing->Bounds().Width() - 8;
@@ -855,7 +879,8 @@ void ImagePreview::Draw(BRect update) {
   BString title(editor ? "Edit"
                       : closeQuickView->IsHidden(closeQuickView) ? "Inspector" : "Quick view");
   float right = Bounds().right;
-  for (auto button : {photoActions, fileAction, closeQuickView, detachEditor, doneEditing})
+  for (auto button : {photoActions, fileAction, closeQuickView, dockControl,
+                      detachEditor, doneEditing})
     if (!button->IsHidden(button))
       right = std::min(right, button->Frame().left);
   TruncateString(&title, B_TRUNCATE_END, std::max(0.f, right - 16));

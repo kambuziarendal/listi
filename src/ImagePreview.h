@@ -20,6 +20,7 @@ public:
   static void OpenWindow(const std::string &path);
   ~ImagePreview();
   void AttachedToWindow() override;
+  void AllAttached() override;
   void DetachedFromWindow() override;
   void Pulse() override;
   void MessageReceived(BMessage *) override;
@@ -29,6 +30,7 @@ public:
   void MouseMoved(BPoint, uint32, const BMessage *) override;
   void MouseUp(BPoint) override;
   void SetQuickViewCloseVisible(bool visible);
+  void SetDockControl(bool floating);
   bool ShowFile(const std::string &);
   bool HasEditor() const { return editor != nullptr; }
   bool BeginEditing(const std::string &);
@@ -58,7 +60,7 @@ private:
   ThemeTextView *text;
   BScrollView *textScroll;
   BButton *previous, *next, *play;
-  BButton *fileAction, *closeQuickView;
+  BButton *fileAction, *closeQuickView, *dockControl;
   BButton *detachEditor, *doneEditing;
   BView *editor = nullptr;
   bool submissionFailed = false;

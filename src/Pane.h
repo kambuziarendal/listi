@@ -62,7 +62,7 @@ public:
                               OperationQueue &);
   bool HandleOpenCommand(uint32, const BString &editor,
                          const BMessenger &service,
-                         const std::function<ImagePreview *()> &openPreview);
+                         const std::function<void(const std::string &)> &openPreview);
   int64 SelectionRevision() const {
     return locationValid && !scanning ? selectionRevision : -1;
   }

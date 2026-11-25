@@ -3,6 +3,7 @@
 #include "ViewVisibility.h"
 
 #include "ImagePreview.h"
+#include "InspectorEditor.h"
 #include "MainWindowMenu.h"
 #include "Pane.h"
 #include "PaneSidebar.h"
@@ -11,6 +12,10 @@
 #include "ShelfWindow.h"
 #include "PanelTools.h"
 #include "WorkspaceLayout.h"
+#include "WindowOverview.h"
+#include <Application.h>
+#include <GroupLayout.h>
+#include <GroupView.h>
 #include <Layout.h>
 #include <Window.h>
 
@@ -18,6 +23,79 @@ namespace Listi {
 namespace {
 constexpr float kWorkspaceSpacing = 6;
 constexpr int kInspector = 2;
+constexpr uint32 kInspectFile = 'isfl', kRaiseInspector = 'isra';
+
+class FloatingInspector : public WorkingWindow {
+public:
+  explicit FloatingInspector(BWindow *browser)
+      : WorkingWindow(BRect(100, 85, 900, 665), "Listi: Inspector", "Inspector",
+                      B_AUTO_UPDATE_SIZE_LIMITS), owner(browser) {
+    SetLayout(new BGroupLayout(B_VERTICAL, 0));
+    CenterIn(browser->Frame());
+    MoveOnScreen();
+  }
+
+  void DispatchMessage(BMessage *message, BHandler *target) override {
+    if ((message->what == B_QUIT_REQUESTED || message->what == kDockInspector) &&
+        target == this) {
+      RequestDock();
+      return;
+    }
+    if (message->what == B_KEY_DOWN) {
+      const auto modifiers = message->GetInt32("modifiers", 0);
+      const auto key = message->GetInt32("raw_char", 0);
+      if ((modifiers & (B_COMMAND_KEY | B_CONTROL_KEY | B_OPTION_KEY | B_SHIFT_KEY)) ==
+          B_COMMAND_KEY) {
+        if (key == 'w' || key == 'W') {
+          RequestDock();
+          return;
+        }
+        if (key == 'q' || key == 'Q') {
+          be_app->PostMessage(B_QUIT_REQUESTED);
+          return;
+        }
+      }
+      if (HandleInspectorEditorKey(CurrentFocus(), *message))
+        return;
+    }
+    WorkingWindow::DispatchMessage(message, target);
+  }
+
+  void MessageReceived(BMessage *message) override {
+    switch (message->what) {
+    case kInspectFile:
+      Preview().ShowFile(message->GetString("file", ""));
+      break;
+    case kRaiseInspector:
+      if (IsMinimized())
+        Minimize(false);
+      Activate();
+      if (const char *path = message->GetString("edit", nullptr))
+        Preview().BeginEditing(path);
+      break;
+    default:
+      WorkingWindow::MessageReceived(message);
+    }
+  }
+
+private:
+  const BMessenger owner;
+  ImagePreview &Preview() const {
+    return *static_cast<ImagePreview *>(ChildAt(0));
+  }
+  void RequestDock() {
+    BMessage dock(kDockInspector);
+    dock.AddMessenger("inspector", BMessenger(this));
+    // The browser owns placement. Never wait for its lock from this window.
+    owner.SendMessage(&dock, static_cast<BHandler *>(nullptr), 0);
+  }
+};
+
+BWindow *MessengerWindow(const BMessenger &target) {
+  BLooper *looper = nullptr;
+  target.Target(&looper);
+  return static_cast<BWindow *>(looper);
+}
 }
 
 WorkspaceSplit::WorkspaceSplit(Pane &first, Pane &second, Preferences &settings,
@@ -25,15 +103,99 @@ WorkspaceSplit::WorkspaceSplit(Pane &first, Pane &second, Preferences &settings,
     : BSplitView(B_HORIZONTAL, kWorkspaceSpacing), prefs(settings), menu(bar),
       source(prefs.SinglePane() ? prefs.singlePane : 0),
       panes{new PanelTools(0, first), new PanelTools(1, second)},
+      inspectorSlot(new BGroupView(B_VERTICAL, 0)),
       inspector(new ImagePreview()), splitterSize(SplitterSize()) {
   AddChild(panes[0]);
   AddChild(panes[1]);
-  AddChild(inspector);
+  inspectorSlot->GroupLayout()->AddView(inspector);
+  inspector->SetDockControl(false);
+  AddChild(inspectorSlot);
   const WorkspaceLayout defaults;
   for (int i = 0; i < 3; ++i)
     SetItemWeight(i, defaults.splitWeights[i], i == kInspector);
   SetCollapsible(0, false);
   SetCollapsible(1, false);
+}
+
+WorkspaceSplit::~WorkspaceSplit() {
+  if (floatingInspector && floatingInspector->LockTarget())
+    MessengerWindow(*floatingInspector)->Quit();
+}
+
+bool WorkspaceSplit::DetachInspector() {
+  if (floatingInspector) {
+    OpenFloatingInspector({});
+    return false;
+  }
+  auto *host = new FloatingInspector(Window());
+  if (!inspectorSlot->GroupLayout()->RemoveView(inspector)) {
+    host->Quit();
+    return false;
+  }
+  // Finish deleting the browser's native view tokens before remounting.
+  Window()->Sync();
+  if (!host->GetLayout()->AddView(inspector)) {
+    inspectorSlot->GroupLayout()->AddView(inspector);
+    host->Quit();
+    return false;
+  }
+  floatingInspector.emplace(host);
+  quickView = false;
+  SetInspectorVisible(false);
+  SetViewVisible(inspector, true);
+  inspector->SetQuickViewCloseVisible(false);
+  inspector->SetDockControl(true);
+  floatingSelection = Panel(source).SelectedFile();
+  inspector->ShowFile(floatingSelection);
+  host->Show();
+  return true;
+}
+
+bool WorkspaceSplit::DockInspector(const BMessage &message) {
+  if (!floatingInspector)
+    return false;
+  BMessenger origin;
+  if (message.FindMessenger("inspector", &origin) == B_OK && origin != *floatingInspector)
+    return false;
+  if (floatingInspector->LockTargetWithTimeout(500000) != B_OK)
+    return false;
+  auto *host = MessengerWindow(*floatingInspector);
+  if (!host->GetLayout()->RemoveView(inspector)) {
+    host->Unlock();
+    return false;
+  }
+  host->Sync();
+  if (!inspectorSlot->GroupLayout()->AddView(inspector)) {
+    host->GetLayout()->AddView(inspector);
+    host->Unlock();
+    return false;
+  }
+  floatingInspector.reset();
+  inspector->SetDockControl(false);
+  quickView = prefs.SinglePane() || !prefs.Preview() || HasPanelPreview();
+  host->Quit();
+  Window()->Activate();
+  return true;
+}
+
+void WorkspaceSplit::OpenFloatingInspector(const std::string &editPath) {
+  if (!floatingInspector)
+    return;
+  BMessage raise(kRaiseInspector);
+  if (!editPath.empty())
+    raise.AddString("edit", editPath.c_str());
+  floatingInspector->SendMessage(&raise, static_cast<BHandler *>(nullptr), 0);
+}
+
+bool WorkspaceSplit::FloatingInspectorAllowsQuit() {
+  if (!floatingInspector || !floatingInspector->IsValid())
+    return true;
+  if (floatingInspector->LockTargetWithTimeout(500000) != B_OK)
+    return false;
+  auto *host = MessengerWindow(*floatingInspector);
+  const bool allowed = InspectorEditorsAllowQuit(host);
+  host->Unlock();
+  return allowed;
 }
 
 int WorkspaceSplit::SplitIndex(int logicalIndex) const {
@@ -46,9 +208,9 @@ void WorkspaceSplit::PlaceInspector(bool first, float weight) {
   if (inspectorOnLeft == first)
     return;
 
-  GetLayout()->RemoveView(inspector);
+  GetLayout()->RemoveView(inspectorSlot);
   inspectorOnLeft = first;
-  AddChild(SplitIndex(kInspector), inspector, weight);
+  AddChild(SplitIndex(kInspector), inspectorSlot, weight);
   for (int i = 0; i < 3; ++i)
     SetCollapsible(SplitIndex(i), i == kInspector);
 }
@@ -69,7 +231,9 @@ void WorkspaceSplit::SetInspectorVisible(bool visible) {
     return;
 
   inspectorVisible = visible;
-  SetViewVisible(inspector, visible);
+  SetViewVisible(inspectorSlot, visible);
+  if (!floatingInspector)
+    SetViewVisible(inspector, visible);
 }
 
 void WorkspaceSplit::ApplyGeometry(const WorkspaceLayout &layout, bool quickView,
@@ -144,7 +308,17 @@ bool WorkspaceSplit::CloseVisibleInspectorEditor() {
 void WorkspaceSplit::UpdatePreviews() {
   Panel(0).UpdatePreview(Panel(1));
   Panel(1).UpdatePreview(Panel(0));
-  Inspector().ShowFile(InspectorVisible() ? Panel(source).SelectedFile() : "");
+  if (!floatingInspector) {
+    Inspector().ShowFile(InspectorVisible() ? Panel(source).SelectedFile() : "");
+    return;
+  }
+  auto file = Panel(source).SelectedFile();
+  if (floatingSelection == file)
+    return;
+  BMessage inspect(kInspectFile);
+  inspect.AddString("file", file.c_str());
+  if (floatingInspector->SendMessage(&inspect, static_cast<BHandler *>(nullptr), 0) == B_OK)
+    floatingSelection = std::move(file);
 }
 
 ImagePreview *WorkspaceSplit::OpenPanelPreview(int pane) {
@@ -225,11 +399,13 @@ void WorkspaceSplit::SwitchPane() {
 }
 
 void WorkspaceSplit::RefreshPanels() {
-  Inspector().SetQuickViewCloseVisible(quickView);
-  SetInspectorVisible(quickView || (prefs.Preview() && !prefs.SinglePane() &&
-                                   !HasPanelPreview()));
+  if (!floatingInspector)
+    Inspector().SetQuickViewCloseVisible(quickView);
+  SetInspectorVisible(!floatingInspector &&
+                      (quickView || (prefs.Preview() && !prefs.SinglePane() &&
+                                     !HasPanelPreview())));
   UpdatePreviews();
-  menu.SetPreview(prefs, quickView || HasPanelPreview());
+  menu.SetPreview(prefs, quickView || HasPanelPreview(), InspectorDetached());
 }
 
 void WorkspaceSplit::RefreshAndFocus() {
@@ -262,7 +438,7 @@ void WorkspaceSplit::ApplyWorkspace() {
 }
 
 bool WorkspaceSplit::PrepareLayoutChange() {
-  if (!Inspector().CloseEditor() || !Panel(0).CloseEditor() ||
+  if ((!floatingInspector && !Inspector().CloseEditor()) || !Panel(0).CloseEditor() ||
       !Panel(1).CloseEditor())
     return false;
   quickView = false;
@@ -270,7 +446,7 @@ bool WorkspaceSplit::PrepareLayoutChange() {
 }
 
 bool WorkspaceSplit::SetQuickView(bool enabled) {
-  if (!enabled && !Inspector().CloseEditor())
+  if (floatingInspector || (!enabled && !Inspector().CloseEditor()))
     return false;
   quickView = enabled;
   return true;
@@ -357,7 +533,7 @@ bool WorkspaceSplit::DismissPanelTool() {
 }
 
 bool WorkspaceSplit::ToggleInspector() {
-  if (prefs.SinglePane() || quickView || HasPanelPreview() ||
+  if (floatingInspector || prefs.SinglePane() || quickView || HasPanelPreview() ||
       !CloseVisibleInspectorEditor())
     return false;
   prefs.SetPreview(!prefs.Preview());

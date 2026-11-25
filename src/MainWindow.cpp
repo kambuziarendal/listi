@@ -305,11 +305,20 @@ class MainWindow : public Listi::WorkingWindow {
     }
     ApplyWorkspace();
   }
-  ImagePreview *OpenSelectionPreview() {
+  void OpenSelectionPreview(const std::string &editPath) {
+    if (split->InspectorDetached()) {
+      split->OpenFloatingInspector(editPath);
+      return;
+    }
+    ImagePreview *target;
     if (prefs.IsSmidja())
-      return split->OpenPanelPreview(1 - split->Source());
-    SetQuickView(true);
-    return &split->Inspector();
+      target = split->OpenPanelPreview(1 - split->Source());
+    else {
+      SetQuickView(true);
+      target = &split->Inspector();
+    }
+    if (target && !editPath.empty())
+      target->BeginEditing(editPath);
   }
 
   bool HandleFolderTab(BMessage &message) {
@@ -491,7 +500,9 @@ class MainWindow : public Listi::WorkingWindow {
     switch (m->what) {
     case kQuickView:
       if (!actionArea->Pending()) {
-        if (prefs.IsSmidja())
+        if (split->InspectorDetached())
+          split->OpenFloatingInspector({});
+        else if (prefs.IsSmidja())
           split->TogglePanelPreview();
         else
           SetQuickView(!split->QuickView());
@@ -504,6 +515,14 @@ class MainWindow : public Listi::WorkingWindow {
     case kPreviewToggle:
       if (split->ToggleInspector())
         Save();
+      break;
+    case Listi::kDetachInspector:
+      if (!PromptBlocksCommand() && split->DetachInspector())
+        ApplyWorkspace();
+      break;
+    case Listi::kDockInspector:
+      if (split->DockInspector(*m))
+        ApplyWorkspace();
       break;
     case kPreviewSelection:
       if (m->GetInt32("pane", -1) == split->Source() || split->HasPanelPreview())
@@ -732,6 +751,10 @@ public:
       ShowQuitBlocker("File operations are still running. Let them finish, or use Cancel all in the operation queue.");
       return false;
     }
+    if (!split->FloatingInspectorAllowsQuit() || !InspectorEditorsAllowQuit(this)) {
+      ShowQuitBlocker("This window's editor has unsaved changes or is busy. Check the editor before closing this window.");
+      return false;
+    }
     return true;
   }
 
@@ -750,9 +773,6 @@ public:
     if (browserCount == 1) {
       if (!CheckSharedQuitBlockers())
         return false;
-    } else if (!InspectorEditorsAllowQuit(this)) {
-      ShowQuitBlocker("This window's editor has unsaved changes or is busy. Check the editor before closing this window.");
-      return false;
     }
     if (HasCLIs()) {
       if (!closeCLI) {
@@ -1031,7 +1051,7 @@ public:
         HandleNavigation(m) || HandleWorkspace(m) ||
         pane.HandleSelectionCommand(*m, *actionArea, queue) ||
         pane.HandleOpenCommand(m->what, prefs.editor, service,
-                               [this] { return OpenSelectionPreview(); }))
+                               [this](const std::string &path) { OpenSelectionPreview(path); }))
       return;
     switch (m->what) {
     case kInlineNotice:

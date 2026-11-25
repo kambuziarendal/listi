@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "MainWindowMenu.h"
+#include "WorkspaceSplit.h"
 #include "Common.h"
 #include "FlatView.h"
 #include "FolderTabs.h"
@@ -144,6 +145,7 @@ void MainWindowMenu::AddViewMenu() {
   AddCommand(workspace, "Customize workspace…", kOpenWorkspaceEditor);
   viewMenu->AddItem(workspace);
   previewMenu = AddCommand(viewMenu, "Inspector panel", kPreviewToggle, 'P');
+  inspectorDockItem = AddCommand(viewMenu, "Detach Inspector", Listi::kDetachInspector);
   quickViewMenu = AddCommand(viewMenu, "Quick view", kQuickView, 'P', B_SHIFT_KEY);
   treeToggle = AddCommand(viewMenu, "Folder tree", kToggleTree);
   viewMenu->AddSeparatorItem();
@@ -236,10 +238,14 @@ void MainWindowMenu::SetFolderTree(bool available, bool visible) {
   treeToggle->SetMarked(available && visible);
 }
 
-void MainWindowMenu::SetPreview(const WorkspaceLayout &layout, bool showingQuickView) {
+void MainWindowMenu::SetPreview(const WorkspaceLayout &layout, bool showingQuickView,
+                                bool inspectorDetached) {
   quickViewMenu->SetMarked(showingQuickView);
-  previewMenu->SetMarked(layout.Preview() && !layout.SinglePane());
-  previewMenu->SetEnabled(!showingQuickView && !layout.SinglePane());
+  previewMenu->SetMarked(!inspectorDetached && layout.Preview() && !layout.SinglePane());
+  previewMenu->SetEnabled(!inspectorDetached && !showingQuickView && !layout.SinglePane());
+  inspectorDockItem->SetLabel(inspectorDetached ? "Dock Inspector" : "Detach Inspector");
+  inspectorDockItem->Message()->what = inspectorDetached ? Listi::kDockInspector
+                                                        : Listi::kDetachInspector;
 }
 
 void MainWindowMenu::SetFileActions(int32 viewMode, bool flat, bool canOpenFlatView,
