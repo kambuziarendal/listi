@@ -218,7 +218,7 @@ void CheckSwapSelection(BApplication &app, const fs::path &root) {
   const auto pair = ShelfCollections::Load(store);
   shelf->Load(pair.Find("pair")->entries, shelf->Snapshot().revision);
   BMessenger target;
-  OpenShelfWindow({}, shelf, target, store);
+  OpenShelfWindow({}, shelf, target, BRect(50, 50, 590, 450), store);
   auto *window = app.WindowAt(0);
   Check(Until([&] { return Status(window, "Shelf refreshed."); }),
         "open Shelf with both saved references");
@@ -290,8 +290,8 @@ void CheckSharedCollections(BApplication &app, const fs::path &root) {
   Check(dinner->Add({replacement.string()}) == 1,
         "prepare new references for the Dinner replacement");
   BMessenger first, second;
-  OpenShelfWindow({}, dinner, first, store);
-  OpenShelfWindow({}, lunch, second, store);
+  OpenShelfWindow({}, dinner, first, BRect(50, 50, 590, 450), store);
+  OpenShelfWindow({}, lunch, second, BRect(50, 50, 590, 450), store);
   auto *firstWindow = dynamic_cast<BWindow *>(first.Target(nullptr));
   auto *secondWindow = dynamic_cast<BWindow *>(second.Target(nullptr));
   Check(firstWindow && secondWindow && firstWindow != secondWindow,
@@ -362,15 +362,27 @@ int main() {
     auto shelf = std::make_shared<Shelf>();
     shelf->Add({original.string()});
     BMessenger messenger;
-    OpenShelfWindow({}, shelf, messenger, store);
+    OpenShelfWindow({}, shelf, messenger, BRect(50, 50, 590, 450), store);
     auto *window = app.WindowAt(0);
     Check(window && messenger.IsValid(), "open actual Shelf window");
 
+    Check(Until([&] { return NarrowShelf(window); }) &&
+              InWindow(window, [](BWindow &locked) {
+                return std::abs(locked.Bounds().Height() - 320) <= 2;
+              }), "Shelf initially uses about half the area of the opening lister");
     Check(InWindow(window, [](BWindow &locked) {
             locked.ResizeTo(280, locked.Bounds().Height());
             return true;
           }) && Until([&] { return NarrowShelf(window); }),
           "narrow Shelf fits direct controls and keeps every action available");
+    Check(InWindow(window, [](BWindow &locked) {
+            locked.ResizeTo(420, 340);
+            return true;
+          }), "resize the open Shelf");
+    OpenShelfWindow({}, shelf, messenger, BRect(0, 0, 900, 700), store);
+    Check(InWindow(window, [](BWindow &locked) {
+            return locked.Bounds().Width() == 420 && locked.Bounds().Height() == 340;
+          }), "showing an existing Shelf preserves its user-selected size");
 
     Check(Until([&] { return Menu(window, "Save current Shelf..."); }),
           "invoke Save current Shelf after native window resize");
@@ -450,7 +462,7 @@ int main() {
     shelf->Load(collection.Find("Dinner")->entries, shelf->Snapshot().revision);
     const auto renamed = fixture.root / "renamed-while-closed";
     fs::rename(original, renamed);
-    OpenShelfWindow({}, shelf, messenger, store);
+    OpenShelfWindow({}, shelf, messenger, BRect(50, 50, 590, 450), store);
     Check(Until([&] {
             const auto restored = shelf->Snapshot();
             return restored.entries[0].path == renamed.string() &&

@@ -24,6 +24,8 @@ struct BrowserRequest {
   bool external = false;
   std::optional<BMessage> workingSet = {};
   std::string detachedWorkNotice = {};
+  BMessenger cliSource = {};
+  int64 cliPlacement = 0;
 };
 using BrowserOpener = std::function<bool(BrowserRequest)>;
 bool CheckSharedQuitBlockers();

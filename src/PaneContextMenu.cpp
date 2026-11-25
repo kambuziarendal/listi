@@ -107,6 +107,11 @@ PaneContextMenuResult RunPaneContextMenu(
       folder != pane.Path() || destination != other.Path())
     throw std::runtime_error(
         "The panel changed. Open the file menu again.");
+  if (action == kTabDetach) {
+    BMessage detach(kTabDetach);
+    detach.AddInt32("pane", owner);
+    return {detach, {}};
+  }
   // Browsing a directory (including a volume root) needs no transfer identity.
   if (action == kSelectedBrowser && options.directory && selected.size() == 1)
     return {BMessage(action), {}};

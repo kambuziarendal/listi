@@ -18,7 +18,8 @@ bool ShelfController::Handle(const BMessage &message, Pane &active,
                              OperationQueue &queue) {
   switch (message.what) {
   case kShowShelf:
-    OpenShelfWindow(fOwner, fShelf, fShelfWindow);
+    OpenShelfWindow(fOwner, fShelf, fShelfWindow,
+                    active.ConvertToScreen(active.Bounds()));
     break;
   case kAddToShelf:
     Add(active);

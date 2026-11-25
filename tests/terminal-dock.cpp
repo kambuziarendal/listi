@@ -6,6 +6,7 @@
 #include <Button.h>
 #include <Clipboard.h>
 #include <Layout.h>
+#include <GroupLayout.h>
 #include <OS.h>
 #include <SplitView.h>
 #include <Window.h>
@@ -95,9 +96,13 @@ public:
   Owner() : BWindow(BRect(35, 55, 850, 620), "Terminal dock test",
                     B_TITLED_WINDOW, B_AUTO_UPDATE_SIZE_LIMITS),
             split(new BSplitView(B_VERTICAL, 6)) {
-    auto *workspace = new BGroupView(B_VERTICAL);
+    auto *workspace = new BGroupView(B_HORIZONTAL, 6);
+    auto *left = new BGroupView("left lister", B_VERTICAL);
+    auto *right = new BGroupView("right lister", B_VERTICAL);
+    workspace->GroupLayout()->AddView(left);
+    workspace->GroupLayout()->AddView(right);
     workspace->SetName("file panels");
-    dock = std::make_unique<TerminalDock>(split, workspace, BMessenger(this));
+    dock = std::make_unique<TerminalDock>(split, workspace, *left, *right, BMessenger(this));
     AddChild(split);
     split->ResizeTo(Bounds().Width(), Bounds().Height());
   }
@@ -142,6 +147,12 @@ public:
     return split->Orientation() == direction &&
            split->GetLayout()->IndexOfView(FindView("file panels")) ==
                workspaceIndex;
+  }
+
+  bool TransferRightCLI(Owner &destination) {
+    const auto token = dock->OpenPlacement(1);
+    return token && dock->TransferTo(token, *destination.dock) &&
+           !dock->TransferTo(token, *destination.dock);
   }
 
   bool StartFloating(const fs::path &path) {
@@ -299,6 +310,20 @@ int main() {
           }),
           "missing restart folder leaves the running interactive command intact");
 
+    BRect listerFrame;
+    Check(WithWindow(main, [&](BWindow &w) {
+            listerFrame = w.FindView("left lister")->Bounds();
+            return panel->Bounds().Width() > listerFrame.Width() * 1.5f;
+          }) && Click(main, "Detach CLI") && Until([&] {
+            return WithWindow(Floating(app), [&](BWindow &w) {
+              return std::abs(w.Frame().Width() - listerFrame.Width()) <= 2 &&
+                     std::abs(w.Frame().Height() - listerFrame.Height()) <= 2;
+            });
+          }), "a full-width CLI detaches at the size of its lister");
+    Check(Click(Floating(app), "Dock CLI") && Until([&] {
+            return PanelMatches(main, panel, 1, true);
+          }), "sizing the detached window preserves the live shell");
+
     TerminalPanel *right = nullptr;
     Check(WithWindow(main, [&](BWindow &) {
             right = owner->Start(rightFixture.path, 1);
@@ -412,9 +437,26 @@ int main() {
               }),
           "direct button starts a closed CLI already detached in a single dispatch");
     detached = Floating(app);
+    Check(Click(main, "Detach CLI", nullptr, 1) && Until([&] {
+            return PanelMatches(Floating(app, 1), right, 2, true, 1);
+          }), "detach the right CLI before transferring its lister");
+    auto moving = Floating(app, 1);
+    auto *destination = new Owner();
+    BMessenger next(destination);
+    destination->Show();
+    Check(WithWindow(main, [&](BWindow &) {
+            return WithWindow(next, [&](BWindow &) {
+              return owner->TransferRightCLI(*destination);
+            });
+          }), "transfer the floating right CLI once to a new owner");
     Check(main.SendMessage(B_QUIT_REQUESTED) == B_OK &&
               Until([&] { return !main.IsValid() && !detached.IsValid(); }),
           "quitting the owner also closes its floating CLI");
+    Check(moving.IsValid() && Click(moving, "Dock CLI") && Until([&] {
+            return !moving.IsValid() && PanelMatches(next, right, 2, true);
+          }), "the transferred floating CLI docks into the new owner's left slot");
+    Check(next.SendMessage(B_QUIT_REQUESTED) == B_OK &&
+              Until([&] { return !next.IsValid(); }), "close the new CLI owner");
   } catch (const std::exception &e) {
     std::cerr << "FAIL " << e.what() << '\n';
     return 1;

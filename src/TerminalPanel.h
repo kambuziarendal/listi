@@ -47,6 +47,7 @@ public:
   int Start(const char *directory);
   void Stop();
   bool HandleKey(BMessage *message);
+  void SetOwner(BMessenger owner, int lister);
   void SetPlacement(bool floating, int64 generation);
   void SetDockSide(TerminalSide side);
 

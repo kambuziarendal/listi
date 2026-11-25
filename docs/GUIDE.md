@@ -137,7 +137,7 @@ Modified**, each ascending or descending. in the ordinary local Details view. Re
   terminal, starting in the active local folder. For example, `pwd` prints
   that folder’s path. The shell stays open after the command finishes.
   Showing the field does not start a shell or run anything.
-- **Operations:** file jobs appear at the bottom of the browser by default. To make progress, errors and conflict prompts easier to see, choose the separate window in Settings. The same job controls are available in either location: pause/resume,
+- **Operations:** file jobs appear at the bottom of the browser by default. To make progress, errors and conflict prompts easier to see, choose the separate window in Settings. You can stack, tile or minimize it. When a job needs your decision, the window comes forward. The same job controls are available in either location: pause/resume,
   cancel and choose Replace/Skip/Abort when conflicts occur. Replace and Skip
   apply to just one collision unless you explicitly tick the repeat option. For a local copy
   between regular files, **Keep both** preserves the original and gives the
@@ -641,7 +641,7 @@ Click a tab name to switch to it, or click its **×** to close that tab without 
 
 While browsing files, use **Command+Option+T** for a new tab, **Command+Option+[** and **Command+Option+]** to cycle, and **Command+Option+W** to close a tab. Command+T and Command+Shift+T still open the terminal. The tab strip is for navigation, not a file-drop target: drop onto the file view of a real folder. Switching tabs does not redirect an already queued copy.
 
-**Window → Detach tab to Einn window** opens a compact single-pane window and moves the active tab, including its navigation history, filter, view and selection. If you detach the only tab, the original pane opens your home folder. The new window keeps its own queue and uses session-local layout preferences; its layout does not change the initial browser’s saved workspace. A running copy and any docked or floating CLI sessions belong to the original window; detaching a folder tab does not move or restart them. You can switch the detached window from Einn to any other workspace. Closing the original window does not close a detached file window. Folder tabs last for the session and are not saved worksets.
+**Window → Detach tab to Einn window** opens a compact single-pane window and moves the active tab, including its navigation history, filter, view and selection. If you detach the only tab, the original pane opens your home folder. The new window keeps its own queue and uses session-local layout preferences; its layout does not change the initial browser’s saved workspace. The CLI for the pane you detach follows it without restarting the shell. A running file operation and the other pane’s CLI stay in the original window. You can switch the detached window from Einn to any other workspace. Closing the original window does not close a detached file window. Folder tabs last for the session and are not saved worksets.
 
 ### Independent file windows
 

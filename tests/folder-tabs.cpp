@@ -123,9 +123,12 @@ int main() {
   std::ofstream(a/"one") << "tab payload";
   std::ofstream(b/"two") << "another file";
   Preferences prefs;
+  std::optional<BrowserRequest> pending;
+  bool accepting = false;
   auto open = [&](BrowserRequest request) {
-    auto *child = CreateMainWindow(prefs, {}, {}, false, {}, false, std::move(request));
-    child->Show();
+    if (!accepting)
+      return false;
+    pending = std::move(request);
     return true;
   };
   auto *window = CreateMainWindow(prefs, {}, {}, false, {}, false, {}, open);
@@ -228,6 +231,9 @@ int main() {
   Check(replace, "original window exposes copy conflict controls");
   WaitFor(*window, [&] { return !replace->IsHidden(); },
           "copy waits for a conflict decision before detaching");
+  Command(*window, Listi::kRightCLI);
+  auto *rightCLI = dynamic_cast<TerminalPanel *>(window->FindView(TerminalName(1)));
+  Check(rightCLI && rightCLI->Active(), "start independent opposite CLI");
   Command(*window, Listi::kLeftCLI);
   auto *terminal = dynamic_cast<TerminalPanel *>(window->FindView(TerminalName(0)));
   Check(terminal && terminal->Active() && terminal->StartFolder() == b.string(),
@@ -239,6 +245,17 @@ int main() {
   WaitFor(*window, [&] { return ReadText(root/"cli-ready") == "ready"; },
           "CLI command has started before detaching");
   Command(*window, kTabDetach);
+  Check(bar.ActiveId() == copy && terminal->Active() && !pending,
+        "a refused window-open request leaves the tab and running shell in place");
+  accepting = true;
+  Command(*window, kTabDetach);
+  Check(pending && pending->cliPlacement == terminal->Placement(),
+        "accepted detach captures the CLI placement before releasing the owner");
+  window->Unlock();
+  auto *opened = CreateMainWindow(prefs, {}, {}, false, {}, false, std::move(*pending));
+  opened->Show();
+  pending.reset();
+  window->Lock();
   Ready(*window);
   Check(bar.Count() == 1 && bar.ActiveId() == first, "detach leaves original tab active");
   BWindow *detached = nullptr;
@@ -261,10 +278,12 @@ int main() {
         "detached Einn retains original tab state");
   auto *status = dynamic_cast<BTextView *>(moved.Files().FindView("status"));
   Check(status && std::string(status->Text()) ==
-                      "CLI sessions and file operations stay in the original window.",
-        "detached window explains where the running work stayed");
+                      "File operations continue in the original window.",
+        "detached window explains where file operations stayed");
   auto *childCLI = dynamic_cast<TerminalPanel *>(detached->FindView(TerminalName(0)));
-  Check(childCLI && !childCLI->Active(), "detaching the folder does not clone a CLI");
+  Check(childCLI == terminal && childCLI->Active() && childCLI->SessionId() == session &&
+        window->FindView(TerminalName(1)) == rightCLI && rightCLI->Active(),
+        "the live terminal follows its lister without moving the opposite terminal");
   for (auto workspace : {Workspace::tviskipt, Workspace::askr, Workspace::smidja,
                          Workspace::einn}) {
     BMessage change(kWorkspace);
@@ -286,16 +305,20 @@ int main() {
   Command(*detached, kInlineCancel);
   Check(!replace->IsHidden() && terminal->Active() && terminal->SessionId() == session &&
         ReadText(c/"two") == "existing destination" && !fs::exists(root/"cli-answer"),
-        "cancelling in the detached window leaves the original queue and CLI waiting");
+        "cancelling in the detached window leaves the original queue and moved CLI waiting");
+  Check(Enter(*childCLI, "answer"), "continue the waiting command in the detached lister");
   detached->Unlock();
-  Check(replace->Invoke() == B_OK && Enter(*terminal, "answer"),
-        "continue the copy and CLI from their original window");
+  Check(replace->Invoke() == B_OK, "continue the file operation in the original window");
   WaitFor(*window, [&] {
     return ReadText(c/"two") == "another file" &&
            ReadText(root/"cli-answer") == "live:answer" && replace->IsHidden();
-  }, "original copy and CLI complete with the chosen destination and input");
+  }, "copy and transferred CLI complete with the chosen destination and input");
   BMessage closeCLI(Listi::kCloseTerminal);
-  closeCLI.AddInt64("terminal placement", terminal->Placement());
+  detached->Lock();
+  closeCLI.AddInt64("terminal placement", childCLI->Placement());
+  detached->MessageReceived(&closeCLI);
+  detached->Unlock();
+  closeCLI.SetInt64("terminal placement", rightCLI->Placement());
   window->MessageReceived(&closeCLI);
   window->Unlock();
   auto until = system_time() + 5000000;

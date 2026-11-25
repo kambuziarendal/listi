@@ -414,11 +414,12 @@ public:
         answer->SetInt64("request", conflictRequest);
         button->SetMessage(answer);
       }
-      Expand(true);
       summary->SetText(fat ? "FAT cannot store Haiku file attributes."
                            : "Destination exists. Choose how to continue:");
       file->SetText(m->GetString("path", ""));
       ShowChoices(true);
+      // A worker is blocked on this choice. Unlike progress, bring it to the front.
+      owner->Show();
       break;
     }
     case kJobAccepted:
@@ -572,12 +573,9 @@ private:
 class OperationWindow : public BWindow {
 public:
   OperationWindow(BWindow *owner, ProgressView *view)
-      : BWindow(BRect(0, 0, 775, 285), "Listi operations", B_TITLED_WINDOW_LOOK,
-                B_FLOATING_SUBSET_WINDOW_FEEL,
-                B_NOT_ZOOMABLE | B_NOT_MINIMIZABLE | B_CLOSE_ON_ESCAPE |
-                    B_AUTO_UPDATE_SIZE_LIMITS),
+      : BWindow(BRect(0, 0, 775, 285), "Listi operations", B_TITLED_WINDOW,
+                B_CLOSE_ON_ESCAPE | B_AUTO_UPDATE_SIZE_LIMITS, owner->Workspaces()),
         view(view) {
-    AddToSubset(owner);
     BLayoutBuilder::Group<>(this, B_VERTICAL, 0).Add(view).AddGlue();
     GetLayout()->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
     CenterIn(owner->Frame());
@@ -895,7 +893,7 @@ void OperationQueue::PresentEvent(BMessage &event) {
     return;
   view->MessageReceived(&event);
   if (popup && popup->IsHidden() &&
-      (event.what == kJobAccepted || event.what == kConflict ||
+      (event.what == kJobAccepted ||
        event.what == kJobDone || event.what == kFileErrorSelected ||
        (event.what == kJobUpdate && event.GetBool("start", false)))) {
     view->Expand(true);

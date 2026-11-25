@@ -369,12 +369,10 @@ class MainWindow : public Listi::WorkingWindow {
       if (!openBrowser)
         break;
       BrowserRequest request{{}, bar.Snapshot(), Frame().LeftTop() + BPoint(24, 24)};
-      const bool fileWork = queue.Busy() || clipboard.Busy();
-      if (HasCLIs())
-        request.detachedWorkNotice = fileWork
-            ? "CLI sessions and file operations stay in the original window."
-            : "CLI sessions stay with the original window.";
-      else if (fileWork)
+      request.cliPlacement = terminalDock->OpenPlacement(side);
+      if (request.cliPlacement)
+        request.cliSource = BMessenger(this);
+      if (queue.Busy() || clipboard.Busy())
         request.detachedWorkNotice = "File operations continue in the original window.";
       if (openBrowser(std::move(request)))
         bar.AfterDetach();
@@ -622,7 +620,7 @@ public:
     split = new Listi::WorkspaceSplit(*panes[0], *panes[1], prefs, *menu);
     auto *terminalSplit = new BSplitView(B_VERTICAL, 6);
     terminalDock = std::make_unique<Listi::TerminalDock>(
-        terminalSplit, split, BMessenger(this));
+        terminalSplit, split, split->Panel(0), split->Panel(1), BMessenger(this));
     actionArea->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
     actionArea->GroupLayout()->SetInsets(8, 6, 8, 6);
     actionArea->Hide();
@@ -668,6 +666,23 @@ public:
     if (request.detached) {
       split->Panel(0).FolderBar().Adopt(std::move(*request.detached));
       detachedWorkNotice = std::move(request.detachedWorkNotice);
+      if (request.cliPlacement) {
+        bool transferred = false;
+        // Queue() opens windows asynchronously. Never move a session the user
+        // has since closed, restarted or placed elsewhere.
+        if (request.cliSource.LockTargetWithTimeout(1000000) == B_OK) {
+          BLooper *looper = nullptr;
+          auto *source = dynamic_cast<MainWindow *>(request.cliSource.Target(&looper));
+          if (source)
+            transferred = source->terminalDock->TransferTo(request.cliPlacement, *terminalDock);
+          looper->Unlock();
+        }
+        if (!transferred) {
+          if (!detachedWorkNotice.empty())
+            detachedWorkNotice += " ";
+          detachedWorkNotice += "CLI not transferred. Check the original window.";
+        }
+      }
     } else if (!request.path.empty())
       panes[split->Source()]->Navigate(request.path.c_str());
   }

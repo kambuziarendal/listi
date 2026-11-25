@@ -58,20 +58,29 @@ public:
     BWindow::MessageReceived(message);
   }
 
+  void SetOwner(BMessenger receiver, int64 token) {
+    owner = receiver;
+    placement = token;
+    Panel()->SetOwner(receiver, 0);
+    Panel()->SetPlacement(true, token);
+    Describe(TerminalName(0), std::string("Started in: ") + Panel()->StartFolder());
+  }
+
 private:
-  const BMessenger owner;
-  const int64 placement;
+  BMessenger owner;
+  int64 placement;
 };
 
-BRect FloatingFrame(BWindow *owner, const TerminalPanel &panel) {
+BRect FloatingFrame(BWindow *owner, const BView &lister) {
   const BRect workingArea = BScreen(owner).Frame().InsetByCopy(20, 40);
   const BRect previous = owner->Frame();
+  BRect target = lister.Bounds();
+  if (lister.IsHidden() || target.Width() <= 0 || target.Height() <= 0)
+    target = BRect(0, 0, previous.Width() / 2, previous.Height() * 0.68f);
   if (!workingArea.IsValid())
-    return previous.OffsetByCopy(24, 24);
-  const float width =
-      std::min(workingArea.Width(), std::max(640.0f, panel.Bounds().Width()));
-  const float height =
-      std::min(workingArea.Height(), std::max(330.0f, panel.Bounds().Height()));
+    return target.OffsetToCopy(previous.left + 35, previous.top + 45);
+  const float width = std::min(workingArea.Width(), target.Width());
+  const float height = std::min(workingArea.Height(), target.Height());
   const float left = std::clamp(previous.left + 35, workingArea.left,
                                 workingArea.right - width);
   const float top = std::clamp(previous.top + 45, workingArea.top,
@@ -82,8 +91,8 @@ BRect FloatingFrame(BWindow *owner, const TerminalPanel &panel) {
 } // namespace
 
 TerminalDock::TerminalDock(BSplitView *split, BView *workspace,
-                           BMessenger owner)
-    : split(split), owner(owner), band(new BGroupView(B_HORIZONTAL, 6)) {
+                           BView &leftLister, BView &rightLister, BMessenger owner)
+    : split(split), listers{&leftLister, &rightLister}, owner(owner), band(new BGroupView(B_HORIZONTAL, 6)) {
   split->AddChild(workspace, 0.68f);
   split->SetCollapsible(0, false);
   split->AddChild(band, 0.32f);
@@ -147,6 +156,7 @@ TerminalDock::Open(const BMessage &message, int lister, const char *directory) {
         PostMainWindowNotice(detail);
         return std::nullopt;
       }
+      terminalPanel->SetPlacement(false, sessions[lister].placement = ++generation);
     }
   }
   Show(lister);
@@ -186,6 +196,72 @@ bool TerminalDock::ApplyPlacement(const BMessage &message) {
 
 TerminalPanel *TerminalDock::Docked(int lister) const {
   return sessions[lister].panel;
+}
+
+int64 TerminalDock::OpenPlacement(int lister) const {
+  const auto &session = sessions[lister];
+  return session.visible || session.detached.IsValid() ? session.placement : 0;
+}
+
+// Both browser loopers are locked; the destination is a newly created Einn.
+// Leave the original session in place until the destination can accept it.
+bool TerminalDock::TransferTo(int64 requested, TerminalDock &destination) {
+  const int lister = FindSession(requested);
+  if (lister < 0 || !OpenPlacement(lister) || destination.OpenPlacement(0))
+    return false;
+  auto &source = sessions[lister];
+  auto &target = destination.sessions[0];
+  auto *placeholder = target.panel;
+  if (!placeholder)
+    return false;
+
+  const int32 index = lister == 0 || !sessions[0].panel ? 0 : 1;
+  auto replacement = std::make_unique<TerminalPanel>(owner, lister);
+  replacement->Hide();
+  replacement->SetDockSide(side);
+  if (!band->GroupLayout()->AddView(index, replacement.get()))
+    return false;
+
+  if (source.panel) {
+    auto *panel = source.panel;
+    if (!band->GroupLayout()->RemoveView(panel)) {
+      replacement->RemoveSelf();
+      return false;
+    }
+    split->Window()->Sync();
+    if (!destination.band->GroupLayout()->AddView(0, panel)) {
+      band->GroupLayout()->AddView(index, panel);
+      replacement->RemoveSelf();
+      return false;
+    }
+    target.panel = panel;
+    panel->SetOwner(destination.owner, 0);
+    panel->SetDockSide(destination.side);
+    panel->SetPlacement(false, target.placement = ++destination.generation);
+    target.visible = true;
+  } else {
+    if (source.detached.LockTargetWithTimeout(500000) != B_OK) {
+      replacement->RemoveSelf();
+      return false;
+    }
+    BLooper *looper = nullptr;
+    source.detached.Target(&looper);
+    auto *floating = static_cast<FloatingTerminal *>(looper);
+    floating->SetOwner(destination.owner, target.placement = ++destination.generation);
+    target.detached = source.detached;
+    target.panel = nullptr;
+    floating->Unlock();
+  }
+
+  placeholder->RemoveSelf();
+  delete placeholder;
+  source.detached = {};
+  source.panel = replacement.release();
+  source.visible = false;
+  source.panel->SetPlacement(false, source.placement = ++generation);
+  UpdateVisibility();
+  destination.UpdateVisibility();
+  return true;
 }
 
 bool TerminalDock::HasFocus() const {
@@ -284,7 +360,7 @@ bool TerminalDock::Float(int64 requested) {
   auto *panel = session.panel;
   if (!panel || !session.visible)
     return false;
-  auto *window = new FloatingTerminal(FloatingFrame(split->Window(), *panel),
+  auto *window = new FloatingTerminal(FloatingFrame(split->Window(), *listers[lister]),
                                       owner, lister, generation + 1);
   // Remove through the layout; BView::RemoveSelf can report failure after
   // removal of the last layout item has already detached the view.

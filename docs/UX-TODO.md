@@ -38,10 +38,10 @@ References: [Haiku Tracker](https://www.haiku-os.org/docs/userguide/en/tracker.h
 
 ## Open feedback from 0.38.0-30 testing
 
-- [ ] Remove the “Inspector” heading inside both the docked panel and the detached window. Keep the detached window title.
-- [ ] Keep “Select a file to inspect” when nothing is selected, aligned near the bottom edge with a small inset.
-- [ ] Use Listi’s normal panel background instead of white. Outline the docked Inspector with a thin frame.
-- [ ] Make the upper-right button more compact in both the docked Inspector panel and the detached Inspector window.
+- [x] Remove the “Inspector” heading inside both the docked panel and the detached window. Keep the detached window title.
+- [x] Keep “Select a file to inspect” when nothing is selected, aligned near the bottom edge with a small inset.
+- [x] Use Listi’s normal panel background instead of white. Outline the docked Inspector with a thin frame.
+- [x] Make the upper-right button more compact in both the docked Inspector panel and the detached Inspector window.
 - [ ] After physical USB removal during Copy, dismissing all visible errors left the file red with “Needs attention”. Make it clear whether an action is still pending or only an acknowledged failure remains.
 - [ ] Beta blocker: invalidate disconnected-volume panes and prevent new scans and opens against stale entries. In the physical -30 test, screenshots remained viewable after unplug; navigating to another folder then ended in the Haiku kernel debugger. This does not establish that reads reached the removed device.
 - [ ] Add “Open in Listi” to the Tracker context menu for folders without changing the system file associations.

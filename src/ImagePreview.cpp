@@ -396,9 +396,9 @@ ImagePreview::ImagePreview(bool standalone)
                              B_FRAME_EVENTS | B_SUPPORTS_LAYOUT),
       replies(std::make_shared<BitmapMailbox>(2)),
       generation(std::make_shared<std::atomic<int64>>(0)), standalone(standalone) {
-  SetViewUIColor(B_DOCUMENT_BACKGROUND_COLOR);
-  SetLowUIColor(B_DOCUMENT_BACKGROUND_COLOR);
-  SetHighUIColor(B_DOCUMENT_TEXT_COLOR);
+  SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
+  SetLowUIColor(B_PANEL_BACKGROUND_COLOR);
+  SetHighUIColor(B_PANEL_TEXT_COLOR);
   SetExplicitMinSize(BSize(180, 128));
   SetExplicitPreferredSize(BSize(280, 400));
 
@@ -435,6 +435,8 @@ ImagePreview::ImagePreview(bool standalone)
   closeQuickView->SetName("close quick view");
   closeQuickView->SetToolTip("Close Quick view (Esc)");
   dockControl = addButton("↗", Listi::kDetachInspector);
+  const float side = std::ceil(be_plain_font->Size()) + 10;
+  dockControl->ResizeTo(side, side);
 }
 ImagePreview::~ImagePreview() {
   if (!textScroll->Parent())
@@ -873,8 +875,8 @@ void ImagePreview::LayoutControls() {
   const float detachLeft = doneLeft - detachEditor->Bounds().Width() - 5;
   detachEditor->MoveTo(std::max(0.f, detachLeft), 3);
   if (editor) {
-    editor->MoveTo(0, 35);
-    editor->ResizeTo(width, std::max(0.f, height - 35));
+    editor->MoveTo(1, 35);
+    editor->ResizeTo(std::max(0.f, width - 2), std::max(0.f, height - 36));
   }
   if (textScroll->Parent()) {
     textScroll->MoveTo(8, 35);
@@ -886,18 +888,21 @@ void ImagePreview::LayoutControls() {
   play->MoveTo(12, buttonTop);
 }
 void ImagePreview::Draw(BRect update) {
-  SetHighUIColor(B_DOCUMENT_BACKGROUND_COLOR);
+  SetHighUIColor(B_PANEL_BACKGROUND_COLOR);
   FillRect(update);
-  SetHighUIColor(B_DOCUMENT_TEXT_COLOR);
-  BString title(editor ? "Edit"
-                      : closeQuickView->IsHidden(closeQuickView) ? "Inspector" : "Quick view");
-  float right = Bounds().right;
-  for (auto button : {photoActions, fileAction, closeQuickView, dockControl,
-                      detachEditor, doneEditing})
-    if (!button->IsHidden(button))
-      right = std::min(right, button->Frame().left);
-  TruncateString(&title, B_TRUNCATE_END, std::max(0.f, right - 16));
-  DrawString(title, BPoint(12, 22));
+  SetHighUIColor(B_CONTROL_BORDER_COLOR);
+  StrokeRect(Bounds());
+  SetHighUIColor(B_PANEL_TEXT_COLOR);
+  if (editor || !closeQuickView->IsHidden(closeQuickView)) {
+    BString title(editor ? "Edit" : "Quick view");
+    float right = Bounds().right;
+    for (auto button : {photoActions, fileAction, closeQuickView, dockControl,
+                        detachEditor, doneEditing})
+      if (!button->IsHidden(button))
+        right = std::min(right, button->Frame().left);
+    TruncateString(&title, B_TRUNCATE_END, std::max(0.f, right - 16));
+    DrawString(title, BPoint(12, 22));
+  }
   if (editor)
     return;
   BRect area = Bounds().InsetByCopy(12, 12);
@@ -937,8 +942,14 @@ void ImagePreview::Draw(BRect update) {
     SetDrawingMode(B_OP_COPY);
   }
   TruncateString(&line, B_TRUNCATE_END, std::max(0.f, Bounds().Width() - 24));
+  if (path.empty()) {
+    font_height font;
+    GetFontHeight(&font);
+    DrawString(line, BPoint(8, Bounds().bottom - std::ceil(font.descent) - 3));
+    return;
+  }
   DrawString(line, BPoint(12, Bounds().bottom - 26));
-  BString name(path.empty() ? "" : Listi::LocationLeaf(path).c_str());
+  BString name(Listi::LocationLeaf(path).c_str());
   TruncateString(&name, B_TRUNCATE_MIDDLE,
                  std::max(0.f, Bounds().Width() - 24));
   DrawString(name, BPoint(12, Bounds().bottom - 9));

@@ -390,3 +390,5 @@ Listi cannot acknowledge it, retry it, or restore the desktop. This finding
 does not identify what happened on the tester's second physical run, establish
 a problem with ext4, or demonstrate that Listi alone triggers the fault. Do not
 request another physical disconnect as a routine beta check on this system.
+
+Physical retest reported on 2026-11-25: copying to ext4 and deleting on ext4 worked, and a newly mounted volume appeared immediately in an open @disks panel. This does not verify interrupted USB writes.

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.38.0-34 (private test candidate)
+
+- The separate Operations window is a normal Haiku window rather than a floating palette. Stack or tile it, or leave it behind the browser. It comes forward when a job needs a decision.
+- Detach a tab to Einn from the folder context menu. Its pane’s CLI follows it without restarting.
+- A detached CLI starts at the size of its file panel. Shelf opens narrower, at about half the area of the active panel.
+- The Inspector uses the panel color and a thin border instead of a white box. Both docked and detached views have a compact button, no duplicate heading and a bottom-aligned empty prompt.
+- Stop active directory scans when Listi detects that their volume was lost. This does not fix the Haiku kernel fault during interrupted FAT writes.
+
 ## 0.38.0-33 (private test candidate)
 
 - Open Disks panels update automatically when Haiku mounts or unmounts a volume.

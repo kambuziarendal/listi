@@ -20,7 +20,8 @@ struct TerminalRestartPrompt {
 // the file window; its controls send requests back to this owner.
 class TerminalDock {
 public:
-  TerminalDock(BSplitView *split, BView *workspace, BMessenger owner);
+  TerminalDock(BSplitView *split, BView *workspace, BView &leftLister,
+               BView &rightLister, BMessenger owner);
   ~TerminalDock();
 
   // Opening in another directory can require a confirmed restart. The
@@ -31,6 +32,8 @@ public:
   TerminalPanel *Docked(int lister) const;
   bool HasSessions() const { return sessions[0].visible || sessions[1].visible ||
       sessions[0].detached.IsValid() || sessions[1].detached.IsValid(); }
+  int64 OpenPlacement(int lister) const;
+  bool TransferTo(int64 placement, TerminalDock &destination);
   bool HasFocus() const;
   bool FocusFloating(int lister);
   bool Float(int64 placement);
@@ -54,6 +57,7 @@ private:
   void UpdateVisibility();
 
   BSplitView *split;
+  BView *listers[2];
   BMessenger owner;
   BGroupView *band;
   Session sessions[2];

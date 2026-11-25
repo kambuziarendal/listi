@@ -109,6 +109,10 @@ int main(){
    return 2;
  check(popup->IsHidden() && !window->FindView("operations"),
        "separate presentation starts hidden and leaves no integrated duplicate");
+ check(popup->Look() == B_TITLED_WINDOW_LOOK && popup->Feel() == B_NORMAL_WINDOW_FEEL &&
+           !(popup->Flags() & (B_NOT_MINIMIZABLE | B_NOT_RESIZABLE | B_NOT_ZOOMABLE)) &&
+           popup->Workspaces() == window->Workspaces(),
+       "operations is an independent resizable desktop window on the browser workspace");
  popup->Unlock();
  window->Unlock();
  failedWakes=100;
@@ -137,6 +141,14 @@ int main(){
        "ordinary success is one concise line with the destination");
  check(!popup->IsHidden() && !window->FindView("operations"),
        "operation activity opens the separate presentation automatically");
+ check(popup->SendBehind(window) == B_OK, "operations can be sent behind its browser");
+ popup->Minimize(true);
+ BMessage progressEvent(kJobUpdate);
+ progressEvent.AddInt64("operation", ids.back());
+ window->queue->PresentEvent(progressEvent);
+ check(popup->IsMinimized(), "progress leaves a minimized operations window alone");
+ window->queue->Show();
+ check(!popup->IsMinimized(), "explicit Operations command restores a minimized window");
  BMessage closePopup(B_QUIT_REQUESTED);
  popup->DispatchMessage(&closePopup, popup);
  check(popup->IsHidden(), "closing the popup hides it without destroying reports");
@@ -349,11 +361,29 @@ int main(){
        }) && passwordDiscarded(untaggedJob.archivePasswordToken),
        "Cancel all releases a paused conflict and tagged and untagged jobs");
 
+ window->Lock();
+ window->queue->SetSeparateWindow(true);
+ popup = operationsView->Window();
+ if (!popup || popup == window || !popup->Lock())
+   return 2;
+ popup->Minimize(true);
+ popup->Unlock();
+ window->Unlock();
  const auto fresh = window->queue->Enqueue(job(0, 301));
  if (!wait([&] { return window->conflicts.size() == 3; }))
    return 2;
  window->Lock();
  const auto request = window->conflicts.back().GetInt64("request", 0);
+ window->Unlock();
+ check(wait([&] {
+         if (!popup->Lock())
+           return false;
+         bool front = !popup->IsMinimized() && popup->IsActive();
+         popup->Unlock();
+         return front;
+       }), "an overwrite decision restores and activates the operations window");
+ window->Lock();
+ window->queue->SetSeparateWindow(false);
  window->Unlock();
  check(window->queue->Answer(Decision::Skip, request) &&
            !window->queue->Answer(Decision::Replace, request),

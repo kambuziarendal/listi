@@ -594,7 +594,6 @@ TerminalPanel::TerminalPanel(BMessenger owner, int lister)
       position(new BButton("terminal position", "Move right", nullptr)),
       move(new BButton("Detach CLI", nullptr)),
       close(new BButton("Close CLI", nullptr)) {
-  SetName(TerminalName(lister));
   location->SetTruncation(B_TRUNCATE_MIDDLE);
   location->SetExplicitMinSize(BSize(0, B_SIZE_UNSET));
   location->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
@@ -612,12 +611,21 @@ TerminalPanel::TerminalPanel(BMessenger owner, int lister)
       .End()
       .Add(terminal);
   SetDockSide(TerminalSide::Below);
-  position->SetTarget(owner);
+  SetOwner(owner, lister);
   position->SetTimeout(0);
-  move->SetTarget(owner);
-  close->SetTarget(owner);
   move->SetTimeout(0);
   close->SetTimeout(0);
+}
+
+void TerminalPanel::SetOwner(BMessenger owner, int lister) {
+  SetName(TerminalName(lister));
+  BString title(Name());
+  if (!startFolder.empty())
+    title << "   Started in: " << startFolder.c_str();
+  location->SetText(title);
+  location->SetToolTip(title);
+  for (auto *button : {position, move, close})
+    button->SetTarget(owner);
 }
 
 void TerminalPanel::SetDockSide(TerminalSide side) {

@@ -17,6 +17,7 @@
 #include <TextView.h>
 #include <TypeConstants.h>
 #include <Window.h>
+#include <cmath>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -96,7 +97,7 @@ void CheckDiscardPreview(BApplication &app, const std::string &folder) {
   auto *view = new ImagePreview();
   host->AddChild(view);
   view->ResizeTo(312, 370);
-  view->ShowFile(path);
+  view->SetDockControl(false);
   host->Show();
   host->Activate();
   auto await = [&](auto test, const char *label) {
@@ -110,6 +111,34 @@ void CheckDiscardPreview(BApplication &app, const std::string &folder) {
     }
     Check(passed, label);
   };
+  auto emptyPanel = [&](const char *control) {
+    auto *button = view->FindView(control);
+    if (!button || button->Bounds().Width() > std::ceil(be_plain_font->Size()) + 12 ||
+        button->Bounds().Width() != button->Bounds().Height())
+      return false;
+    const auto header = Capture(view, BRect(5, 4, 140, 32));
+    const auto bottom = Capture(view, BRect(5, 354, 200, 368));
+    const auto edge = Capture(view, BRect(0, 90, 1, 90));
+    if (header.empty() || edge.size() != 2 || edge[0] == edge[1])
+      return false;
+    const rgb_color panel = ui_color(B_PANEL_BACKGROUND_COLOR);
+    const uint32 background = header.front();
+    return std::abs(int(background >> 16) - panel.red) < 8 &&
+           std::abs(int((background >> 8) & 255) - panel.green) < 8 &&
+           std::abs(int(background & 255) - panel.blue) < 8 &&
+           std::all_of(header.begin(), header.end(), [&](uint32 p) { return p == background; }) &&
+           std::count_if(bottom.begin(), bottom.end(), [&](uint32 p) { return p != background; }) > 30;
+  };
+  await([&] { return emptyPanel("detach inspector"); },
+        "docked Inspector has a blank panel-colored header, frame, compact control and bottom prompt");
+  host->Lock();
+  view->SetDockControl(true);
+  host->Unlock();
+  await([&] { return emptyPanel("dock inspector"); },
+        "detached Inspector keeps the same compact empty presentation");
+  host->Lock();
+  view->ShowFile(path);
+  host->Unlock();
   const BRect excerpt(12, 38, 230, 88);
   std::vector<uint32> before;
   await([&] {
