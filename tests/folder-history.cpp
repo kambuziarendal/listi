@@ -321,13 +321,13 @@ int main() {
   const auto attrTree = source/"attribute-tree";
   fs::create_directory(attrTree);
   // Keep each BFS journal write small while exceeding both aggregate limits.
-  const std::vector<char> metadata(16 * 1024, 'x');
+  const std::vector<char> attributePayload(16 * 1024, 'x');
   for (int node = 0; node < 65; ++node) {
     const auto folder = attrTree/std::to_string(node);
     fs::create_directory(folder);
     for (int field = 0; field < 64; ++field) {
       const auto name = "payload-" + std::to_string(field);
-      attr(folder, name.c_str(), B_RAW_TYPE, metadata.data(), metadata.size());
+      attr(folder, name.c_str(), B_RAW_TYPE, attributePayload.data(), attributePayload.size());
     }
   }
   reject([&]{ history.SaveAutomatically(cancel, approved); }, "automatic metadata budget",
