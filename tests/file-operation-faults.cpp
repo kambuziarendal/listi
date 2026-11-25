@@ -99,6 +99,14 @@ extern "C" int __wrap_close(int fd) {
   }
   return status;
 }
+extern "C" int __real_lstat(const char *, struct stat *);
+extern "C" int __wrap_lstat(const char *path, struct stat *st) {
+  const int status = __real_lstat(path, st);
+  // FAT synthesizes execute bits for .tmp stages but not the final .png.
+  if (status == 0 && reportFat && strstr(path, "/.listi-copy-") && S_ISREG(st->st_mode))
+    st->st_mode |= S_IXUSR | S_IXGRP | S_IXOTH;
+  return status;
+}
 extern "C" int __real_fs_stat_dev(dev_t, fs_info *);
 extern "C" int __wrap_fs_stat_dev(dev_t device, fs_info *info) {
   const int status = __real_fs_stat_dev(device, info);
@@ -229,7 +237,7 @@ int main() {
               prompts == 2 && Read(output) == payload && Read(image) == payload &&
               node.GetAttrInfo("Media:Width", &attr) == B_OK &&
               destination.GetAttrInfo("Media:Width", &attr) != B_OK,
-          "explicit FAT copy publishes bytes and reports omitted attributes");
+          "explicit FAT copy publishes PNG bytes despite extension-derived execute bits and reports omitted attributes");
     std::ofstream(output) << "existing";
     consent.conflict = [](const auto &) { return Decision::Replace; };
     copy.action = Action::Move;

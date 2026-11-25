@@ -272,13 +272,21 @@ struct Runner {
     struct stat committed;
   };
   std::map<std::string, CopiedEntry> copied;
+  bool SamePublishedMode(const struct stat &staged, const struct stat &published) const {
+    // Haiku FAT derives execute bits from the filename. Renaming a regular
+    // .tmp stage to .png changes 0755 to 0644 on the very same open inode.
+    mode_t differing = staged.st_mode ^ published.st_mode;
+    if (S_ISREG(staged.st_mode) && FatCopy(staged.st_dev))
+      differing &= ~(S_IXUSR | S_IXGRP | S_IXOTH);
+    return differing == 0;
+  }
   void Done(const std::string &src, const std::string &dst,
             const struct stat &expected) {
     ++mutations;
     CheckDestinationDevice(expected.st_dev);
     struct stat committed;
     if (lstat(dst.c_str(), &committed) || expected.st_dev != committed.st_dev ||
-        expected.st_ino != committed.st_ino || expected.st_mode != committed.st_mode ||
+        expected.st_ino != committed.st_ino || !SamePublishedMode(expected, committed) ||
         expected.st_size != committed.st_size ||
         expected.st_mtim.tv_sec != committed.st_mtim.tv_sec ||
         expected.st_mtim.tv_nsec != committed.st_mtim.tv_nsec)
@@ -686,7 +694,7 @@ struct Runner {
     }
     struct stat finalStat;
     if (fstat(verify.n, &finalStat) || finalStat.st_size != staged.st_size ||
-        finalStat.st_mode != staged.st_mode ||
+        !SamePublishedMode(staged, finalStat) ||
         finalStat.st_mtim.tv_sec != staged.st_mtim.tv_sec ||
         finalStat.st_mtim.tv_nsec != staged.st_mtim.tv_nsec ||
         fstatat(parent, Leaf(dst).c_str(), &opened, AT_SYMLINK_NOFOLLOW) ||
