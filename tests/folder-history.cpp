@@ -20,6 +20,16 @@ namespace fs=std::filesystem;
 using Listi::HistoryStore;
 namespace {
 std::atomic_bool *cancelAfterWrite = nullptr;
+const struct stat *oversizedFixture = nullptr;
+}
+
+extern "C" int __real_fstat(int, struct stat *);
+extern "C" int __wrap_fstat(int fd, struct stat *info) {
+  const int result = __real_fstat(fd, info);
+  if (result == 0 && oversizedFixture && info->st_dev == oversizedFixture->st_dev &&
+      info->st_ino == oversizedFixture->st_ino)
+    info->st_size = 256LL * 1024 * 1024 + 1;
+  return result;
 }
 
 extern "C" ssize_t __real_write(int, const void *, size_t);
@@ -311,10 +321,14 @@ int main() {
   fs::remove_all(wide);
 
   const auto tooLarge = source/"too-large";
-  make(tooLarge, "");
-  fs::resize_file(tooLarge, 256ULL * 1024 * 1024 + 1);
+  make(tooLarge, "tiny real file");
+  struct stat fixture{};
+  assert(stat(tooLarge.c_str(), &fixture) == 0 && fixture.st_size < 1024);
+  // Simulate only the source size; no enormous BFS allocation or cleanup.
+  oversizedFixture = &fixture;
   reject([&]{ history.SaveAutomatically(cancel, approved); }, "automatic read budget",
          "reached its size limit");
+  oversizedFixture = nullptr;
   assert(count() == 6 && objects() == beforeOversize);
   fs::remove(tooLarge);
 
