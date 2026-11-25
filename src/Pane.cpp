@@ -1461,7 +1461,14 @@ void Pane::MessageReceived(BMessage *m) {
   case B_NODE_MONITOR: {
     const auto opcode = m->GetInt32("opcode", 0);
     const bool volumeChange = opcode == B_DEVICE_MOUNTED || opcode == B_DEVICE_UNMOUNTED;
-    if (volumeChange == (path == "@disks"))
+    const auto device = m->GetInt32("device", -1);
+    if (opcode == B_DEVICE_UNMOUNTED && device >= 0 && path != "@disks" &&
+        (folderIdentity.first == device ||
+         (directoryWatch && directoryWatch->WatchesDevice(serial, device)))) {
+      // Navigate without inspecting any cached entry on the retired mount.
+      // This also invalidates pending row batches and clears the selection.
+      Navigate("@disks");
+    } else if (volumeChange == (path == "@disks"))
       ScheduleDirectoryRefresh();
     break;
   }

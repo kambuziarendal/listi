@@ -54,12 +54,21 @@ private:
   int pending = 0;
 };
 // A retired scanner must never install a watch after its pane has navigated.
-// A pane watches either the opened directory or changes to the volume roster.
+// Local directory panes also watch the volume roster: a directory watch alone
+// need not report that its entire volume disappeared.
 class DirectoryWatch {
   std::mutex lock;
   std::optional<node_ref> node;
   int64 current = -1;
   bool watchingVolumes = false;
+
+  status_t WatchVolumes(BMessenger target) {
+    if (watchingVolumes)
+      return B_OK;
+    const auto result = watch_node(nullptr, B_WATCH_MOUNT, target);
+    watchingVolumes = result == B_OK;
+    return result;
+  }
 
 public:
   void Begin(int64 serial, bool keep, BMessenger target) {
@@ -68,9 +77,10 @@ public:
     if (keep)
       return;
     if (watchingVolumes) {
-      // The mount watch has no node_ref, and no directory watch coexists.
+      // The mount watch has no node_ref. Remove both subscriptions.
       stop_watching(target);
       watchingVolumes = false;
+      node.reset();
     } else if (node) {
       watch_node(&*node, B_STOP_WATCHING, target);
       node.reset();
@@ -80,18 +90,19 @@ public:
     std::lock_guard<std::mutex> guard(lock);
     if (current != serial)
       return B_CANCELED;
-    if (watchingVolumes)
-      return B_OK;
-    const auto status = watch_node(nullptr, B_WATCH_MOUNT, target);
-    watchingVolumes = status == B_OK;
-    return status;
+    return WatchVolumes(target);
+  }
+  bool WatchesDevice(int64 serial, dev_t device) {
+    std::lock_guard<std::mutex> guard(lock);
+    return current == serial && node && node->device == device;
   }
   status_t Install(int64 serial, node_ref opened, BMessenger target) {
     std::lock_guard<std::mutex> guard(lock);
     if (current != serial)
       return B_CANCELED;
+    const auto volumeStatus = WatchVolumes(target);
     if (node && node->device == opened.device && node->node == opened.node)
-      return B_OK;
+      return volumeStatus;
     if (node) {
       watch_node(&*node, B_STOP_WATCHING, target);
       node.reset();
@@ -99,7 +110,7 @@ public:
     auto status = watch_node(&opened, B_WATCH_ALL | B_WATCH_CHILDREN, target);
     if (status == B_OK)
       node = opened;
-    return status;
+    return status == B_OK ? volumeStatus : status;
   }
 };
 Listi::ReadWorker *

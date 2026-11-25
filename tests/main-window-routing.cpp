@@ -29,6 +29,7 @@
 #include <MenuBar.h>
 #include <MenuField.h>
 #include <MenuItem.h>
+#include <NodeMonitor.h>
 #include <TextControl.h>
 #include <TextView.h>
 #include <Window.h>
@@ -1063,6 +1064,26 @@ int main(int argc, char **argv) {
   rightPane->Navigate(sourcePath.c_str());
   waitFor([&] { return !pane->IsScanning() && !rightPane->IsScanning(); });
   assert(pane->LocationValid() && rightPane->LocationValid());
+  // An ordinary unmount is not an I/O quarantine. Invalidate stale rows
+  // immediately, including when no Listi file operation has failed.
+  assert(rightPane->MatchPattern("visible.txt", true) == 1);
+  assert(rightPane->Selected().size() == 1);
+  const auto mountedDevice = rightPane->FolderIdentity().first;
+  assert(mountedDevice >= 0);
+  BMessage unmounted(B_NODE_MONITOR);
+  unmounted.AddInt32("opcode", B_DEVICE_UNMOUNTED);
+  unmounted.AddInt32("device", mountedDevice + 1);
+  rightPane->MessageReceived(&unmounted);
+  assert(sourcePath == rightPane->Path() && rightPane->LocationValid());
+  unmounted.ReplaceInt32("device", mountedDevice);
+  rightPane->MessageReceived(&unmounted);
+  assert(std::string(rightPane->Path()) == "@disks" && rightPane->Selected().empty());
+  waitFor([&] { return !rightPane->IsScanning(); });
+  rightPane->Navigate(sourcePath.c_str());
+  waitFor([&] { return !rightPane->IsScanning(); });
+  assert(sourcePath == rightPane->Path() && rightPane->LocationValid());
+  puts("Unmount notification invalidates only the affected pane without quarantining a clean mount");
+
   Listi::InterruptedVolumes().Block(pane->Path());
   BMessage volumeUnavailable(kVolumeUnavailable);
   window->MessageReceived(&volumeUnavailable);

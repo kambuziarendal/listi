@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.38.0-36 (private test candidate)
+
+- When Haiku reports that a volume was unmounted, file panels browsing it clear their selection and return to Disks. Panels on other volumes stay where they are.
+
 ## 0.38.0-35 (private test candidate)
 
 - The CLI identifies its owning folder tab. Right-click a tab to move it across the window or detach it to Einn.
