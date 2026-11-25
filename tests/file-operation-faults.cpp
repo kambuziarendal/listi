@@ -27,7 +27,7 @@ bool denyTrashCleanup = false;
 bool failStageClose = false, failDirectorySync = false;
 int stageForClose = -1;
 ino_t directoryForSync = -1;
-bool deviceGone = false, reportFat = false;
+bool deviceGone = false, reportFat = false, synthesizeStageMode = false;
 int failures = 0;
 
 void Check(bool ok, const char *label) {
@@ -103,7 +103,7 @@ extern "C" int __real_lstat(const char *, struct stat *);
 extern "C" int __wrap_lstat(const char *path, struct stat *st) {
   const int status = __real_lstat(path, st);
   // FAT synthesizes execute bits for .tmp stages but not the final .png.
-  if (status == 0 && reportFat && strstr(path, "/.listi-copy-") && S_ISREG(st->st_mode))
+  if (status == 0 && synthesizeStageMode && strstr(path, "/.listi-copy-") && S_ISREG(st->st_mode))
     st->st_mode |= S_IXUSR | S_IXGRP | S_IXOTH;
   return status;
 }
@@ -216,7 +216,7 @@ int main() {
     int32 width = 640;
     Check(node.WriteAttr("Media:Width", B_INT32_TYPE, 0, &width, sizeof(width)) == sizeof(width),
           "fixture has screenshot width metadata");
-    reportFat = true;
+    reportFat = synthesizeStageMode = true;
     Job copy{Action::Copy, {image.string()}, out.string()};
     Hooks consent;
     bool allow = false;
@@ -240,6 +240,9 @@ int main() {
           "explicit FAT copy publishes PNG bytes despite extension-derived execute bits and reports omitted attributes");
     std::ofstream(output) << "existing";
     consent.conflict = [](const auto &) { return Decision::Replace; };
+    // This second scenario isolates the metadata policy: Move must copy the
+    // attribute rather than borrowing the ordinary Copy waiver.
+    synthesizeStageMode = false;
     copy.action = Action::Move;
     const auto moved = Run(copy, consent);
     BNode movedNode(output.c_str());

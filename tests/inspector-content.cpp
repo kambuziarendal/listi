@@ -188,7 +188,7 @@ void TestMedia(const std::string &path, bool expectNoAudio) {
   }
   // A standalone bitmap remains a photo, not a one-frame media track.
   {
-    Inspector::Input input("docs/screenshots/listi-properties-0.10.0.png");
+    Inspector::Input input("tests/inspector-still.png");
     assert(Inspector::Identify("untitled", input) == Inspector::Kind::Image);
     assert(input.Position() == 0);
   }
