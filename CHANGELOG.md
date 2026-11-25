@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.38.0-24 (local candidate)
+
+- Folder tabs sit together at the left edge of each file panel. Close a tab with its × without changing the panel width.
+- When an open CLI prevents a window or the application from closing, cancel to keep working or explicitly close its CLI sessions and continue. Other quit blockers now explain what needs attention in a dialog.
+
 ## [0.38.0-23 alpha](https://github.com/kambuziarendal/listi/releases/tag/v0.38.0-23)
 
 - Added local BFS folder versions and an optional low-priority Deskbar history helper. Browse saved points by date in a window or in the opposite panel. Restore a single regular file or an entire folder into a new path.
