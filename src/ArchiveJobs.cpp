@@ -23,6 +23,7 @@
 #include <unistd.h>
 #include <algorithm>
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <cctype>
 #include <memory>
@@ -831,12 +832,17 @@ Result RunArchiveJob(const Job &job, const Hooks &hooks) {
     return RunArchiveEdit(job, hooks);
   Result result;
   std::set<std::string> completedPaths;
+  std::string lastProgressPath;
   Hooks tracked = hooks;
-  tracked.progress = [&](const std::string &path, uint64_t bytes) {
-    completedPaths.insert(path);
-    if (hooks.progress)
-      hooks.progress(path, bytes);
-  };
+  if (hooks.fileDone)
+    tracked.progress = [&](const std::string &path, uint64_t bytes) {
+      if (completedPaths.empty() || path != lastProgressPath) {
+        completedPaths.insert(path);
+        lastProgressPath = path;
+      }
+      if (hooks.progress)
+        hooks.progress(path, bytes);
+    };
   try {
     Require(!job.sources.empty(), "Archive source selection is empty.");
     for (const auto &source : job.sources)
@@ -850,17 +856,24 @@ Result RunArchiveJob(const Job &job, const Hooks &hooks) {
     Require(
         lstat(job.destination.c_str(), &target) != 0 && errno == ENOENT,
         "The destination already exists or is unavailable. Choose another name; nothing was replaced.");
-    for (const auto &source : job.sources)
-      if (!IsVirtual(source)) {
-        char *src = realpath(source.c_str(), nullptr),
-             *dst = realpath(job.destinationFolder.c_str(), nullptr);
-        std::string a = src ? src : "", b = dst ? dst : "";
-        free(src);
-        free(dst);
-        Require(!a.empty() && !b.empty(), "Cannot resolve archive paths.");
-        Require(b != a && b.compare(0, a.size() + 1, a + "/") != 0,
-                "Choose a destination outside the selected folder.");
+    std::string resolvedFolder;
+    for (const auto &source : job.sources) {
+      if (IsVirtual(source))
+        continue;
+      if (resolvedFolder.empty()) {
+        std::unique_ptr<char, decltype(&free)> destination(
+            realpath(job.destinationFolder.c_str(), nullptr), free);
+        Require(bool(destination), "Cannot resolve archive paths.");
+        resolvedFolder = destination.get();
       }
+      std::unique_ptr<char, decltype(&free)> resolvedSource(
+          realpath(source.c_str(), nullptr), free);
+      Require(bool(resolvedSource), "Cannot resolve archive paths.");
+      const std::string from = resolvedSource.get();
+      Require(resolvedFolder != from &&
+                  resolvedFolder.rfind(Join(from, ""), 0) != 0,
+              "Choose a destination outside the selected folder.");
+    }
     Stage stage(job, result, hooks);
     Guards(job);
     auto check = [&] {
@@ -918,9 +931,10 @@ Result RunArchiveJob(const Job &job, const Hooks &hooks) {
       guarded.privateStaging = true;
       // Defer all member completion notifications until atomic publication.
       // Otherwise the UI leaves successfully extracted members marked failed.
-      guarded.fileDone = [&](const std::string &path, const std::string &) {
-        completedPaths.insert(path);
-      };
+      if (hooks.fileDone)
+        guarded.fileDone = [&](const std::string &path, const std::string &) {
+          completedPaths.insert(path);
+        };
       guarded.fileFailed = {};
       guarded.proceed = [&] {
         check();
@@ -989,10 +1003,11 @@ Result RunArchiveJob(const Job &job, const Hooks &hooks) {
     stage.recovery->Advance(RecoveryPhase::Published);
     stage.retainRecovery = false;
     result.completed = 1;
-    completedPaths.insert(job.sources.begin(), job.sources.end());
-    for (const auto &source : completedPaths)
-      if (hooks.fileDone)
+    if (hooks.fileDone) {
+      completedPaths.insert(job.sources.begin(), job.sources.end());
+      for (const auto &source : completedPaths)
         hooks.fileDone(source, job.destination);
+    }
   } catch (const RemovableCopyInterrupted &error) {
     result.interruptedCopyFolder = error.folder.empty() ? job.destinationFolder : error.folder;
     result.errors.push_back(error.what());

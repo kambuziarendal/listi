@@ -1,12 +1,17 @@
 // SPDX-License-Identifier: MIT
 #include "ArchiveJobs.h"
+#include "ArchiveWindow.h"
 #include "JobSnapshot.h"
 #include "Shelf.h"
+#include "ShelfWindow.h"
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <set>
 #include <stdexcept>
+#include <vector>
 
 namespace fs = std::filesystem;
 namespace {
@@ -45,6 +50,143 @@ void Refused(Action action, const char *reason, const char *name) {
     return;
   }
   Check(false, name);
+}
+
+void CheckManyFolders(const fs::path &root) {
+  const auto sources = root / "sources", copyTarget = root / "many-copies",
+             archives = root / "archives";
+  for (const auto &folder : {sources, copyTarget, archives})
+    fs::create_directory(folder);
+  std::vector<std::string> paths;
+  constexpr int folders = 64;
+  for (int i = 0; i < folders; ++i) {
+    const auto name = "folder-" + std::to_string(i);
+    const auto folder = sources / std::to_string(i) / name;
+    fs::create_directories(folder / "nested" / "empty-dir");
+    std::ofstream(folder / "nested" / "payload.txt") << name;
+    std::ofstream(folder / "empty.txt");
+    paths.push_back(folder.string());
+  }
+  Listi::Shelf shelf;
+  Check(shelf.Add(paths) == folders, "collect 64 folders from separate parents");
+  const auto snapshot = shelf.Snapshot();
+  const auto first = fs::path(paths.front());
+  const auto firstTarget = copyTarget / first.filename();
+  fs::create_directories(firstTarget / "nested");
+  const auto existing = firstTarget / "nested" / "payload.txt";
+  std::ofstream(existing) << "keep target";
+  std::ofstream(firstTarget / "only-at-destination") << "keep sibling";
+  auto transfer = [&](const fs::path &target) {
+    const auto job = Listi::PrepareShelfTransfer(
+        shelf.Snapshot(), Listi::Action::Copy, target.string());
+    const auto submitted = Listi::DecodeSubmittedJob(
+        Listi::EncodeJob(job, Listi::kSubmitShelfTransfer),
+        {Listi::Action::Copy});
+    Check(submitted && submitted->sources == paths &&
+              submitted->expectedSources.size() == paths.size(),
+          "Shelf transfer payload keeps all selected source identities");
+    return *submitted;
+  };
+  size_t conflicts = 0;
+  const auto renamed = firstTarget / "nested" / "payload (2).txt";
+  Listi::Hooks keepBoth;
+  keepBoth.copyConflict = [&](const Listi::CopyConflict &request) {
+    if (request.source == (first / "nested" / "payload.txt").string() &&
+        request.destination == existing.string() &&
+        request.proposed == renamed.string())
+      ++conflicts;
+    return Listi::Decision::KeepBoth;
+  };
+  const auto copied = Listi::Run(transfer(copyTarget), keepBoth);
+  Check(conflicts == 1 && copied.completed == folders && copied.skipped == 0 &&
+            copied.errors.empty() && copied.completedRoots.size() == folders &&
+            Read(existing) == "keep target" &&
+            Read(firstTarget / "only-at-destination") == "keep sibling" &&
+            Read(renamed) == first.filename().string(),
+        "merged folder keeps both conflicting files and reports all copied roots");
+  auto verifyTree = [&](const fs::path &folder, const fs::path &payload) {
+    return fs::is_directory(folder / "nested" / "empty-dir") &&
+           fs::is_empty(folder / "nested" / "empty-dir") &&
+           fs::is_regular_file(folder / "empty.txt") &&
+           fs::file_size(folder / "empty.txt") == 0 &&
+           Read(payload) == folder.filename().string();
+  };
+  bool exact = true;
+  for (const auto &path : paths) {
+    const fs::path original(path), target = copyTarget / original.filename();
+    const auto payload = target == firstTarget ? renamed
+                                               : target / "nested" / "payload.txt";
+    exact = exact && verifyTree(original, original / "nested" / "payload.txt") &&
+            verifyTree(target, payload) &&
+            std::find(copied.completedRoots.begin(), copied.completedRoots.end(),
+                      std::make_pair(path, target.string())) !=
+                copied.completedRoots.end();
+  }
+  Check(exact, "all copied roots and originals contain the expected nested files and empty entries");
+
+  auto archiveJob = Listi::PrepareShelfArchive(snapshot);
+  std::ofstream(archives / "occupied.zip") << "existing archive";
+  Refused([&] {
+    Listi::SetArchiveDestination(archiveJob, archives.string(), "occupied.zip");
+  },
+          "already exists", "archive dialog refuses an existing output filename");
+  Check(Read(archives / "occupied.zip") == "existing archive",
+        "archive collision leaves existing bytes intact");
+  // Selecting an alias of a child of the final root must also be refused.
+  const auto insideSource = root / "inside-source";
+  fs::create_directory_symlink(fs::path(paths.back()) / "nested", insideSource);
+  Listi::SetArchiveDestination(archiveJob, insideSource.string(), "inside.zip");
+  const auto inside = Listi::Run(archiveJob, {});
+  Check(inside.completed == 0 && inside.errors.size() == 1 &&
+            inside.errors.front().find("outside the selected folder") != std::string::npos &&
+            !fs::exists(insideSource / "inside.zip"),
+        "archive cannot publish under any selected source, even through an alias");
+  auto rootArchive = Listi::PrepareArchiveJob(false, {"/"});
+  Listi::SetArchiveDestination(rootArchive, archives.string(), "root.zip");
+  const auto rootRefused = Listi::Run(rootArchive, {});
+  Check(rootRefused.completed == 0 && rootRefused.errors.size() == 1 &&
+            rootRefused.errors.front().find("outside the selected folder") != std::string::npos &&
+            !fs::exists(rootArchive.destination),
+        "every destination is inside the filesystem root");
+  Listi::SetArchiveDestination(archiveJob, archives.string(), "full-shelf.zip");
+  const auto submitted = Listi::DecodeSubmittedJob(
+      Listi::EncodeJob(archiveJob, kArchiveAccepted), {Listi::Action::CreateArchive});
+  Check(submitted && submitted->sources == paths &&
+            submitted->expectedSources.size() == paths.size(),
+        "archive accepts the entire Shelf, with each guarded source");
+  std::set<std::string> done;
+  Listi::Hooks packing;
+  packing.fileDone = [&](const std::string &path, const std::string &destination) {
+    if (destination == archiveJob.destination)
+      done.insert(path);
+  };
+  const auto packed = Listi::Run(*submitted, packing);
+  Check(packed.completed == 1 && packed.skipped == 0 && packed.errors.empty() &&
+            std::all_of(paths.begin(), paths.end(), [&](const auto &path) { return done.count(path); }),
+        "one published ZIP reports completion for every Shelf root");
+  auto unpack = Listi::PrepareArchiveJob(true, {archiveJob.destination});
+  Listi::SetArchiveDestination(unpack, archives.string(), "restored");
+  const auto extracted = Listi::Run(unpack, {});
+  const auto restored = fs::path(unpack.destination);
+  Check(extracted.completed == 1 && extracted.skipped == 0 && extracted.errors.empty() &&
+            std::distance(fs::directory_iterator(restored), fs::directory_iterator()) == folders &&
+            std::all_of(paths.begin(), paths.end(), [&](const auto &path) {
+              const auto folder = restored / fs::path(path).filename();
+              return verifyTree(folder, folder / "nested" / "payload.txt");
+            }) && shelf.Snapshot().revision == snapshot.revision,
+        "ZIP round-trip preserves every folder and payload without changing the Shelf");
+
+  const auto blocked = root / "blocked-copies";
+  fs::create_directory(blocked);
+  const auto blockedTarget = blocked / first.filename();
+  std::ofstream(blockedTarget) << "not a folder";
+  const auto partial = Listi::Run(transfer(blocked), {});
+  Check(partial.completed == folders - 1 && partial.skipped == 0 &&
+            partial.errors.size() == 1 && partial.completedRoots.size() == folders - 1 &&
+            Read(blockedTarget) == "not a folder" &&
+            Read(blocked / fs::path(paths.back()).filename() / "nested" / "payload.txt") ==
+                fs::path(paths.back()).filename().string(),
+        "a file blocking one folder is left untouched and other roots still copy");
 }
 } // namespace
 
@@ -93,6 +235,10 @@ int main() {
         "same name", "same-name entries cannot overwrite each other");
     Refused([&] { Listi::PrepareShelfArchive(shelf.Snapshot()); }, "same name",
             "ambiguous ZIP root names are refused");
+    Refused([&] { Listi::PrepareShelfTransfer(shelf.Snapshot(), Listi::Action::Copy,
+                                               target.string()); },
+            "Remove one reference", "duplicate copy roots require removing one reference before submission");
+    Check(fs::is_empty(target), "refused duplicate roots never write a destination");
     shelf.Remove({collision});
     Check(fs::exists(collision),
           "removing a shelf row leaves its original file");
@@ -228,6 +374,9 @@ int main() {
     shelf.Remove({first});
     Refused([&] { Listi::PrepareShelfArchive(shelf.Snapshot()); },
             "missing or replaced", "reject a missing Shelf reference for ZIP");
+    Refused([&] { Listi::PrepareShelfTransfer(shelf.Snapshot(), Listi::Action::Copy,
+                                               target.string()); },
+            "Relink or remove", "missing copy root requires relinking or removing before submission");
 
     shelf.Remove({second});
     shelf.Add({first});
@@ -256,6 +405,7 @@ int main() {
           "clearing an empty Shelf does not change its revision");
     Check(shelf.Add({first, link}) == 2,
           "cleared references can be collected again");
+    CheckManyFolders(fixture.root);
     return 0;
   } catch (const std::exception &e) {
     std::cerr << "FAIL " << e.what() << '\n';

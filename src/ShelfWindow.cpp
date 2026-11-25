@@ -186,6 +186,7 @@ class ShelfWindow : public BWindow {
     if (retained != selected)
       rows->DeselectAll();
     std::set<std::string> present;
+    bool layoutChanged = false;
     for (const auto &entry : snapshot.entries) {
       present.insert(entry.path);
       auto existing = displayed.find(entry.path);
@@ -196,7 +197,7 @@ class ShelfWindow : public BWindow {
         auto row = new ShelfRow(entry);
         displayed.emplace(entry.path, row);
         rows->AddRow(row);
-        rows->InvalidateLayout();
+        layoutChanged = true;
       }
     }
     // Remove through the control so it adjusts its focus and selection pointers.
@@ -205,11 +206,13 @@ class ShelfWindow : public BWindow {
         ++it;
       } else {
         rows->RemoveRow(it->second);
-        rows->InvalidateLayout();
+        layoutChanged = true;
         delete it->second;
         it = displayed.erase(it);
       }
     }
+    if (layoutChanged)
+      rows->InvalidateLayout();
     if (retained != selected) {
       for (const auto &path : retained)
         rows->AddToSelection(displayed.at(path));
