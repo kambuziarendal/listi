@@ -115,14 +115,25 @@ int main() {
   grid->SetMode(3);
   gridWindow->AddChild(grid);
   gridWindow->Show();
+  auto drawGrid = [&] {
+    // Thumbnail submission starts in Draw. An idle VM's screen blanker can
+    // legitimately suppress app_server updates to this window.
+    gridWindow->Lock();
+    grid->Draw(grid->Bounds());
+    gridWindow->Unlock();
+  };
+  drawGrid();
   check(FindReader("thumbnail reader") < 0, "attached thumbnail grid respects the full pool");
   Listi::RetireReadWorker(readers.back());
   const auto deadline = system_time() + 3000000;
-  while (FindReader("thumbnail reader") < 0 && system_time() < deadline)
+  while (FindReader("thumbnail reader") < 0 && system_time() < deadline) {
+    drawGrid();
     snooze(20000);
+  }
   check(FindReader("thumbnail reader") >= 0, "same attached thumbnail grid recovers after one slot opens");
   extra = new Listi::ReadWorker("excess reader");
   check(!Listi::StartReadWorker(extra) && !extra, "recovered thumbnail grid still respects the worker cap");
+  Listi::RetireReadWorker(extra);
   gridWindow->Lock();
   gridWindow->Quit();
   for (auto &worker : readers)
