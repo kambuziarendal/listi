@@ -24,9 +24,11 @@ void Check(bool ok, const char *name) {
 PanelTools &Panel(BWindow &window, int i = 0) {
   return *dynamic_cast<PanelTools *>(window.FindView(i ? "second panel tools" : "first panel tools"));
 }
-void Command(BWindow &window, uint32 what, int side = 0) {
+void Command(BWindow &window, uint32 what, int side = 0, int64 tab = -1) {
   BMessage m(what);
   m.AddInt32("pane", side);
+  if (tab != -1)
+    m.AddInt64("tab", tab);
   window.MessageReceived(&m);
 }
 void Ready(BWindow &window) {
@@ -82,6 +84,13 @@ int main() {
   files.Navigate(a.c_str());
   target.Navigate(c.c_str());
   Ready(*window);
+  window->Layout(true);
+  const float leftWidth = files.Bounds().Width(), rightWidth = target.Bounds().Width();
+  auto checkWidths = [&](const char *description) {
+    window->Layout(true);
+    Check(files.Bounds().Width() == leftWidth && target.Bounds().Width() == rightWidth,
+          description);
+  };
   Check(bar.Count() == 1 && bar.IsHidden(&bar), "single tab starts hidden");
   Command(*window, kTabAlways);
   Check(!bar.IsHidden(&bar), "always-show makes a single tab visible");
@@ -93,6 +102,9 @@ int main() {
   const auto copy = bar.ActiveId();
   Check(first != copy && bar.Count() == 2 && files.SelectedPath() == (a/"one").string(),
         "duplicate has an independent ID and restores selection");
+  checkWidths("opening the tab row preserves both file pane widths");
+  Check(bar.Bounds().Width() == leftWidth,
+        "the strip fills its pane without centering its content in a narrower view");
   files.Navigate(b.c_str());
   Ready(*window);
   files.MatchPattern("two", true);
@@ -106,6 +118,7 @@ int main() {
   Check(bar.ActiveId() == first && firstState.location == a.string() &&
         firstState.history.At(firstState.history.Position()) == a.string() &&
         files.SelectedPath() == (a/"one").string(), "independent history and selection");
+  checkWidths("tab navigation preserves the split");
   Command(*window, kCopy);
   Command(*window, kTabPrevious);
   Ready(*window);
@@ -113,6 +126,7 @@ int main() {
   Ready(*window);
   Check(bar.Count() == 1 && bar.CanReopen() && bar.ActiveId() == first,
         "closing leaves sibling intact");
+  checkWidths("closing a tab preserves the split");
   Command(*window, kTabReopen);
   Ready(*window);
   Check(bar.ActiveId() == copy && bar.Snapshot().alias == "Work" &&
@@ -166,6 +180,31 @@ int main() {
   std::ifstream(c/"one") >> bytes;
   Check(bytes == "tab" && !fs::exists(b/"one"), "queued copy retained its frozen destination");
   window->Lock();
+  auto &rightBar = Panel(*window, 1).FolderBar();
+  const auto rightFirst = rightBar.ActiveId();
+  Command(*window, kTabDuplicate, 1);
+  Ready(*window);
+  const auto rightSecond = rightBar.ActiveId();
+  target.Navigate(b.c_str());
+  Ready(*window);
+  target.MatchPattern("two", true);
+  Command(*window, kTabClose, 1, rightFirst);
+  Check(rightBar.Count() == 1 && rightBar.Index() == 0 &&
+        rightBar.ActiveId() == rightSecond && rightBar.CanReopen() &&
+        target.SelectedPath() == (b/"two").string() && bar.ActiveId() == first,
+        "closing a background tab in the right pane preserves both live tabs and selection");
+  Command(*window, kTabClose, 1, rightSecond);
+  Check(rightBar.Count() == 1 && rightBar.ActiveId() == rightSecond,
+        "the last tab cannot be closed");
+  Command(*window, kTabReopen, 1);
+  Ready(*window);
+  Check(rightBar.Count() == 2 && rightBar.ActiveId() == rightFirst &&
+        target.CaptureNavigation().location == c.string(),
+        "reopen restores the targeted background tab");
+  Command(*window, kTabClose, 1, first);
+  Check(rightBar.Count() == 2 && rightBar.ActiveId() == rightFirst,
+        "a close target from another pane never falls back to the active tab");
+  checkWidths("targeted closes and reopen in the right pane preserve the split");
   Check(window->QuitRequested(), "original may close independently");
   window->Quit();
   detached->Lock();

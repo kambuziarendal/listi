@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: MIT
 #pragma once
 #include "PaneNavigationState.h"
-#include <GroupView.h>
+#include <View.h>
 #include <optional>
 class Pane;
-class BButton;
 namespace Listi {
 enum : uint32 {
   kTabNew = 'tbne', kTabDuplicate = 'tbdu', kTabClose = 'tbcl', kTabReopen = 'tbre',
@@ -19,7 +18,7 @@ struct FolderTab {
 };
 // Only the active file view owns readers and watchers. The remaining tabs
 // are suspended navigation values, not hidden Pane instances.
-class FolderTabs : public BGroupView {
+class FolderTabs : public BView {
 public:
   FolderTabs(int32 side, Pane &);
   bool Change(uint32 command, int64 chosen = -1);
@@ -37,17 +36,42 @@ public:
   int64 ActiveId() const { return tabs[active].id; }
   bool CanReopen() const { return closed.has_value(); }
 private:
+  struct Slot {
+    size_t tab;
+    BRect frame, close;
+  };
+  struct Action {
+    uint32 command = 0;
+    int64 id = -1;
+    bool operator==(const Action &other) const {
+      return command == other.command && id == other.id;
+    }
+  };
   int32 side;
   Pane &pane;
   std::vector<FolderTab> tabs;
   std::optional<FolderTab> closed;
   size_t active = 0;
   bool pageVisible = true, pinned = false;
-  struct ButtonSlot { BButton *button; size_t tab; };
-  std::vector<ButtonSlot> slots;
+  std::vector<std::string> labels;
+  std::vector<Slot> slots;
+  BRect overflow;
+  Action pressed;
+  BPoint hover{-1, -1};
+  void Draw(BRect) override;
+  void FrameResized(float, float) override;
+  void MouseDown(BPoint) override;
+  void MouseUp(BPoint) override;
+  void MouseMoved(BPoint, uint32, const BMessage *) override;
+  bool GetToolTipAt(BPoint, BToolTip **) override;
+  void Arrange();
+  Action ActionAt(BPoint) const;
+  void ShowOverflow();
+  void Post(Action);
+  bool Close(int64 id);
   void Rebuild();
   void Insert(FolderTab tab);
-  void Remove();
+  void Remove(size_t index);
   void Restore();
 };
 }
