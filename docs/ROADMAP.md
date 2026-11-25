@@ -171,7 +171,8 @@ plan and BFS batch actions first; none of the seven is a release commitment.
    entries. Show estimated space for the selection before sending it to the job
    queue. The first version would recheck changed sources and copy only approved
    entries. A comparison is not permission to write. Consider deletion or
-   mirroring separately: absence alone does not identify a deletion.
+   mirroring separately: absence alone does not identify a deletion. Two-way
+   or remote synchronisation would need a separate review.
 2. **Apply BFS attributes to search results.** Preview the existing and proposed
    typed values on selected hits across folders before applying a batch edit.
    For example, tag selected photos with a project attribute, then open a saved
@@ -199,8 +200,9 @@ plan and BFS batch actions first; none of the seven is a release commitment.
    group candidates by size and confirm identical contents with SHA-256. Show
    each location and any differences in BFS attributes before the user chooses
    which copies to keep. Review the existing prototype rather than importing it
-   wholesale; account for hard links, unreadable or changing files and
-   cancellation. Finding a match must never delete a file automatically.
+   wholesale. Before integration, require native coverage for hard links,
+   unreadable or changing files and cancellation, followed by read-only group
+   review. Finding a match must never delete a file automatically.
    The existing Duplicate command still means “make a copy.”
 
 ## Feature directions and current foundations
