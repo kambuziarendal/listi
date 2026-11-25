@@ -9,6 +9,7 @@
 #include <TextControl.h>
 #include <TextView.h>
 #include <Window.h>
+#include <algorithm>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -133,6 +134,39 @@ int main() {
   const bool beforeDisks = visit("/") && tree && tree->CurrentSelection() == 0;
   const bool atDisks = visit("@disks") && tree && tree->CountItems() > 0 &&
                        tree->CurrentSelection() < 0;
+  char mountDirectory[] = "/tmp/Listi-live-disks-XXXXXX", mountPath[PATH_MAX];
+  const bool mountDirectoryCreated = mkdtemp(mountDirectory) != nullptr;
+  auto waitForVolume = [&](bool present) {
+    for (int i = 0; i < 200; ++i) {
+      const auto &rows = pane->ExportModel().Visible();
+      const bool found = std::any_of(rows.begin(), rows.end(), [&](const auto *row) {
+        return row->path == mountPath;
+      });
+      if (!pane->IsScanning() && pane->LocationValid() &&
+          std::string(pane->Path()) == "@disks" && found == present)
+        return true;
+      window->Unlock();
+      snooze(25000);
+      window->Lock();
+    }
+    return false;
+  };
+  // The command receives only the fixed template and mkdtemp's suffix.
+  const std::string unmount = std::string("unmount ") + mountDirectory;
+  const bool mounted = atDisks && mountDirectoryCreated &&
+                       realpath(mountDirectory, mountPath) &&
+                       system((std::string("mount -t ramfs ") + mountDirectory).c_str()) == 0;
+  const bool appeared = mounted && waitForVolume(true);
+  const bool unmounted = mounted && system(unmount.c_str()) == 0;
+  const bool disappeared = appeared && unmounted && waitForVolume(false);
+  const bool cleaned = !mountDirectoryCreated || rmdir(mountDirectory) == 0;
+  const bool liveDisks = appeared && disappeared && cleaned;
+  std::cout << (appeared ? "PASS " : "FAIL ")
+            << "Disks shows a newly mounted volume without manual reload\n";
+  std::cout << (disappeared ? "PASS " : "FAIL ")
+            << "Disks removes an unmounted volume without manual reload\n";
+  if (!cleaned)
+    std::cerr << "Could not remove temporary mount directory " << mountDirectory << '\n';
   const bool returned = visit("/") && tree && tree->CurrentSelection() == 0;
   const bool treePassed = beforeDisks && atDisks && returned;
   std::cout << (treePassed ? "PASS " : "FAIL ")
@@ -143,5 +177,5 @@ int main() {
   rmdir(root.c_str());
   std::cout << (passed ? "PASS " : "FAIL ")
             << "icon grid filter, wildcard selection and preview invalidation\n";
-  return passed && treePassed ? 0 : 1;
+  return passed && treePassed && liveDisks ? 0 : 1;
 }

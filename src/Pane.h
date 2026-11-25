@@ -62,7 +62,7 @@ public:
                               OperationQueue &);
   bool HandleOpenCommand(uint32, const BString &editor,
                          const BMessenger &service,
-                         const std::function<ImagePreview *()> &openPreview);
+                         const std::function<void(const std::string &)> &openPreview);
   int64 SelectionRevision() const {
     return locationValid && !scanning ? selectionRevision : -1;
   }
@@ -184,13 +184,13 @@ private:
     float fraction = 0;
     int32 state = 0;
     std::string error;
-    int64 expires = 0;
+    int64 expires = 0, operation = 0;
   };
   std::unique_ptr<BMessageRunner> progressTimer;
   std::map<std::string, Transfer> transfers;
   Listi::ReadWorker *scanner = nullptr;
   void StartDirectoryReader();
-  void AfterInterruptedCopy(const char *folder);
+  void AfterInterruptedCopy();
   bool mediaReadSuspended = false;
   std::shared_ptr<class DirectoryWatch> directoryWatch;
   std::shared_ptr<struct DirectoryScanDelivery> scanDelivery;

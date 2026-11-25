@@ -186,6 +186,7 @@ class ShelfWindow : public BWindow {
     if (retained != selected)
       rows->DeselectAll();
     std::set<std::string> present;
+    bool layoutChanged = false;
     for (const auto &entry : snapshot.entries) {
       present.insert(entry.path);
       auto existing = displayed.find(entry.path);
@@ -196,7 +197,7 @@ class ShelfWindow : public BWindow {
         auto row = new ShelfRow(entry);
         displayed.emplace(entry.path, row);
         rows->AddRow(row);
-        rows->InvalidateLayout();
+        layoutChanged = true;
       }
     }
     // Remove through the control so it adjusts its focus and selection pointers.
@@ -205,11 +206,13 @@ class ShelfWindow : public BWindow {
         ++it;
       } else {
         rows->RemoveRow(it->second);
-        rows->InvalidateLayout();
+        layoutChanged = true;
         delete it->second;
         it = displayed.erase(it);
       }
     }
+    if (layoutChanged)
+      rows->InvalidateLayout();
     if (retained != selected) {
       for (const auto &path : retained)
         rows->AddToSelection(displayed.at(path));
@@ -489,9 +492,9 @@ class ShelfWindow : public BWindow {
   }
 
 public:
-  ShelfWindow(BMessenger receiver, std::shared_ptr<Shelf> collection,
+  ShelfWindow(BRect frame, BMessenger receiver, std::shared_ptr<Shelf> collection,
               const std::string &settingsFile)
-      : BWindow(BRect(150, 115, 780, 455), "Listi: Shelf", B_TITLED_WINDOW,
+      : BWindow(frame, "Listi: Shelf", B_TITLED_WINDOW,
                 B_AUTO_UPDATE_SIZE_LIMITS),
         owner(receiver), shelf(std::move(collection)),
         collectionsFile(settingsFile.empty() ? CollectionsFile() : settingsFile) {
@@ -666,10 +669,13 @@ public:
 } // namespace
 
 void OpenShelfWindow(BMessenger owner, const std::shared_ptr<Shelf> &shelf,
-                     BMessenger &window, const std::string &settingsFile) {
+                     BMessenger &window, BRect listerFrame, const std::string &settingsFile) {
   if (window.SendMessage(kShowShelf) == B_OK)
     return;
-  auto shelfWindow = new ShelfWindow(owner, shelf, settingsFile);
+  BRect frame(0, 0, listerFrame.Width() * 0.6f, listerFrame.Height() * 0.8f);
+  frame.OffsetTo(listerFrame.LeftTop() + BPoint(12, 12));
+  auto shelfWindow = new ShelfWindow(frame, owner, shelf, settingsFile);
+  shelfWindow->MoveOnScreen();
   window = BMessenger(shelfWindow);
   shelfWindow->Show();
 }

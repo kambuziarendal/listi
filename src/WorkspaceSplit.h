@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: MIT
 #pragma once
 
+#include <Messenger.h>
 #include <SplitView.h>
 #include <array>
 #include <memory>
+#include <optional>
+#include <string>
 
+class BGroupView;
 class ImagePreview;
 class MainWindowMenu;
 class Pane;
@@ -15,10 +19,12 @@ namespace Listi {
 class PanelTools;
 class Shelf;
 constexpr uint32 kSplitChanged = 'swgt';
+constexpr uint32 kDetachInspector = 'idtc', kDockInspector = 'idck';
 
 class WorkspaceSplit : public BSplitView {
 public:
   WorkspaceSplit(Pane &first, Pane &second, Preferences &prefs, MainWindowMenu &menu);
+  ~WorkspaceSplit() override;
   int Source() const { return source; }
   void SetSource(int pane);
   void FollowFocus(const BView *view);
@@ -36,6 +42,11 @@ public:
   void TogglePanelPreview();
   bool DismissPanelTool();
   bool ToggleInspector();
+  bool DetachInspector();
+  bool DockInspector(const BMessage &);
+  bool InspectorDetached() const { return floatingInspector.has_value(); }
+  bool FloatingInspectorAllowsQuit();
+  void OpenFloatingInspector(const std::string &editPath);
   bool QuickView() const { return quickView; }
   bool SetQuickView(bool enabled);
   void RefreshPanels();
@@ -71,7 +82,10 @@ private:
   int source;
   bool quickView = false;
   PanelTools *panes[2];
+  BGroupView *inspectorSlot;
   ImagePreview *inspector;
+  std::optional<BMessenger> floatingInspector;
+  std::string floatingSelection;
   const float splitterSize;
   bool inspectorOnLeft = false;
   bool paneVisible[2] = {true, true};

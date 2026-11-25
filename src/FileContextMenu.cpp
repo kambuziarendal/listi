@@ -27,6 +27,7 @@ void FolderActions(BMenu &menu, const ContextMenuOptions &options) {
     add(*history, "Preview in other panel", Listi::kPreviewHistory, options.dual);
     menu.AddItem(history);
   }
+  add(menu, "Detach to Einn", Listi::kTabDetach, true);
   const auto sort = options.sort;
   auto sorting = new BMenu("Sort by");
   auto sortItem = [&](const char *label, int column, bool ascending,
@@ -91,10 +92,11 @@ void FileActions(BMenu &menu, const ContextMenuOptions &options) {
     menu.AddItem(item);
   };
   add("Open", kInvoke, single);
-  if (single && directory)
+  if (single && directory) {
     add("Open in new window", kSelectedBrowser);
-  if (single && directory)
+    add("Detach to Einn", Listi::kTabDetach);
     add("Add to shortcuts…", kAddShortcut, options.addShortcut);
+  }
   if (!directory) {
     add("Open with...", kOpenWith, single && local);
     add(options.singlePane ? "Preview beside file list" : "Preview in other panel",

@@ -16,6 +16,8 @@ public:
   std::string folder;
 };
 
+bool IsRemovableIOError(int error);
+
 enum class StagingPermissions { Preserve, PreserveIfSupported, KeepCreationMode };
 
 // Takes ownership of both descriptors. Returns false if chmod was unsupported

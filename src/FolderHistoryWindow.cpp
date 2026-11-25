@@ -93,10 +93,11 @@ struct Task {
 
 class HistoryView : public BGroupView {
 public:
-  HistoryView(const char *path, int32 side)
-      : BGroupView(B_VERTICAL), source(path), panel(side) {
+  HistoryView(const char *path, int32 side, bool savedOnly = false)
+      : BGroupView(B_VERTICAL), source(path), panel(side), savedOnly(savedOnly) {
     SetName("folder history browser");
-    auto *header = new BStringView("history source", ("History: " + source).c_str());
+    header = new BStringView("history source",
+        savedOnly ? "Saved folder history (read-only)" : ("History: " + source).c_str());
     header->SetTruncation(B_TRUNCATE_MIDDLE);
     header->SetToolTip(source.c_str());
     auto controls = BLayoutBuilder::Group<>(this, B_VERTICAL, B_USE_SMALL_SPACING);
@@ -124,11 +125,12 @@ public:
     list = new BListView("saved files");
     list->SetSelectionMessage(new BMessage(kSelect));
     controls.Add(new BScrollView("saved files scroll", list, 0, false, true));
-    notice = new BStringView("history status", "Looking for saved versions…");
+    notice = new BStringView("history status",
+        savedOnly ? "Choose the folder where versions are stored." : "Looking for saved versions…");
     notice->SetTruncation(B_TRUNCATE_END);
     controls.Add(notice);
     if (panel < 0) {
-      save = Button("Save version", kSave);
+      if (!savedOnly) save = Button("Save version", kSave);
       one = Button("Restore file…", kPickFile);
       all = Button("Restore folder…", kPickFolder);
       cancel = Button("Cancel", kCancel);
@@ -141,10 +143,12 @@ public:
       controls.Add(confirmRow, 0);
       SetViewVisible(confirmRow, false);
       actions = new BGroupView(B_HORIZONTAL);
-      BLayoutBuilder::Group<>(actions, B_HORIZONTAL).Add(save).Add(cancel).AddGlue().Add(one).Add(all);
+      auto buttons = BLayoutBuilder::Group<>(actions, B_HORIZONTAL);
+      if (save) buttons.Add(save);
+      buttons.Add(cancel).AddGlue().Add(one).Add(all);
       controls.Add(actions, 0);
     }
-    SetViewVisible(choose, false);
+    SetViewVisible(choose, savedOnly);
     if (close) close->SetFlat(true);
     Update();
   }
@@ -163,7 +167,8 @@ public:
     list->SetTarget(this);
     timeline->SetTarget(this);
     if (close) close->SetTarget(Window());
-    Start(kOpen);
+    if (savedOnly) Window()->PostMessage(kChoose, this);
+    else Start(kOpen);
   }
 
   void MessageReceived(BMessage *m) override {
@@ -268,11 +273,11 @@ private:
     timeline->SetEnabled(browse && points.size() > 1);
     older->SetEnabled(browse && i > 0);
     newer->SetEnabled(browse && size_t(i + 1) < points.size());
-    refresh->SetEnabled(!task);
+    refresh->SetEnabled(!task && (!savedOnly || bool(store)));
     choose->SetEnabled(!task);
-    if (save) {
+    if (actions) {
       SetViewVisible(actions, pendingPoint.empty());
-      save->SetEnabled(!task && bool(store));
+      if (save) save->SetEnabled(!task && bool(store));
       SetViewVisible(cancel, Writing());
       cancel->SetEnabled(task && !task->cancel);
       all->SetEnabled(!task && !loaded.empty() && loaded == id);
@@ -297,7 +302,7 @@ private:
   }
 
   void Start(uint32 action, std::string path = {}, std::string file = {}) {
-    if (task || (action != kOpen && !store)) return;
+    if (task || (action != kOpen && !store) || (savedOnly && action == kSave)) return;
     auto id = Wanted();
     if (action == kLoad && id.empty()) return;
     auto work = std::make_shared<Task>();
@@ -314,13 +319,15 @@ private:
     Update();
     auto previous = timeline->Value() > 0 && !id.empty() ? points[timeline->Value() - 1] : "";
     try {
-      std::thread([action, id, previous, path, file, source = source, existing = store,
+      std::thread([action, id, previous, path, file, source = source, savedOnly = savedOnly, existing = store,
                    work = task, reply = BMessenger(this)] {
         {
           const std::lock_guard<std::mutex> guard(work->lock);
           try {
             auto history = existing;
-            if (action == kOpen) {
+            if (action == kOpen && savedOnly) {
+              history = std::make_shared<HistoryStore>(path);
+            } else if (action == kOpen) {
               auto pair = HistoryPairFor(ReadHistorySettings(), source);
               auto destination = path.empty() ? pair.GetString("path", 1, "") : path;
               if (destination.empty()) {
@@ -346,7 +353,7 @@ private:
             } else if (action == kLoad) {
               work->rows = DescribeVersion(*history, id, previous, work->notice, work->cancel);
             } else if (action == kSuggest) {
-              auto name = file.empty() ? fs::path(source).filename().string() + " restored" :
+              auto name = file.empty() ? fs::path(history->SourcePath()).filename().string() + " restored" :
                   fs::path(file).filename().string();
               work->suggestion = SuggestCopy(path, name);
               work->file = file;
@@ -380,6 +387,11 @@ private:
     Status(work->notice);
     if (work->store) {
       store = std::move(work->store);
+      if (savedOnly) {
+        auto label = "Original folder: " + store->SourcePath();
+        header->SetText(label.c_str());
+        header->SetToolTip(label.c_str());
+      }
       SetViewVisible(choose, false);
       Clear();
       points = std::move(work->points);
@@ -407,7 +419,7 @@ private:
         loaded = loading;
       }
     } else if (kind == kOpen) {
-      configuredUnavailable = !work->manual && !manual;
+      configuredUnavailable = !savedOnly && !work->manual && !manual;
       choose->SetLabel(configuredUnavailable ? "Automatic history settings…" : "Choose history folder…");
       SetViewVisible(choose, true);
     }
@@ -417,11 +429,12 @@ private:
 
   const std::string source;
   const int32 panel;
+  const bool savedOnly;
   BButton *older, *newer, *refresh, *choose, *close = nullptr, *save = nullptr,
           *one = nullptr, *all = nullptr, *cancel = nullptr;
   BSlider *timeline;
   BListView *list;
-  BStringView *notice;
+  BStringView *header, *notice;
   std::unique_ptr<BFilePanel> picker;
   std::shared_ptr<HistoryStore> store;
   std::shared_ptr<Task> task;
@@ -438,9 +451,10 @@ private:
 
 class HistoryWindow : public BWindow {
 public:
-  explicit HistoryWindow(const char *source)
-      : BWindow(BRect(140, 100, 770, 520), "Folder history", B_TITLED_WINDOW,
-                B_AUTO_UPDATE_SIZE_LIMITS | B_ASYNCHRONOUS_CONTROLS), view(new HistoryView(source, -1)) {
+  explicit HistoryWindow(const char *source, bool savedOnly = false)
+      : BWindow(BRect(140, 100, 770, 520), savedOnly ? "Saved folder history" : "Folder history",
+                B_TITLED_WINDOW, B_AUTO_UPDATE_SIZE_LIMITS | B_ASYNCHRONOUS_CONTROLS),
+        view(new HistoryView(source, -1, savedOnly)) {
     BLayoutBuilder::Group<>(this, B_VERTICAL, 0).Add(view);
     GetLayout()->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
     auto screen = BScreen(this).Frame();
@@ -455,5 +469,6 @@ private:
 
 bool FolderHistoryBusy() { return active.load() != 0; }
 void OpenFolderHistory(const char *source) { (new HistoryWindow(source))->Show(); }
+void OpenSavedFolderHistory() { (new HistoryWindow("", true))->Show(); }
 BView *CreateHistoryPreview(const char *source, int32 pane) { return new HistoryView(source, pane); }
 }

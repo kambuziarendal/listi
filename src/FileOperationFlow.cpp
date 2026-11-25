@@ -26,7 +26,7 @@ namespace Listi {
 namespace {
 constexpr uint32 kNamedEntryAccepted = 'nacc', kConfirm = 'cfir';
 constexpr char kPendingQuestion[] = "Finish or cancel the open question first.";
-constexpr uint32 kInspectRestore = 'trpr', kRestoreReady = 'trpv';
+constexpr uint32 kInspectTrash = 'trpr', kTrashReady = 'trpv';
 
 std::string SelectedLabel(const Job &job) {
   if (job.sources.size() == 1)
@@ -34,45 +34,81 @@ std::string SelectedLabel(const Job &job) {
   return std::to_string(job.sources.size()) + " selected items";
 }
 
-class RestoreProbe : public ReadWorker {
+std::string PreviewRestore(Job &job) {
+  std::string preview = "Restore " + SelectedLabel(job) + "? Existing files will not be overwritten.";
+  for (const auto &source : job.sources) {
+    auto &target = job.restoreTargets[source];
+    preview += "\n" + LocationLeaf(source) + " → ";
+    try {
+      target = OriginalTrashPath(source, job.expectedSources.at(source));
+      preview += target;
+      struct stat st;
+      if (lstat(target.c_str(), &st) == 0)
+        preview += " (already exists)";
+      else if (errno != ENOENT)
+        preview += " (cannot check destination)";
+    } catch (const std::exception &) {
+      preview += "Original location unavailable; will stay in Trash.";
+    }
+  }
+  return preview;
+}
+
+std::string PreviewTrash(Job &job) {
+  std::vector<std::string> unsupported;
+  decltype(job.expectedSources) unsupportedIdentities;
+  for (const auto &source : job.sources) {
+    if (IsVirtual(source))
+      throw std::runtime_error("Trash is available only on local supported volumes. Nothing was deleted.");
+    try {
+      CheckTrashSource(source, &job.expectedSources.at(source), false);
+    } catch (const TrashUnsupported &) {
+      unsupported.push_back(source);
+      unsupportedIdentities.emplace(source, job.expectedSources.at(source));
+    }
+  }
+  if (unsupported.empty())
+    return "Move " + SelectedLabel(job) + " to Trash?\nYou can restore from Trash.";
+
+  const bool mixed = unsupported.size() != job.sources.size();
+  job.action = Action::Delete;
+  job.sources = std::move(unsupported);
+  job.expectedSources = std::move(unsupportedIdentities);
+  std::string preview = "No Trash on ext4 volumes. Permanently delete " +
+                        SelectedLabel(job) + "?\nThis cannot be undone.";
+  if (mixed)
+    preview += " Other selected items will stay where they are.";
+  return preview;
+}
+
+class TrashProbe : public ReadWorker {
   BMessenger owner;
   Job job;
   int64 request;
 public:
-  RestoreProbe(BMessenger owner, Job job, int64 request)
-      : ReadWorker("Trash destination reader"), owner(owner), job(std::move(job)), request(request) {}
+  TrashProbe(BMessenger owner, Job job, int64 request)
+      : ReadWorker("Trash confirmation reader"), owner(owner), job(std::move(job)), request(request) {}
   void MessageReceived(BMessage *message) override {
-    if (message->what != kInspectRestore) {
+    if (message->what != kInspectTrash) {
       ReadWorker::MessageReceived(message);
       return;
     }
-    std::string preview = "Restore " + SelectedLabel(job) + "? Existing files will not be overwritten.";
-    for (const auto &source : job.sources) {
-      auto &target = job.restoreTargets[source];
-      preview += "\n" + LocationLeaf(source) + " → ";
-      try {
-        target = OriginalTrashPath(source, job.expectedSources.at(source));
-        preview += target;
-        struct stat st;
-        if (lstat(target.c_str(), &st) == 0)
-          preview += " (already exists)";
-        else if (errno != ENOENT)
-          preview += " (cannot check destination)";
-      } catch (const std::exception &) {
-        preview += "Original location unavailable; will stay in Trash.";
-      }
+    BMessage reply(kTrashReady);
+    try {
+      const auto preview = job.action == Action::Restore ? PreviewRestore(job) : PreviewTrash(job);
+      // Confirm the frozen job, never the current pane or selection.
+      reply = EncodeJob(job, kTrashReady);
+      reply.AddString("preview", preview.c_str());
+    } catch (const std::exception &error) {
+      reply.AddString("error", error.what());
     }
-    // The job is already frozen. Confirmation cannot drift to a different
-    // selection while a removable disk or Trash reader is slow.
-    BMessage reply = EncodeJob(job, kRestoreReady);
     reply.AddInt64("request", request);
-    reply.AddString("preview", preview.c_str());
     owner.SendMessage(&reply, static_cast<BHandler *>(nullptr), 50000);
   }
 };
 } // namespace
 
-FileOperationFlow::~FileOperationFlow() { RetireReadWorker(restoreProbe); }
+FileOperationFlow::~FileOperationFlow() { RetireReadWorker(trashProbe); }
 
 FileOperationFlow::FileOperationFlow(InlineAction &actionArea,
                                      OperationQueue &queue,
@@ -81,8 +117,10 @@ FileOperationFlow::FileOperationFlow(InlineAction &actionArea,
 }
 
 bool FileOperationFlow::CanBegin() {
-  if (!actionArea.Pending())
+  if (!actionArea.Pending()) {
+    RetireReadWorker(trashProbe);
     return true;
+  }
   queue.ErrorInfo(kPendingQuestion);
   return false;
 }
@@ -213,24 +251,17 @@ void FileOperationFlow::BeginOperation(Action action, const Pane &source,
   }
   FreezeLocalJob(job);
   FreezeArchiveTargets(job);
-  auto accepted = EncodeJob(job, kConfirm);
-  if (action == Action::Restore) {
-    RetireReadWorker(restoreProbe);
-    restoreProbe = new RestoreProbe(owner, std::move(job), ++restoreRequest);
-    if (!StartReadWorker(restoreProbe) || restoreProbe->PostMessage(kInspectRestore) != B_OK) {
-      RetireReadWorker(restoreProbe);
-      throw std::runtime_error("Cannot read Trash destinations. Try again.");
+  if (action == Action::Restore || action == Action::Trash) {
+    trashProbe = new TrashProbe(owner, std::move(job), ++trashRequest);
+    if (!StartReadWorker(trashProbe) || trashProbe->PostMessage(kInspectTrash) != B_OK) {
+      RetireReadWorker(trashProbe);
+      throw std::runtime_error("Cannot check Trash. Try again.");
     }
     return;
   }
-  const auto label = SelectedLabel(job);
-  if (action == Action::Trash) {
-    const auto text = "Move " + label + " to Trash?\nYou can restore from Trash.";
-    AskInline(text.c_str(), "Move to Trash", accepted);
-  } else {
-    const auto text = "Permanently delete " + label + "?\nThis cannot be undone.";
-    AskInline(text.c_str(), "Delete permanently", accepted);
-  }
+  auto accepted = EncodeJob(job, kConfirm);
+  const auto text = "Permanently delete " + SelectedLabel(job) + "?\nThis cannot be undone.";
+  AskInline(text.c_str(), "Delete permanently", accepted);
 }
 
 bool FileOperationFlow::Handle(const BMessage &message, const Pane &source,
@@ -316,13 +347,23 @@ bool FileOperationFlow::Handle(const BMessage &message, const Pane &source,
     case kMkdir:
       BeginOperation(Action::MakeDirectory, source, target, singlePane);
       break;
-    case kRestoreReady: {
-      if (!restoreProbe || message.IsSourceRemote() || message.GetInt64("request", -1) != restoreRequest)
+    case kTrashReady: {
+      if (!trashProbe || message.IsSourceRemote() || message.GetInt64("request", -1) != trashRequest)
         break;
-      RetireReadWorker(restoreProbe);
+      RetireReadWorker(trashProbe);
+      if (const char *error = message.GetString("error", nullptr)) {
+        PostMainWindowNotice(error);
+        break;
+      }
+      auto job = DecodeSubmittedJob(message, {Action::Trash, Action::Restore, Action::Delete});
+      if (!job)
+        break;
       auto accepted = message;
       accepted.what = kConfirm;
-      AskInline(message.GetString("preview", ""), "Restore", accepted);
+      const char *button = job->action == Action::Restore ? "Restore"
+                           : job->action == Action::Trash ? "Move to Trash"
+                                                          : "Delete permanently";
+      AskInline(message.GetString("preview", ""), button, accepted);
       break;
     }
     case kConfirm: {

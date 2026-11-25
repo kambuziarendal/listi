@@ -1,16 +1,20 @@
 // SPDX-License-Identifier: MIT
 #include <stdexcept>
+#include "UnavailableVolume.h"
 #include "../build/ListiBuildIdentity.h"
 #include "FileClipboard.h"
 #include <Alert.h>
+#include <Invoker.h>
 #include <sys/utsname.h>
 #include "MainWindow.h"
 #include "WindowOverview.h"
 #include "FolderTabs.h"
 #include <Screen.h>
+#include <NodeMonitor.h>
 #include "WorkingSets.h"
 #include <atomic>
 #include <MenuItem.h>
+#include <PopUpMenu.h>
 #include "LayoutIntroduction.h"
 #include "FolderHistory.h"
 #include "AutomaticHistory.h"
@@ -61,6 +65,7 @@
 #include <Window.h>
 #include <cstring>
 #include <memory>
+#include <utility>
 using Listi::PanelPage;
 
 void PostMainWindowNotice(const char *text) {
@@ -77,13 +82,69 @@ void PostMainWindowNotice(const char *text) {
   be_app->PostMessage(&error);
 }
 
+void ShowQuitBlocker(const char *text) {
+  auto *alert = new BAlert("Cannot close Listi", text, "OK", nullptr, nullptr,
+                           B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+  alert->SetShortcut(0, B_ESCAPE);
+  alert->Go(nullptr);
+}
+
 namespace {
+class CLIQuitAlert : public BAlert {
+public:
+  CLIQuitAlert(BMessenger recipient, uint32 command, bool wholeApp)
+      : BAlert("Close CLI sessions?",
+               wholeApp
+                   ? "Listi has open CLI sessions. Closing them stops their shells and may interrupt running commands."
+                   : "This window has open CLI sessions. Closing them stops their shells and may interrupt running commands.",
+               "Cancel", wholeApp ? "Close CLI and quit" : "Close CLI and window",
+               nullptr, B_WIDTH_AS_USUAL, B_WARNING_ALERT),
+        result(new BMessage(command), recipient) {
+    SetShortcut(0, B_ESCAPE);
+    SetDefaultButton(ButtonAt(0));
+  }
+
+  void ShowPrompt() { Go(&result); }
+
+private:
+  BInvoker result; // BAlert borrows the invoker until the dialog closes.
+};
+} // namespace
+
+BMessenger ConfirmClosingCLIs(BMessenger recipient, uint32 command, bool wholeApp) {
+  auto *alert = new CLIQuitAlert(recipient, command, wholeApp);
+  BMessenger target(alert);
+  alert->ShowPrompt();
+  return target;
+}
+
+bool CheckSharedQuitBlockers() {
+  if (Listi::FolderHistoryBusy())
+    ShowQuitBlocker("A folder history operation is running. Let it finish or cancel it, then try again.");
+  else if (FolderCompareBusy())
+    ShowQuitBlocker("A folder comparison is running. Let it finish or cancel it, then try again.");
+  else if (!InspectorEditorsAllowQuit())
+    ShowQuitBlocker("An editor is still open with unsaved changes or is busy. Check the editor before closing Listi.");
+  else if (!FilePropertiesAllowQuit())
+    ShowQuitBlocker("File Properties has unsaved changes or is busy. Check that window before closing Listi.");
+  else if (!OpenWithAllowQuit())
+    ShowQuitBlocker("Open With is still working. Let it finish before closing Listi.");
+  else if (!ArchiveEditorsAllowQuit())
+    ShowQuitBlocker("An archive editor is still working. Let it finish before closing Listi.");
+  else
+    return true;
+  return false;
+}
+
+namespace {
+constexpr uint32 kConfirmWindowCLIQuit = 'wccl';
 std::atomic<int> browserCount{0};
 class MainWindow : public Listi::WorkingWindow {
   BMessenger overview, guide;
   std::vector<BMessage> historyPairs;
   bool readingConfig = false, refreshConfig = false, automaticEnabled = false;
   std::string titleLocation;
+  std::string detachedWorkNotice;
   std::array<std::string, 2> tabLocations, probedFolders;
   bool sessionLayout = false;
   std::optional<bool> wasEinn;
@@ -105,6 +166,9 @@ class MainWindow : public Listi::WorkingWindow {
   Listi::FileDropFlow fileDrop{*actionArea, queue, BMessenger(this), service};
   Listi::FileOperationFlow fileOperations{*actionArea, queue, clipboard, BMessenger(this)};
   std::unique_ptr<Listi::TerminalDock> terminalDock;
+  BMessenger cliQuitAlert;
+  bool closeCLIOnQuit = false;
+  bool operationsWindowSuspended = false;
 
   void PublishPlaces() {
     for (auto pane : panes)
@@ -144,7 +208,17 @@ class MainWindow : public Listi::WorkingWindow {
     }
     split->Focus();
   }
+  void RefreshTerminalTabLabel(int side) {
+    const auto id = terminalDock->OwnerTab(side);
+    if (id > 0)
+      terminalDock->UpdateTabLabel(side, split->Panel(side).FolderBar().DescribeTab(id));
+  }
   void UpdateTransferTarget() {
+    // Wait for the initial folder read so its progress does not erase the notice.
+    if (!detachedWorkNotice.empty() && !panes[0]->IsScanning()) {
+      panes[0]->ShowStatus(detachedWorkNotice.c_str());
+      detachedWorkNotice.clear();
+    }
     for (int side = 0; side < 2; ++side) {
       const auto *pane = panes[side];
       bool known = false;
@@ -168,6 +242,7 @@ class MainWindow : public Listi::WorkingWindow {
       if (tabLocations[side] != panes[side]->Path()) {
         tabLocations[side] = panes[side]->Path();
         split->Panel(side).FolderBar().UpdateLabel();
+        RefreshTerminalTabLabel(side);
       }
     }
     const int source = split->Source();
@@ -206,6 +281,7 @@ class MainWindow : public Listi::WorkingWindow {
     toolbar.Arrange();
     split->ApplyWorkspace();
     queue.SetCompact(prefs.SinglePane());
+    queue.SetSeparateWindow(prefs.operationsInWindow && !operationsWindowSuspended);
     if (switchSize) {
       const auto saved = einn ? einnFrame : wideFrame;
       if (saved.IsValid()) {
@@ -240,11 +316,20 @@ class MainWindow : public Listi::WorkingWindow {
     }
     ApplyWorkspace();
   }
-  ImagePreview *OpenSelectionPreview() {
+  void OpenSelectionPreview(const std::string &editPath) {
+    if (split->InspectorDetached()) {
+      split->OpenFloatingInspector(editPath);
+      return;
+    }
+    ImagePreview *target;
     if (prefs.IsSmidja())
-      return split->OpenPanelPreview(1 - split->Source());
-    SetQuickView(true);
-    return &split->Inspector();
+      target = split->OpenPanelPreview(1 - split->Source());
+    else {
+      SetQuickView(true);
+      target = &split->Inspector();
+    }
+    if (target && !editPath.empty())
+      target->BeginEditing(editPath);
   }
 
   bool HandleFolderTab(BMessage &message) {
@@ -253,6 +338,7 @@ class MainWindow : public Listi::WorkingWindow {
     case kTabNew: case kTabDuplicate: case kTabClose: case kTabReopen:
     case kTabRename: case kTabNamed: case kTabLeft: case kTabRight:
     case kTabNext: case kTabPrevious: case kTabChoose: case kTabDetach: case kTabAlways:
+    case kTabContext: case kTabOpposite:
       break;
     default:
       return false;
@@ -263,7 +349,31 @@ class MainWindow : public Listi::WorkingWindow {
     if (!split->ActivateFiles(side))
       return true;
     auto &bar = split->Panel(side).FolderBar();
+    const int64 id = message.GetInt64("tab", bar.ActiveId());
     switch (message.what) {
+    case kTabContext: {
+      BPoint where;
+      if (bar.DescribeTab(id).empty() || message.FindPoint("where", &where) != B_OK)
+        return true;
+      BPopUpMenu context("Folder tab", false, false);
+      auto *move = new BMenuItem(side == 0 ? "Move tab to right pane" : "Move tab to left pane",
+                                 new BMessage(kTabOpposite));
+      context.AddItem(move);
+      move->SetEnabled(!panes[1 - side]->IsHidden() &&
+                       split->Panel(1 - side).Current() == PanelPage::Files);
+      context.AddItem(new BMenuItem("Detach tab to Einn window", new BMessage(kTabDetach)));
+      context.AddSeparatorItem();
+      auto *close = new BMenuItem("Close tab", new BMessage(kTabClose));
+      context.AddItem(close);
+      close->SetEnabled(bar.Count() > 1);
+      if (auto *selected = context.Go(where, false, true)) {
+        BMessage action(selected->Message()->what);
+        action.AddInt32("pane", side);
+        action.AddInt64("tab", id);
+        PostMessage(&action);
+      }
+      return true;
+    }
     case kTabAlways: {
       prefs.alwaysFolderTabs = !prefs.alwaysFolderTabs;
       BMessage delta(kSharedPreferences);
@@ -287,18 +397,93 @@ class MainWindow : public Listi::WorkingWindow {
     case kTabNamed:
       if (message.GetInt64("tab", -1) == bar.ActiveId())
         bar.Rename(message.GetString("name", ""));
-      return true;
+      break;
+    case kTabOpposite: {
+      auto tab = bar.CopyTab(id);
+      const int other = 1 - side;
+      if (!tab || !split->ActivateFiles(other))
+        break;
+      const auto placement = terminalDock->OpenPlacement(side, id);
+      if (placement && !terminalDock->TransferTo(placement, *terminalDock, other)) {
+        split->SetSource(side);
+        queue.ErrorInfo("Cannot move the CLI to the opposite pane. The tab and CLI have not moved.");
+        break;
+      }
+      split->Panel(other).FolderBar().InsertTransferred(std::move(*tab));
+      bar.ReleaseTab(id);
+      break;
+    }
     case kTabDetach: {
-      if (openBrowser && openBrowser({{}, bar.Snapshot(), Frame().LeftTop() + BPoint(24, 24)}))
-        bar.AfterDetach();
+      auto tab = bar.CopyTab(id);
+      if (!tab || !openBrowser)
+        break;
+      BrowserRequest request{{}, std::move(tab), Frame().LeftTop() + BPoint(24, 24)};
+      request.cliPlacement = terminalDock->OpenPlacement(side, id);
+      if (request.cliPlacement)
+        request.cliSource = BMessenger(this);
+      if (queue.Busy() || clipboard.Busy())
+        request.detachedWorkNotice = "File operations continue in the original window.";
+      if (openBrowser(std::move(request)))
+        bar.ReleaseTab(id);
       break;
     }
     default:
       bar.Change(message.what, message.GetInt64("tab", -1));
     }
+    for (int index = 0; index < 2; ++index)
+      RefreshTerminalTabLabel(index);
     split->RefreshPanels();
     split->Focus();
     return true;
+  }
+
+  void MoveTabToWindow(const BMessage &message) {
+    if (PromptBlocksCommand())
+      return;
+    const int side = message.GetInt32("pane", -1);
+    if (side != 0 && side != 1)
+      return;
+    auto &bar = split->Panel(side).FolderBar();
+    auto tab = bar.CopyTab(message.GetInt64("tab", -1));
+    if (!tab)
+      return;
+    BMessenger address;
+    if (message.FindMessenger("destination", &address) != B_OK ||
+        !address.IsTargetLocal() || address == BMessenger(this) ||
+        address.LockTargetWithTimeout(250000) != B_OK) {
+      queue.ErrorInfo("The destination window is busy or closed. The tab has not moved.");
+      return;
+    }
+    BLooper *looper = nullptr;
+    address.Target(&looper);
+    struct UnlockWindow {
+      BLooper *looper;
+      ~UnlockWindow() { looper->Unlock(); }
+    } unlock{looper};
+    auto *target = dynamic_cast<MainWindow *>(looper);
+    if (!target || target->actionArea->Pending()) {
+      queue.ErrorInfo("The destination window cannot accept a tab right now.");
+      return;
+    }
+    const int dest = target->split->Source();
+    if (target->split->Panel(dest).Current() != PanelPage::Files) {
+      queue.ErrorInfo("Select a file panel in the destination window first.");
+      return;
+    }
+    const auto placement = terminalDock->OpenPlacement(side, tab->id);
+    if (placement && !terminalDock->TransferTo(placement, *target->terminalDock, dest)) {
+      queue.ErrorInfo("Cannot move the CLI to that panel. The tab and CLI have not moved.");
+      return;
+    }
+    const auto id = tab->id;
+    target->split->Panel(dest).FolderBar().InsertTransferred(std::move(*tab));
+    bar.ReleaseTab(id);
+    RefreshTerminalTabLabel(side);
+    target->RefreshTerminalTabLabel(dest);
+    split->RefreshPanels();
+    target->split->RefreshPanels();
+    target->split->Focus();
+    target->Activate();
   }
 
   bool HandleNavigation(BMessage *m) {
@@ -416,7 +601,9 @@ class MainWindow : public Listi::WorkingWindow {
     switch (m->what) {
     case kQuickView:
       if (!actionArea->Pending()) {
-        if (prefs.IsSmidja())
+        if (split->InspectorDetached())
+          split->OpenFloatingInspector({});
+        else if (prefs.IsSmidja())
           split->TogglePanelPreview();
         else
           SetQuickView(!split->QuickView());
@@ -430,11 +617,20 @@ class MainWindow : public Listi::WorkingWindow {
       if (split->ToggleInspector())
         Save();
       break;
+    case Listi::kDetachInspector:
+      if (!PromptBlocksCommand() && split->DetachInspector())
+        ApplyWorkspace();
+      break;
+    case Listi::kDockInspector:
+      if (split->DockInspector(*m))
+        ApplyWorkspace();
+      break;
     case kPreviewSelection:
       if (m->GetInt32("pane", -1) == split->Source() || split->HasPanelPreview())
         split->UpdatePreviews();
       if (m->GetInt32("pane", -1) == split->Source() && m->HasString("operationError"))
-        queue.ErrorInfo(m->GetString("operationError", ""));
+        queue.ErrorInfo(m->GetString("operationError", ""), m->GetInt64("operation", 0),
+                        m->GetString("path", ""));
       break;
     case kPaneDisplay:
       split->RememberPaneDisplay(*m);
@@ -484,6 +680,8 @@ class MainWindow : public Listi::WorkingWindow {
       BMessage changes = prefs.SharedChanges(&before);
       changes.RemoveName("separateWindows");
       changes.RemoveName("alwaysFolderTabs");
+      changes.RemoveName("operationsInWindow");
+      queue.SetSeparateWindow(prefs.operationsInWindow && !operationsWindowSuspended);
       if (!changes.IsEmpty())
         Apply();
       else if (before.alwaysFolderTabs != prefs.alwaysFolderTabs)
@@ -522,7 +720,7 @@ public:
     split = new Listi::WorkspaceSplit(*panes[0], *panes[1], prefs, *menu);
     auto *terminalSplit = new BSplitView(B_VERTICAL, 6);
     terminalDock = std::make_unique<Listi::TerminalDock>(
-        terminalSplit, split, BMessenger(this));
+        terminalSplit, split, split->Panel(0), split->Panel(1), BMessenger(this));
     actionArea->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
     actionArea->GroupLayout()->SetInsets(8, 6, 8, 6);
     actionArea->Hide();
@@ -536,6 +734,8 @@ public:
     // Child visibility must not impose a transient maximum on the window.
     // Apply after attachment: Haiku replaces layout explicit-data proxies.
     GetLayout()->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
+    // Suspended tabs outlive the active panes' per-directory subscriptions.
+    watch_node(nullptr, B_WATCH_MOUNT, BMessenger(this));
     queue.Start();
     AddCommonFilter(new Listi::WindowKeyFilter());
 
@@ -565,12 +765,33 @@ public:
       MoveTo(*request.position);
       MoveOnScreen();
     }
-    if (request.detached)
+    if (request.detached) {
       split->Panel(0).FolderBar().Adopt(std::move(*request.detached));
-    else if (!request.path.empty())
+      detachedWorkNotice = std::move(request.detachedWorkNotice);
+      if (request.cliPlacement) {
+        bool transferred = false;
+        // Queue() opens windows asynchronously. Never move a session the user
+        // has since closed, restarted or placed elsewhere.
+        if (request.cliSource.LockTargetWithTimeout(1000000) == B_OK) {
+          BLooper *looper = nullptr;
+          auto *source = dynamic_cast<MainWindow *>(request.cliSource.Target(&looper));
+          if (source)
+            transferred = source->terminalDock->TransferTo(request.cliPlacement, *terminalDock);
+          looper->Unlock();
+        }
+        if (transferred)
+          RefreshTerminalTabLabel(0);
+        else {
+          if (!detachedWorkNotice.empty())
+            detachedWorkNotice += " ";
+          detachedWorkNotice += "CLI not transferred. Check the original window.";
+        }
+      }
+    } else if (!request.path.empty())
       panes[split->Source()]->Navigate(request.path.c_str());
   }
   ~MainWindow() override {
+    stop_watching(BMessenger(this));
     --browserCount;
     BMessage closed(kBrowserClosed);
     closed.AddInt64("id", WindowId());
@@ -619,6 +840,7 @@ public:
     const bool flat = page == PanelPage::Flat;
     const auto &bar = split->Panel(split->Source()).FolderBar();
     const bool filePage = page == PanelPage::Files;
+    menu->SetTabDestinations(WindowId(), split->Source(), bar.ActiveId(), filePage);
     menu->FindItem(kCopyToWindow)->SetEnabled(filePage || flat);
     for (uint32 cmd : {Listi::kTabNew, Listi::kTabDuplicate, Listi::kTabRename,
                        Listi::kTabDetach, Listi::kTabAlways})
@@ -642,45 +864,84 @@ public:
                          canSaveClipboard, canUndoBulkRename);
   }
 
-  bool QuitRequested() override {
-    if (browserCount == 1 && Listi::FolderHistoryBusy()) {
-      PostMainWindowNotice("Finish or cancel the folder history operation before closing Listi.");
-      return false;
-    }
+  bool CheckQuitBlockers() {
     if (PreferencesOpenFor(BMessenger(this))) {
-      queue.ErrorInfo("Apply or close this window's preferences first.");
-      return false;
-    }
-    if (browserCount > 1 && !InspectorEditorsAllowQuit(this))
-      return false;
-    if (browserCount == 1 && (!InspectorEditorsAllowQuit() || !FilePropertiesAllowQuit() ||
-        !OpenWithAllowQuit() || !ArchiveEditorsAllowQuit()))
-      return false;
-    if (terminalDock->HasSessions()) {
-      queue.ErrorInfo("Close this window's CLI sessions first.");
+      ShowQuitBlocker("Apply or close this window's preferences first.");
       return false;
     }
     if (savedNavigation.Saving()) {
-      queue.ErrorInfo(
-          "Saved places or searches are still being written. Please try quitting again shortly.");
+      ShowQuitBlocker("Saved places or searches are still being written. Wait for the write to finish, then try again.");
       return false;
     }
     if (queue.Busy() || clipboard.Busy()) {
       queue.Show();
-      queue.ErrorInfo("File operations are still running. Let them finish, or use "
-             "Cancel all before quitting.");
+      ShowQuitBlocker("File operations are still running. Let them finish, or use Cancel all in the operation queue.");
       return false;
+    }
+    if (!split->FloatingInspectorAllowsQuit() || !InspectorEditorsAllowQuit(this)) {
+      ShowQuitBlocker("This window's editor has unsaved changes or is busy. Check the editor before closing this window.");
+      return false;
+    }
+    return true;
+  }
+
+  void SuspendOperationsWindow(bool suspend) {
+    operationsWindowSuspended = suspend;
+    queue.SetSeparateWindow(prefs.operationsInWindow && !operationsWindowSuspended);
+  }
+
+  bool HasCLIs() const { return terminalDock->HasSessions(); }
+  bool CloseCLIs() {
+    if (terminalDock->CloseSessions())
+      return true;
+    ShowQuitBlocker("A CLI session could not be closed. Close it from its CLI toolbar, then try again.");
+    return false;
+  }
+
+  bool QuitRequested() override {
+    const bool closeCLI = std::exchange(closeCLIOnQuit, false);
+    if (!CheckQuitBlockers())
+      return false;
+    if (browserCount == 1) {
+      if (!CheckSharedQuitBlockers())
+        return false;
+    }
+    if (HasCLIs()) {
+      if (!closeCLI) {
+        if (!cliQuitAlert.IsValid())
+          cliQuitAlert = ConfirmClosingCLIs(BMessenger(this), kConfirmWindowCLIQuit, false);
+        return false;
+      }
+      if (!CloseCLIs())
+        return false;
     }
     if (clipboard.ArchivePromptPending())
       CloseAction();
     return true;
   }
   void MessageReceived(BMessage *m) override {
+    if (m->what == B_NODE_MONITOR && m->GetInt32("opcode", 0) == B_DEVICE_UNMOUNTED) {
+      for (int side = 0; side < 2; ++side) {
+        split->Panel(side).FolderBar().ForgetUnmountedDevice(m->GetInt32("device", -1));
+        RefreshTerminalTabLabel(side);
+      }
+      return;
+    }
+    if (m->what == kConfirmWindowCLIQuit) {
+      cliQuitAlert = {};
+      if (m->GetInt32("which", 0) == 1)
+        closeCLIOnQuit = PostMessage(B_QUIT_REQUESTED) == B_OK;
+      return;
+    }
     if (m->what == Listi::kReadHistoryConfig) {
       readingConfig = false;
       historyPairs = Listi::HistoryPairs(*m);
       automaticEnabled = m->GetBool("enabled", false);
       if (refreshConfig) { refreshConfig = false; ReadHistoryConfig(); }
+      return;
+    }
+    if (m->what == kMoveTabToWindow) {
+      MoveTabToWindow(*m);
       return;
     }
     if (m->what == kQuitListi) {
@@ -753,6 +1014,10 @@ public:
         PostMainWindowNotice("Could not open automatic history. Install the complete Listi package.");
       return;
     }
+    if (m->what == Listi::kOpenSavedFolderHistory) {
+      if (!PromptBlocksCommand()) Listi::OpenSavedFolderHistory();
+      return;
+    }
     if (m->what == Listi::kFolderHistory || m->what == Listi::kPreviewHistory) {
       int side = m->GetInt32("pane", split->Source());
       if (PromptBlocksCommand() || !split->ActivateFiles(side)) return;
@@ -780,6 +1045,7 @@ public:
         return;
       }
       split->Panel(side).FolderBar().OpenDirectory(path);
+      RefreshTerminalTabLabel(side);
       if (IsMinimized()) Minimize(false);
       Activate();
       split->Focus();
@@ -892,6 +1158,12 @@ public:
       queue.ErrorInfo("Choose a real folder for this action, not a search list.");
       return;
     }
+    if ((needsOtherFolder && Listi::InterruptedVolumes().Contains(
+                          panes[prefs.SinglePane() ? source : 1 - source]->Path())) ||
+        (needsCurrentFolder && Listi::InterruptedVolumes().Contains(panes[source]->Path()))) {
+      queue.ErrorInfo(Listi::kUnavailableVolumeText);
+      return;
+    }
     if ((panelTransfer || writesHere) && !destination.LocationValid() &&
         !destination.IsScanning()) {
       queue.ErrorInfo("Choose an available destination folder, or reconnect the disk and reload.");
@@ -929,7 +1201,7 @@ public:
         HandleNavigation(m) || HandleWorkspace(m) ||
         pane.HandleSelectionCommand(*m, *actionArea, queue) ||
         pane.HandleOpenCommand(m->what, prefs.editor, service,
-                               [this] { return OpenSelectionPreview(); }))
+                               [this](const std::string &path) { OpenSelectionPreview(path); }))
       return;
     switch (m->what) {
     case kInlineNotice:
@@ -1011,15 +1283,33 @@ public:
       break;
     }
     case kFileProgress:
+      if (m->GetInt32("state", 0) == 3 &&
+          queue.ErrorDismissed(m->GetInt64("operation", 0), m->GetString("path", "")))
+        break;
+      [[fallthrough]];
+    case kOperationErrorDismissed:
       for (auto p : panes)
         p->MessageReceived(m);
       break;
+    case kVolumeUnavailable:
+      for (auto *pane : panes)
+        pane->MessageReceived(m);
+      split->UpdatePreviews();
+      break;
     case kQueueWake:
       for (auto &done : queue.TakeEvents()) {
+        if (done.what == kOperationErrorDismissed) {
+          for (auto *p : panes)
+            p->MessageReceived(&done);
+          continue;
+        }
         queue.PresentEvent(done);
         if (done.what != kJobDone)
           continue;
         clipboard.JobFinished(done);
+        if (queue.ErrorDismissed(done.GetInt64("operation", 0),
+                                 done.GetString("onlyFailedFile", "")))
+          done.AddBool("errorDismissed", true);
         for (auto p : panes)
           p->MessageReceived(&done);
         shelf.Refresh();
@@ -1054,7 +1344,9 @@ public:
         PostMainWindowNotice("Open a local folder before starting a terminal.");
         break;
       }
-      if (auto prompt = terminalDock->Open(*m, lister, panes[lister]->Path()))
+      const auto &tabs = split->Panel(lister).FolderBar();
+      if (auto prompt = terminalDock->Open(*m, lister, panes[lister]->Path(),
+                                           tabs.ActiveId(), tabs.DescribeTab(tabs.ActiveId())))
         AskInline(prompt->text.String(), "Start new CLI", prompt->accepted);
       break;
     }
@@ -1112,7 +1404,22 @@ BWindow *CreateMainWindow(const Preferences &prefs, BMessenger service,
                         searches, searchesWritable, std::move(request), std::move(open));
 }
 
-bool BrowserAllowsQuit(BWindow *window) {
+bool CheckBrowserQuitBlockers(BWindow *window) {
   auto *browser = dynamic_cast<MainWindow *>(window);
-  return !browser || browser->QuitRequested();
+  return !browser || browser->CheckQuitBlockers();
+}
+
+bool BrowserHasCLIs(BWindow *window) {
+  auto *browser = dynamic_cast<MainWindow *>(window);
+  return browser && browser->HasCLIs();
+}
+
+bool CloseBrowserCLIs(BWindow *window) {
+  auto *browser = dynamic_cast<MainWindow *>(window);
+  return !browser || browser->CloseCLIs();
+}
+
+void SuspendBrowserOperationsWindow(BWindow *window, bool suspend) {
+  if (auto *browser = dynamic_cast<MainWindow *>(window))
+    browser->SuspendOperationsWindow(suspend);
 }

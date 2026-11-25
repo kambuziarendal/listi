@@ -4,6 +4,7 @@
 // src/VirtualFile.cpp src/VirtualLocation.cpp src/Sha256.cpp -lsqlite3 -o /tmp/listi-faults
 // Real staging/dispatch code, deterministic fake network commit failures.
 #include "FileOperation.h"
+#include "JobReportStore.h"
 #include "VirtualFile.h"
 #include <fcntl.h>
 #include <fstream>
@@ -49,13 +50,61 @@ bool failCommit = false, failRollback = false, failPartCleanup = false,
      failBackupCleanup = false, cancelAfterBackup = false, cancelled = false,
      mutateDestination = false, loseBackupReply = false, loseCommitReply = false;
 const std::string destination = "sftp://fixture/out/input";
+enum class LocalPublish { Unexpected, Limited, FlushFailure, CancelAfterPublish };
+LocalPublish localPublish = LocalPublish::Unexpected;
 bool suffix(const std::string &path, const char *part) {
   return path.find(part) != std::string::npos;
 }
 }
 namespace Listi {
 Result RunVirtual(const Job &, const Hooks &);
-Result Run(const Job &, const Hooks &) { throw std::runtime_error("Unexpected local dispatch"); }
+Result Run(const Job &job, const Hooks &hooks) {
+  if (localPublish == LocalPublish::Unexpected || !hooks.privateStaging ||
+      hooks.report || job.sources.size() != 1)
+    throw std::runtime_error("Unexpected local dispatch");
+  const auto &source = job.sources.front();
+  const auto target = ChildLocation(job.destination, LocationLeaf(source));
+  Result result;
+  auto &entry = result.outcomes.emplace_back(EntryOutcome{source, target, "unprocessed", ""});
+  if (access(target.c_str(), F_OK) == 0) {
+    const auto decision = hooks.conflict(target);
+    if (decision == Decision::Skip) {
+      result.skipped = 1;
+      entry.status = "skipped";
+      return result;
+    }
+    if (decision == Decision::Abort) {
+      result.cancelled = true;
+      entry.detail = "Cancelled before commit.";
+      return result;
+    }
+  }
+  // Exercise real virtual staging. Only the native publication result is
+  // replaced by deterministic faults in this portable fixture.
+  std::ifstream staged(source, std::ios::binary);
+  std::ofstream output(target, std::ios::binary);
+  output << staged.rdbuf();
+  output.close();
+  if (!staged || !output)
+    throw std::runtime_error("Failed to publish fixture file");
+  if (localPublish == LocalPublish::Limited) {
+    result.completed = 1;
+    result.copyLimitations = true;
+    entry.status = "copied";
+    entry.detail = "Destination could not preserve metadata.";
+  } else {
+    entry.status = "published-flush-failed";
+    if (localPublish == LocalPublish::CancelAfterPublish) {
+      result.cancelled = true;
+      entry.detail = "Published before cancellation; durability is unknown.";
+    } else {
+      entry.detail = "Published, but directory flush failed.";
+      result.errors.push_back(entry.detail);
+      result.interruptedCopyFolder = job.destination;
+    }
+  }
+  return result;
+}
 std::vector<FileEntry> ListArchive(const Location &, const TransferControl &) {
   throw std::runtime_error("Unexpected archive dispatch");
 }
@@ -222,6 +271,74 @@ int main() {
   check(!r.completed && !done && !r.errors.empty() && access(downloaded.c_str(), F_OK),
         "same-size SMB source edit with a distinct fractional revision is rejected");
   editSmbSourceOnRead = false;
+  const std::string downloadFolder = std::string(dir) + "/downloads";
+  if (mkdir(downloadFolder.c_str(), 0700)) return 1;
+  const auto localTarget = downloadFolder + "/input";
+  const Job downloadJob{Action::Copy, {remote}, downloadFolder};
+  auto download = [&](LocalPublish publication, Decision decision, bool report) {
+    reset();
+    localPublish = publication;
+    files[remote] = {"downloaded payload", 1};
+    Hooks local = hooks;
+    local.conflict = [=](const std::string &target) {
+      if (target != localTarget)
+        throw std::runtime_error("Wrong conflict target");
+      return decision;
+    };
+    local.fileDone = [&](const std::string &from, const std::string &to) {
+      if (from == remote && to == localTarget)
+        ++done;
+    };
+    if (report)
+      local.report = std::make_shared<JobReportStore>();
+    auto result = RunVirtual(downloadJob, local);
+    localPublish = LocalPublish::Unexpected;
+    return std::make_pair(std::move(result), local.report);
+  };
+  auto actualPaths = [&](const std::vector<EntryOutcome> &rows, const char *status) {
+    return rows.size() == 1 && rows.front().source == remote &&
+           rows.front().destination == localTarget && rows.front().status == status;
+  };
+  auto localContents = [&] {
+    std::ifstream stream(localTarget);
+    return std::string(std::istreambuf_iterator<char>(stream), {});
+  };
+  auto [limited, report] = download(LocalPublish::Limited, Decision::Replace, true);
+  auto page = report->Page(0, 10);
+  check(limited.completed == 1 && !limited.skipped && !limited.cancelled &&
+            limited.copyLimitations && limited.errors.empty() && limited.outcomes.empty() &&
+            report->OutcomeCount() == 1 && report->ErrorCount() == 0 &&
+            actualPaths(page.outcomes, "copied") &&
+            page.outcomes.front().detail == "Destination could not preserve metadata." &&
+            done == 1 && localContents() == "downloaded payload",
+        "download reports one copied outcome with actual paths and limitations");
+  std::ofstream(localTarget) << "existing data";
+  auto skipped = download(LocalPublish::Limited, Decision::Skip, false).first;
+  check(!skipped.completed && skipped.skipped == 1 && !skipped.cancelled && !done &&
+            skipped.errors.empty() && actualPaths(skipped.outcomes, "skipped") &&
+            localContents() == "existing data",
+        "download collision is recorded and counted only once when skipped");
+  auto aborted = download(LocalPublish::Limited, Decision::Abort, false).first;
+  check(aborted.cancelled && !aborted.skipped && !aborted.completed && !done &&
+            aborted.errors.empty() && actualPaths(aborted.outcomes, "unprocessed") &&
+            localContents() == "existing data",
+        "cancelled download at a conflict reports unprocessed and preserves the target");
+  auto [failed, failedReport] = download(LocalPublish::FlushFailure, Decision::Replace, true);
+  page = failedReport->Page(0, 10);
+  check(!failed.completed && !failed.skipped && !failed.cancelled && !done &&
+            failed.interruptedCopyFolder == downloadFolder && failedReport->ErrorCount() == 1 &&
+            failedReport->OutcomeCount() == 1 && actualPaths(page.outcomes, "published-flush-failed") &&
+            localContents() == "downloaded payload",
+        "download preserves the published outcome on a durability failure and reports one error");
+  auto cancelledPublish = download(LocalPublish::CancelAfterPublish, Decision::Replace, false).first;
+  check(cancelledPublish.cancelled && !cancelledPublish.completed && !cancelledPublish.skipped &&
+            !done && cancelledPublish.errors.empty() &&
+            actualPaths(cancelledPublish.outcomes, "published-flush-failed") &&
+            cancelledPublish.outcomes.front().detail.find("durability is unknown") != std::string::npos &&
+            localContents() == "downloaded payload",
+        "download cancelled after publish retains the durability outcome without claiming completion");
+  unlink(localTarget.c_str());
+  rmdir(downloadFolder.c_str());
   const timespec referenceTime[] = {{0, UTIME_OMIT}, {1, 654000000}};
   FileEntry expected;
   expected.SetModification(0, 123400000);

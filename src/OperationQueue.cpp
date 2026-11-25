@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: MIT
 #include "OperationQueue.h"
+#include "UnavailableVolume.h"
 #include "JobResultsView.h"
 #include "ArchivePasswords.h"
 #include "ArchiveBackend.h"
 #include "VirtualFile.h"
 #include "ViewVisibility.h"
+#include <Application.h>
+#include <Autolock.h>
 #include <Button.h>
 #include <CheckBox.h>
 #include <MessageRunner.h>
@@ -18,18 +21,33 @@
 #include <ctime>
 #include <cstring>
 #include <limits>
+#include <optional>
 #include <set>
 #include <sys/stat.h>
 namespace {
 constexpr uint32 kCancelAll = 'jcab', kJobAccepted = 'jacp',
                  kDismissError = 'jder';
 
+void RequireAvailableEndpoints(const Listi::Job &job, bool resolveLinks = false) {
+  const auto blocked = [resolveLinks](const std::string &path) {
+    auto &volumes = Listi::InterruptedVolumes();
+    return resolveLinks ? volumes.ContainsResolved(path) : volumes.Contains(path);
+  };
+  if (blocked(job.destination) || blocked(job.destinationFolder) ||
+      blocked(job.archivePath) ||
+      std::any_of(job.restoreTargets.begin(), job.restoreTargets.end(),
+                  [&](const auto &entry) { return blocked(entry.second); }) ||
+      std::any_of(job.sources.begin(), job.sources.end(), blocked))
+    throw std::runtime_error(Listi::kUnavailableVolumeText);
+}
+
 uint64_t EstimateBytes(const std::vector<std::string> &sources,
                        const std::function<bool()> &proceed) {
   uint64_t total = 0;
   for (const auto &source : sources) {
     struct stat st;
-    if (Listi::IsVirtual(source) || !proceed() || lstat(source.c_str(), &st) ||
+    if (Listi::IsVirtual(source) || !proceed() ||
+        Listi::InterruptedVolumes().Contains(source) || lstat(source.c_str(), &st) ||
         !S_ISREG(st.st_mode) || st.st_size < 0 ||
         uint64_t(st.st_size) > uint64_t(std::numeric_limits<int64_t>::max()) - total)
       return 0;
@@ -92,7 +110,13 @@ class ProgressView : public BView {
   BGroupView *errorRow;
   BStringView *errorText;
   BButton *dismissError;
-  std::deque<std::string> unreadErrors;
+  struct UnreadError {
+    std::string text;
+    int64 operation;
+    std::string path;
+  };
+  std::deque<UnreadError> unreadErrors;
+  std::set<std::pair<int64, std::string>> dismissedErrors;
   bool hasCompletion = false;
 
   void ShowNextError() {
@@ -100,19 +124,21 @@ class ProgressView : public BView {
     if (unreadErrors.empty())
       return;
     BString label("Error: ");
-    label << unreadErrors.front().c_str();
+    label << unreadErrors.front().text.c_str();
     if (unreadErrors.size() > 1)
       label << " (+" << int64(unreadErrors.size() - 1) << ")";
     errorText->SetText(label);
     errorText->SetToolTip(label);
   }
-  void KeepError(const char *error) {
-    if (!*error || (!unreadErrors.empty() && unreadErrors.back() == error))
+  void KeepError(const char *error, int64 operation = 0, const char *path = "") {
+    if (!*error || ErrorDismissed(operation, path) ||
+        (!unreadErrors.empty() && unreadErrors.back().text == error &&
+         unreadErrors.back().operation == operation && unreadErrors.back().path == path))
       return;
     // Full job errors remain available in their report.
     if (unreadErrors.size() == 24)
       unreadErrors.pop_back();
-    unreadErrors.emplace_back(error);
+    unreadErrors.push_back({error, operation, path});
     ShowNextError();
   }
   BGroupView *choices;
@@ -270,12 +296,20 @@ public:
     UpdateVisibility();
   }
   void Toggle() { Expand(!expanded); }
+  bool WaitingForDecision() const { return choicesVisible; }
+  bool HasActivity() const {
+    return owner->Busy() || lastStarted || expanded || !unreadErrors.empty();
+  }
   void Dismiss() {
     if (choicesVisible) {
       owner->Answer(Listi::Decision::Abort, conflictRequest);
       ShowChoices(false);
     }
     Expand(false);
+  }
+  bool ErrorDismissed(int64 operation, const char *path = "") const {
+    return dismissedErrors.count({operation, ""}) != 0 ||
+           (*path && dismissedErrors.count({operation, path}) != 0);
   }
   void MessageReceived(BMessage *m) override {
     switch (m->what) {
@@ -284,15 +318,40 @@ public:
       break;
     case kFileErrorSelected:
       if (const char *error = m->GetString("error", nullptr)) {
-        if (unreadErrors.empty() || unreadErrors.back() != error)
+        const auto operation = m->GetInt64("operation", 0);
+        const auto *path = m->GetString("path", "");
+        if (ErrorDismissed(operation, path))
+          break;
+        if (unreadErrors.empty() || unreadErrors.back().text != error)
           results->ShowFileError(error);
-        KeepError(error);
+        KeepError(error, operation, path);
       }
       break;
     case kDismissError:
-      if (!unreadErrors.empty())
+      if (!unreadErrors.empty()) {
+        const auto operation = unreadErrors.front().operation;
+        const auto path = unreadErrors.front().path;
         unreadErrors.pop_front();
+        if (operation) {
+          dismissedErrors.emplace(operation, path);
+          if (dismissedErrors.size() > 4096)
+            dismissedErrors.erase(dismissedErrors.begin());
+          unreadErrors.erase(
+              std::remove_if(unreadErrors.begin(), unreadErrors.end(),
+                             [&](const auto &error) {
+                               return error.operation == operation &&
+                                      (path.empty() || error.path == path);
+                             }),
+              unreadErrors.end());
+          owner->NotifyErrorDismissed(operation, path.c_str());
+        }
+      }
       ShowNextError();
+      if (unreadErrors.empty() && !activeOperation &&
+          strcmp(title->Text(), "Needs attention") == 0) {
+        title->SetText("Failure acknowledged");
+        title->SetToolTip("Failure acknowledged");
+      }
       break;
     case kPause: {
       const auto operation = m->GetInt64("operation", 0);
@@ -355,11 +414,12 @@ public:
         answer->SetInt64("request", conflictRequest);
         button->SetMessage(answer);
       }
-      Expand(true);
       summary->SetText(fat ? "FAT cannot store Haiku file attributes."
                            : "Destination exists. Choose how to continue:");
       file->SetText(m->GetString("path", ""));
       ShowChoices(true);
+      // A worker is blocked on this choice. Unlike progress, bring it to the front.
+      owner->Show();
       break;
     }
     case kJobAccepted:
@@ -425,8 +485,12 @@ public:
     case kJobDone: {
       const char *compactResult = m->GetString("compactResult", nullptr);
       BString s = m->GetString("result", "");
-      const bool activeDone =
-          activeOperation && m->GetInt64("operation", 0) == activeOperation;
+      const auto operation = m->GetInt64("operation", 0);
+      // Acknowledging a file while this job is active never hides a later
+      // failure for another file, or a separate error in the final report.
+      const auto *onlyFailedFile = m->GetString("onlyFailedFile", "");
+      const bool dismissed = ErrorDismissed(operation, onlyFailedFile);
+      const bool activeDone = activeOperation && operation == activeOperation;
       if (activeDone) {
         if (m->GetBool("complete", false))
           bar->Update(bar->MaxValue() - bar->CurrentValue());
@@ -454,18 +518,24 @@ public:
         title->SetText(compactResult);
         title->SetToolTip(m->GetString("transferResult", compactResult));
         Listi::SetViewVisible(summary, false);
-      } else if (!activeOperation && !owner->Busy() && !compactResult)
-        title->SetText(m->HasString("issue") ? "Needs attention" : "Queue finished");
+      } else if (!activeOperation && !owner->Busy() && !compactResult) {
+        const char *label = !m->HasString("issue") ? "Queue finished" :
+                            dismissed ? "Failure acknowledged" : "Needs attention";
+        title->SetText(label);
+        title->SetToolTip(label);
+      }
       const char *error;
-      if (const auto *issue = m->GetString("issue", nullptr))
-        KeepError(issue);
-      else
-        for (int32 i = 0; m->FindString("error", i, &error) == B_OK; ++i)
-          KeepError(error);
+      if (!dismissed) {
+        if (const auto *issue = m->GetString("issue", nullptr))
+          KeepError(issue, operation);
+        else
+          for (int32 i = 0; m->FindString("error", i, &error) == B_OK; ++i)
+            KeepError(error, operation);
+      }
       if (m->HasString("retainedSource")) {
         BString retained("Complete copy retained at: ");
         retained << m->GetString("retainedDestination", "");
-        KeepError(retained);
+        KeepError(retained, operation);
       }
       break;
     }
@@ -480,12 +550,67 @@ public:
     UpdateVisibility();
   }
 };
-OperationQueue::OperationQueue(BMessenger m) : main(m) {
-  view = new ProgressView(this);
+namespace {
+// Byte updates and selection errors keep targeting the owner's looper even
+// while the live controls and their reports are moved to another window.
+class OperationsDock : public BGroupView {
+public:
+  explicit OperationsDock(OperationQueue &queue)
+      : BGroupView("operations dock", B_VERTICAL, 0), queue(queue) {}
+
+  void MessageReceived(BMessage *message) override {
+    if (message->what == kJobUpdate || message->what == kFileErrorSelected)
+      queue.PresentEvent(*message);
+    else
+      BGroupView::MessageReceived(message);
+  }
+
+private:
+  OperationQueue &queue;
+};
+} // namespace
+
+class OperationWindow : public BWindow {
+public:
+  OperationWindow(BWindow *owner, ProgressView *view)
+      : BWindow(BRect(0, 0, 775, 285), "Listi operations", B_TITLED_WINDOW,
+                B_CLOSE_ON_ESCAPE | B_AUTO_UPDATE_SIZE_LIMITS, owner->Workspaces()),
+        view(view) {
+    BLayoutBuilder::Group<>(this, B_VERTICAL, 0).Add(view).AddGlue();
+    GetLayout()->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
+    CenterIn(owner->Frame());
+    MoveOnScreen();
+    AddShortcut('W', B_COMMAND_KEY, new BMessage(B_QUIT_REQUESTED));
+  }
+
+  void DispatchMessage(BMessage *message, BHandler *target) override {
+    // Application shutdown calls QuitRequested directly and must not be
+    // vetoed by the behavior of the title-bar close button.
+    if (message->what == B_QUIT_REQUESTED && target == this) {
+      HidePresentation();
+      return;
+    }
+    BWindow::DispatchMessage(message, target);
+  }
+
+  void HidePresentation() {
+    // Closing the presentation never cancels work or loses its reports;
+    // keep a decision visible until it is explicitly answered.
+    if (!view->WaitingForDecision() && !IsHidden())
+      Hide();
+  }
+
+private:
+  ProgressView *view;
+};
+
+OperationQueue::OperationQueue(BMessenger m)
+    : dock(new OperationsDock(*this)), view(new ProgressView(this)), main(m) {
+  dock->GroupLayout()->AddView(view);
 }
-BView *OperationQueue::View() { return view; }
+BView *OperationQueue::View() { return dock; }
 void OperationQueue::Start() {
-  display = BMessenger(view);
+  display = BMessenger(dock);
   BMessage poll(kQueueWake);
   eventTimer.reset(new BMessageRunner(main, &poll, 250000));
   if (eventTimer->InitCheck() != B_OK)
@@ -509,18 +634,83 @@ OperationQueue::~OperationQueue() {
       Listi::DiscardArchiveCreationPassword(queued.job.archivePasswordToken);
   if (thread.joinable())
     thread.join();
+  if (popup && popup->Lock())
+    popup->Quit();
 }
-void OperationQueue::SetCompact(bool value) { view->SetCompact(value); }
-void OperationQueue::Show() { view->Expand(true); }
-void OperationQueue::Toggle() { view->Toggle(); }
-void OperationQueue::Collapse() { view->Dismiss(); }
-void OperationQueue::ErrorInfo(const char *text) {
+void OperationQueue::SetCompact(bool value) {
+  compact = value;
+  if (!popup)
+    view->SetCompact(value);
+}
+void OperationQueue::SetSeparateWindow(bool value) {
+  if (value == (popup != nullptr))
+    return;
+  if (value) {
+    const bool show = view->HasActivity();
+    view->RemoveSelf();
+    dock->Hide();
+    view->SetCompact(false);
+    popup = new OperationWindow(dock->Window(), view);
+    if (show) {
+      view->Expand(true);
+      popup->Show();
+    } else {
+      popup->Run();
+    }
+    return;
+  }
+
+  if (popup->Lock()) {
+    view->RemoveSelf();
+    popup->Quit();
+    popup = nullptr;
+    dock->GroupLayout()->AddView(view);
+    dock->Show();
+    view->SetCompact(compact);
+  }
+}
+void OperationQueue::Show() {
+  std::optional<BAutolock> lock;
+  if (popup && !lock.emplace(popup).IsLocked())
+    return;
+  view->Expand(true);
+  if (popup) {
+    if (popup->IsHidden())
+      popup->Show();
+    popup->Activate();
+  }
+}
+void OperationQueue::Toggle() {
+  if (popup)
+    Show();
+  else
+    view->Toggle();
+}
+void OperationQueue::Collapse() {
+  if (!popup) {
+    view->Dismiss();
+    return;
+  }
+  BAutolock lock(popup);
+  if (lock.IsLocked())
+    popup->HidePresentation();
+}
+void OperationQueue::ErrorInfo(const char *text, int64 operation, const char *path) {
   BMessage error(kFileErrorSelected);
   error.AddString("error", text);
+  error.AddInt64("operation", operation);
+  error.AddString("path", path);
   display.SendMessage(&error);
+}
+bool OperationQueue::ErrorDismissed(int64 operation, const char *path) const {
+  if (!popup)
+    return view->ErrorDismissed(operation, path);
+  BAutolock lock(popup);
+  return lock.IsLocked() && view->ErrorDismissed(operation, path);
 }
 int64 OperationQueue::Enqueue(const Listi::Job &j) {
   try {
+    RequireAvailableEndpoints(j);
     for (const auto &source : j.sources)
       if (Listi::IsVirtual(source))
         Listi::RequireConnection(source);
@@ -695,9 +885,26 @@ std::vector<BMessage> OperationQueue::TakeEvents() {
   out.swap(events);
   return out;
 }
-void OperationQueue::PresentEvent(BMessage &done) {
-  // Called on the view's owning window thread, never by the worker.
-  view->MessageReceived(&done);
+void OperationQueue::PresentEvent(BMessage &event) {
+  // The browser receives all updates. In separate mode the popup looper
+  // also needs to be locked before touching its controls or their state.
+  std::optional<BAutolock> lock;
+  if (popup && !lock.emplace(popup).IsLocked())
+    return;
+  view->MessageReceived(&event);
+  if (popup && popup->IsHidden() &&
+      (event.what == kJobAccepted ||
+       event.what == kJobDone || event.what == kFileErrorSelected ||
+       (event.what == kJobUpdate && event.GetBool("start", false)))) {
+    view->Expand(true);
+    popup->Show();
+  }
+}
+void OperationQueue::NotifyErrorDismissed(int64 operation, const char *path) {
+  BMessage dismissed(kOperationErrorDismissed);
+  dismissed.AddInt64("operation", operation);
+  dismissed.AddString("path", path);
+  Publish(dismissed);
 }
 bool OperationQueue::Answer(Listi::Decision d, int64 request) {
   {
@@ -770,6 +977,14 @@ void OperationQueue::Loop() {
     Listi::ArchiveListingScope listingScope;
     const auto &job = queued.job;
     const int64 operation = queued.operation;
+    // Jobs already waiting when a different job fails must not probe the
+    // volume, but jobs with independent endpoints may continue.
+    std::string unavailable;
+    try {
+      RequireAvailableEndpoints(job, true);
+    } catch (const std::runtime_error &error) {
+      unavailable = error.what();
+    }
     BString title;
     title << Verb(job.action) << ": ";
     if (job.sources.size() > 1)
@@ -784,12 +999,12 @@ void OperationQueue::Loop() {
     start.AddBool("start", true);
     Publish(start);
     uint64_t total = 0;
-    if (job.action == Listi::Action::Copy ||
-        job.action == Listi::Action::Move ||
-        job.action == Listi::Action::Duplicate ||
-        job.action == Listi::Action::CreateArchive ||
-        job.action == Listi::Action::EditArchive ||
-        job.action == Listi::Action::MoveArchive)
+    if (unavailable.empty() &&
+        (job.action == Listi::Action::Copy || job.action == Listi::Action::Move ||
+         job.action == Listi::Action::Duplicate ||
+         job.action == Listi::Action::CreateArchive ||
+         job.action == Listi::Action::EditArchive ||
+         job.action == Listi::Action::MoveArchive))
       total = EstimateBytes(job.sources, [this] { return Proceed(); });
     BMessage size(kJobUpdate);
     size.AddInt64("operation", operation);
@@ -832,6 +1047,7 @@ void OperationQueue::Loop() {
       m.AddInt64("bytes", bytes);
       display.SendMessage(&m, (BHandler *)nullptr, 500000);
       BMessage file(kFileProgress);
+      file.AddInt64("operation", operation);
       file.AddString("path", p.c_str());
       file.AddInt32("state", 1);
       file.AddFloat("fraction",
@@ -854,6 +1070,7 @@ void OperationQueue::Loop() {
           transferSources.count(path))
         firstTransfer = {path, destination};
       BMessage file(kFileProgress);
+      file.AddInt64("operation", operation);
       file.AddString("path", path.c_str());
       file.AddString("destination", destination.c_str());
       file.AddInt32("state", 2);
@@ -861,18 +1078,30 @@ void OperationQueue::Loop() {
       main.SendMessage(&file, (BHandler *)nullptr, 500000);
     };
     std::string failedSource;
+    size_t failedFiles = 0;
     hooks.fileFailed = [&](const std::string &path, const std::string &error) {
       BMessage file(kFileProgress);
+      file.AddInt64("operation", operation);
       file.AddString("path", path.c_str());
       if (failedSource.empty())
         failedSource = path;
+      ++failedFiles;
       const auto line = std::string(Verb(job.action)) + " #" + std::to_string(operation) +
                         " on " + Listi::LocationLeaf(path) + ": " + error;
       file.AddString("error", line.c_str());
       file.AddInt32("state", 3);
       main.SendMessage(&file, (BHandler *)nullptr, 500000);
     };
-    auto result = Listi::Run(job, hooks);
+    Listi::Result result;
+    if (unavailable.empty())
+      result = Listi::Run(job, hooks);
+    else
+      result.errors.push_back(unavailable);
+    if (!result.interruptedCopyFolder.empty()) {
+      Listi::InterruptedVolumes().Block(result.interruptedCopyFolder);
+      BMessage unavailable(kVolumeUnavailable);
+      be_app_messenger.SendMessage(&unavailable, static_cast<BHandler *>(nullptr), 50000);
+    }
     auto &details = *hooks.report;
     for (const auto &error : result.errors)
       details.AddError(error);
@@ -955,6 +1184,8 @@ void OperationQueue::Loop() {
       done.AddString("retainedDestination", destination.c_str());
     }
     if (details.ErrorCount() || details.Incomplete()) {
+      if (details.ErrorCount() == 1 && !details.Incomplete() && failedFiles == 1)
+        done.AddString("onlyFailedFile", failedSource.c_str());
       std::string issue = std::string(Verb(job.action)) + " #" + std::to_string(operation);
       issue += result.completed ? " partially completed" : " not confirmed";
       if (!failedSource.empty())

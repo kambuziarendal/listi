@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "OperationQueue.h"
+#include "UnavailableVolume.h"
 #include "ArchiveJobs.h"
 #include "ArchivePasswords.h"
 #include "BulkRename.h"
@@ -100,6 +101,20 @@ int main(){
    }
    return matches == 1;
  };
+ window->Lock();
+ auto *operationsView = window->FindView("operations");
+ window->queue->SetSeparateWindow(true);
+ auto *popup = operationsView ? operationsView->Window() : nullptr;
+ if (!popup || popup == window || !popup->Lock())
+   return 2;
+ check(popup->IsHidden() && !window->FindView("operations"),
+       "separate presentation starts hidden and leaves no integrated duplicate");
+ check(popup->Look() == B_TITLED_WINDOW_LOOK && popup->Feel() == B_NORMAL_WINDOW_FEEL &&
+           !(popup->Flags() & (B_NOT_MINIMIZABLE | B_NOT_RESIZABLE | B_NOT_ZOOMABLE)) &&
+           popup->Workspaces() == window->Workspaces(),
+       "operations is an independent resizable desktop window on the browser workspace");
+ popup->Unlock();
+ window->Unlock();
  failedWakes=100;
  std::vector<int64> ids;
  for (int i = 0; i < 20; ++i) {
@@ -116,12 +131,36 @@ int main(){
    successful &= ids[i] > 0 && finished(ids[i], 1000 + i, true, false, false);
  check(successful && std::set<int64>(ids.begin(), ids.end()).size() == ids.size(),
        "enqueue IDs remain unique and independent of tags at completion");
- auto *compactTitle = dynamic_cast<BStringView *>(window->FindView("operation"));
- auto *compactPath = dynamic_cast<BStringView *>(window->FindView("current-file"));
- auto *compactSummary = dynamic_cast<BStringView *>(window->FindView("summary"));
+ if (!popup->Lock())
+   return 2;
+ auto *compactTitle = dynamic_cast<BStringView *>(popup->FindView("operation"));
+ auto *compactPath = dynamic_cast<BStringView *>(popup->FindView("current-file"));
+ auto *compactSummary = dynamic_cast<BStringView *>(popup->FindView("summary"));
  check(compactTitle && std::string(compactTitle->Text()).find("Copied item19 to ") == 0 &&
            compactPath && compactPath->IsHidden() && compactSummary && compactSummary->IsHidden(),
        "ordinary success is one concise line with the destination");
+ check(!popup->IsHidden() && !window->FindView("operations"),
+       "operation activity opens the separate presentation automatically");
+ check(popup->SendBehind(window) == B_OK, "operations can be sent behind its browser");
+ popup->Minimize(true);
+ BMessage progressEvent(kJobUpdate);
+ progressEvent.AddInt64("operation", ids.back());
+ window->queue->PresentEvent(progressEvent);
+ check(popup->IsMinimized(), "progress leaves a minimized operations window alone");
+ window->queue->Show();
+ check(!popup->IsMinimized(), "explicit Operations command restores a minimized window");
+ BMessage closePopup(B_QUIT_REQUESTED);
+ popup->DispatchMessage(&closePopup, popup);
+ check(popup->IsHidden(), "closing the popup hides it without destroying reports");
+ popup->Unlock();
+ window->queue->Show();
+ popup->Lock();
+ check(!popup->IsHidden() && popup->FindView("operation") == compactTitle,
+       "Operations reopens the same report after closing the popup");
+ popup->Unlock();
+ window->queue->SetSeparateWindow(false);
+ check(window->FindView("operations") == operationsView,
+       "integrated presentation restores the same view to its browser");
  window->Unlock();
  bool intact=true;for(int i=0;i<20;++i)intact&=bytes(root+"/out/item"+std::to_string(i))==std::string(32768,char('A'+i));check(intact,"all 20 destinations contain exact payloads");
 
@@ -177,6 +216,27 @@ int main(){
            oldCancelAll.GetInt64("operation", 0) == active &&
            conflictText.find("Destination exists") != std::string::npos,
        "active conflict and native controls carry the enqueue ID");
+ window->queue->SetSeparateWindow(true);
+ popup = operationsView->Window();
+ if (!popup || popup == window || !popup->Lock())
+   return 2;
+ popup->DispatchMessage(&closePopup, popup);
+ auto *skip = dynamic_cast<BButton *>(popup->FindView("Skip"));
+ BLooper *recipient = nullptr;
+ if (skip)
+   skip->Messenger().Target(&recipient);
+ check(!popup->IsHidden() && window->queue->Busy() && skip &&
+           recipient == popup &&
+           skip->Message()->GetInt64("request", 0) == oldConflict.GetInt64("request", -1),
+       "switching a live conflict preserves its visible choices and rebinds controls");
+ popup->Unlock();
+ window->queue->SetSeparateWindow(false);
+ recipient = nullptr;
+ if (skip)
+   skip->Messenger().Target(&recipient);
+ check(!summary->IsHidden() && recipient == window &&
+           std::string(summary->Text()) == conflictText,
+       "returning a live conflict to the browser preserves the decision");
  window->Unlock();
 
  auto removed = archiveJob("targeted.zip", 102);
@@ -235,9 +295,9 @@ int main(){
  check(pause->IsEnabled() && cancelJob->IsEnabled() &&
            conflictText == summary->Text(),
        "pending cancellation leaves the displayed active conflict alone");
- window->queue->View()->MessageReceived(&oldPause);
+ window->FindView("operations")->MessageReceived(&oldPause);
  check(std::string(pause->Label()) == "Resume", "active job can be paused");
- window->queue->View()->MessageReceived(&oldCancel);
+ window->FindView("operations")->MessageReceived(&oldCancel);
  check(!window->queue->CancelOperation(active) &&
            !window->queue->Answer(Decision::Replace,
                               oldConflict.GetInt64("request", 0)),
@@ -263,9 +323,9 @@ int main(){
  stale.AddString("title", "STALE JOB");
  window->queue->PresentEvent(stale);
  window->queue->PresentEvent(oldConflict);
- window->queue->View()->MessageReceived(&oldPause);
- window->queue->View()->MessageReceived(&oldCancel);
- window->queue->View()->MessageReceived(&oldCancelAll);
+ window->FindView("operations")->MessageReceived(&oldPause);
+ window->FindView("operations")->MessageReceived(&oldCancel);
+ window->FindView("operations")->MessageReceived(&oldCancelAll);
  check(cancelJob->Message()->GetInt64("operation", 0) == batchActive &&
            pause->IsEnabled() && std::string(pause->Label()) == "Pause" &&
            conflictText == summary->Text() &&
@@ -289,8 +349,8 @@ int main(){
        "transferring all estimated bytes does not imply the job committed");
  BMessage pauseBatch(*pause->Message());
  BMessage cancelBatch(*cancelAll->Message());
- window->queue->View()->MessageReceived(&pauseBatch);
- window->queue->View()->MessageReceived(&cancelBatch);
+ window->FindView("operations")->MessageReceived(&pauseBatch);
+ window->FindView("operations")->MessageReceived(&cancelBatch);
  check(!window->queue->Cancel(batchActive), "Cancel all rejects a repeat");
  window->Unlock();
  check(wait([&] {
@@ -301,11 +361,29 @@ int main(){
        }) && passwordDiscarded(untaggedJob.archivePasswordToken),
        "Cancel all releases a paused conflict and tagged and untagged jobs");
 
+ window->Lock();
+ window->queue->SetSeparateWindow(true);
+ popup = operationsView->Window();
+ if (!popup || popup == window || !popup->Lock())
+   return 2;
+ popup->Minimize(true);
+ popup->Unlock();
+ window->Unlock();
  const auto fresh = window->queue->Enqueue(job(0, 301));
  if (!wait([&] { return window->conflicts.size() == 3; }))
    return 2;
  window->Lock();
  const auto request = window->conflicts.back().GetInt64("request", 0);
+ window->Unlock();
+ check(wait([&] {
+         if (!popup->Lock())
+           return false;
+         bool front = !popup->IsMinimized() && popup->IsActive();
+         popup->Unlock();
+         return front;
+       }), "an overwrite decision restores and activates the operations window");
+ window->Lock();
+ window->queue->SetSeparateWindow(false);
  window->Unlock();
  check(window->queue->Answer(Decision::Skip, request) &&
            !window->queue->Answer(Decision::Replace, request),
@@ -331,16 +409,16 @@ int main(){
  auto *dismiss = notice ? dynamic_cast<BButton *>(notice->NextSibling()) : nullptr;
  BMessage error(kFileErrorSelected);
  error.AddString("error", "Unread transfer error");
- window->queue->View()->MessageReceived(&error);
+ window->FindView("operations")->MessageReceived(&error);
  window->queue->PresentEvent(retained);
  check(notice && !notice->Parent()->IsHidden() &&
            std::string(notice->Text()) == "Error: Unread transfer error (+1)" && dismiss,
        "later completion keeps unread transfer error visible");
  if (dismiss) {
-   window->queue->View()->MessageReceived(dismiss->Message());
+   window->FindView("operations")->MessageReceived(dismiss->Message());
    check(std::string(notice->Text()).find(destination) != std::string::npos,
          "next unread notice identifies the retained copy");
-   window->queue->View()->MessageReceived(dismiss->Message());
+   window->FindView("operations")->MessageReceived(dismiss->Message());
    check(notice && notice->Parent()->IsHidden(), "acknowledgment hides read error");
  }
  const std::string history = historyView ? historyView->Text() : "";
@@ -439,7 +517,61 @@ int main(){
            window->queue->Report(historyIds[1]) && window->queue->Report(historyIds.back()),
        "history expires the oldest completed reports at its explicit limit");
 
- window->queue->Enqueue(job(0,401));check(wait([&]{return window->conflicts.size()==5;}),"shutdown fixture is genuinely waiting at conflict");
+ // Simulate the post-I/O-failure state without touching faulty media.
+ const auto holdForDetach = window->queue->Enqueue(job(0, 400));
+ if (!wait([&] { return window->conflicts.size() == 5; }))
+   return 2;
+ const auto unavailable = root + "/detached";
+ mkdir(unavailable.c_str(), 0700);
+ mkdir((unavailable + "/nested").c_str(), 0700);
+ Job blocked{Action::Copy, {one}, unavailable + "/nested"};
+ FreezeLocalJob(blocked, blocked.destination);
+ blocked.tag = 401;
+ const auto blockedId = window->queue->Enqueue(blocked);
+ Job healthy{Action::MakeDirectory, {}, root + "/detached-sibling"};
+ const auto healthyId = window->queue->Enqueue(healthy);
+ InterruptedVolumes().Block(unavailable);
+ check(window->queue->CancelOperation(holdForDetach) &&
+           wait([&] { return finished(blockedId, 401, false, false, false) &&
+                             finished(healthyId, 0, true, false, false); }) &&
+           access((blocked.destination + "/" + Leaf(one)).c_str(), F_OK) != 0 &&
+           access(healthy.destination.c_str(), F_OK) == 0,
+       "a waiting job cannot enter the interrupted volume; independent local work still runs");
+ check(window->queue->Enqueue(blocked) == 0,
+       "a new job cannot be queued against the blocked volume");
+
+ window->Lock();
+ auto *progressView = window->FindView("operations");
+ BMessage dismissMessage('jder');
+ for (int i = 0; i < 24; ++i)
+   progressView->MessageReceived(&dismissMessage);
+ auto reportFileError = [&](const char *path) {
+   BMessage error(kFileErrorSelected);
+   error.AddInt64("operation", 9001);
+   error.AddString("path", path);
+   error.AddString("error", path);
+   progressView->MessageReceived(&error);
+ };
+ reportFileError("first file");
+ reportFileError("second file");
+ progressView->MessageReceived(&dismissMessage);
+ check(window->queue->ErrorDismissed(9001, "first file") &&
+           !window->queue->ErrorDismissed(9001, "second file") &&
+           !window->queue->ErrorDismissed(9001),
+       "acknowledging one file before completion does not acknowledge the rest of the operation");
+ BMessage failure(kJobDone);
+ failure.AddInt64("operation", 9001);
+ failure.AddString("issue", "Multiple files failed");
+ progressView->MessageReceived(&failure);
+ check(std::string(compactTitle->Text()) == "Needs attention",
+       "a multi-file failure remains visible after one early acknowledgement");
+ progressView->MessageReceived(&dismissMessage);
+ progressView->MessageReceived(&dismissMessage);
+ check(std::string(compactTitle->Text()) == "Failure acknowledged",
+       "dismissing the final alert clears Needs attention without reporting success");
+ window->Unlock();
+
+ window->queue->Enqueue(job(0,402));check(wait([&]{return window->conflicts.size()==6;}),"shutdown fixture is genuinely waiting at conflict");
  window->Lock();
  clearReports->Invoke();
  window->Unlock();

@@ -729,6 +729,14 @@ bool InspectorEditorAllowClose(BView *editor) {
   return static_cast<InspectorEditor *>(editor)->AllowClose();
 }
 
+void RefreshInspectorEditorTarget(BView *view) {
+  auto *editor = static_cast<InspectorEditor *>(view);
+  std::lock_guard<std::mutex> lock(editorsLock);
+  auto found = editors.find(editor->Path());
+  if (found != editors.end() && found->second.view == editor)
+    found->second.target = BMessenger(editor);
+}
+
 bool DetachInspectorEditor(BView *view) {
   auto editor = static_cast<InspectorEditor *>(view);
   if (!editor->IsEmbedded())

@@ -2,6 +2,8 @@
 
 Listi is a native Haiku file manager. Browse a single folder, compare two panels side by side, or use the Smiðja workspace to keep a file list, search results and a terminal in the same window.
 
+**Known alpha issue: FAT USB drives.** If a drive disconnects during a write, Haiku can enter the kernel debugger and the whole desktop can stop responding. The copy may be incomplete and the drive may lose data. Wait for copying to finish, then unmount or eject the drive in Haiku before removing it. Do not deliberately disconnect a drive to test this. Listi’s tab and copy-error fixes do not fix the kernel crash. [What we verified](docs/VERIFICATION.md#physical-usb-disconnect-during-copy).
+
 ![Listi on Haiku: the Lunar atlas folder on the left and the selected Blue Marble photograph on the right](docs/screenshots/photo-quick-view.png)
 
 *Quick view follows the selection without opening a second application. [Photograph: NASA / Apollo 17 crew.](docs/screenshots/CREDITS.md)*

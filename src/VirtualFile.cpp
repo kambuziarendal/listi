@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "VirtualFile.h"
+#include "UnavailableVolume.h"
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
@@ -94,6 +95,8 @@ Connection GetConnection(const std::string &url) {
 std::vector<FileEntry> ListFiles(const std::string &p,
                                  const TransferControl &c) {
   c.Check();
+  if (InterruptedVolumes().ContainsResolved(p))
+    throw std::runtime_error(kUnavailableVolumeText);
   auto l = ParseLocation(p);
   if (l.Archive())
     return ListArchive(l, c);
@@ -116,7 +119,7 @@ std::vector<FileEntry> ListFiles(const std::string &p,
       if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
         continue;
       auto path = ChildLocation(p, e->d_name);
-      if (IsListiPrivateEntry(path))
+      if (InterruptedVolumes().Contains(path) || IsListiPrivateEntry(path))
         continue;
       struct stat st;
       if (lstat(path.c_str(), &st))

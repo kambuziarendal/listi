@@ -8,6 +8,8 @@
 #include <Path.h>
 #include <String.h>
 #include <Volume.h>
+#include <fs_info.h>
+#include <cerrno>
 #include <cstring>
 #include <stdexcept>
 #include <sys/stat.h>
@@ -40,13 +42,37 @@ std::string TrashDirectory(const std::string &path, bool create) {
     throw std::runtime_error(
         path +
         ": this volume has no supported writable Trash. Nothing was deleted.");
-  BPath trash;
-  Require(find_directory(B_TRASH_DIRECTORY, &trash, create, &volume), path);
-  return trash.Path();
+  // Ask for the native location without creating it. A creation failure
+  // (even ENOENT) does not establish that Trash is unsupported.
+  char trash[B_PATH_NAME_LENGTH];
+  const status_t lookup = find_directory(B_TRASH_DIRECTORY, volume.Device(),
+                                         false, trash, sizeof(trash));
+  if (lookup == B_ENTRY_NOT_FOUND) {
+    fs_info info{};
+    if (fs_stat_dev(volume.Device(), &info) != 0)
+      Require(errno, path);
+    // Haiku mounts ext4 using its ext2 driver.
+    const bool ext = strcmp(info.fsh_name, "ext2") == 0 ||
+                     strcmp(info.fsh_name, "ext3") == 0 ||
+                     strcmp(info.fsh_name, "ext4") == 0;
+    if (ext &&
+        !(info.flags & B_FS_IS_READONLY)) {
+      BDirectory root;
+      Require(volume.GetRootDirectory(&root), path);
+      throw TrashUnsupported(path + ": Haiku has no Trash on this ext4 volume. "
+                             "Nothing was deleted. Use Delete permanently only "
+                             "if you do not need to restore the item.");
+    }
+  }
+  Require(lookup, path + " (locating Trash)");
+  if (create)
+    Require(find_directory(B_TRASH_DIRECTORY, volume.Device(), true, trash,
+                           sizeof(trash)), path + " (opening Trash)");
+  return trash;
 }
 namespace {
-std::string CheckedTrash(const std::string &original) {
-  std::string trash = TrashDirectory(original, true);
+std::string CheckedTrash(const std::string &original, bool create) {
+  std::string trash = TrashDirectory(original, create);
   if (Within(original, trash) || Within(trash, original))
     throw std::runtime_error(original + ": cannot trash the Trash folder, its "
                                         "ancestors or an already trashed entry.");
@@ -59,10 +85,21 @@ void CheckIdentity(BEntry &entry, const NodeIdentity &expected) {
     throw std::runtime_error("Selected entry changed; operation stopped.");
 }
 }
-void CheckTrashSource(const std::string &path) {
+void CheckTrashSource(const std::string &path, const NodeIdentity *expected,
+                      bool create) {
   BEntry entry(path.c_str(), false);
   Require(entry.InitCheck(), path);
-  CheckedTrash(EntryPath(entry));
+  if (expected)
+    CheckIdentity(entry, *expected);
+  struct stat st;
+  Require(entry.GetStat(&st), path);
+  if (S_ISDIR(st.st_mode)) {
+    BDirectory directory(&entry);
+    Require(directory.InitCheck(), path);
+    if (directory.IsRootDirectory())
+      throw std::runtime_error(path + ": mounted volumes cannot be moved to Trash.");
+  }
+  CheckedTrash(EntryPath(entry), create);
 }
 std::string MoveToTrash(const std::string &path, const NodeIdentity *expected) {
   BEntry entry(path.c_str(), false);
@@ -70,7 +107,7 @@ std::string MoveToTrash(const std::string &path, const NodeIdentity *expected) {
   if (expected)
     CheckIdentity(entry, *expected);
   const std::string original = EntryPath(entry);
-  const std::string trash = CheckedTrash(original);
+  const std::string trash = CheckedTrash(original, true);
   BDirectory directory(trash.c_str());
   Require(directory.InitCheck(), trash);
   BNode node(&entry);

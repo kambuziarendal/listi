@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.38.0-37 (private test candidate)
+
+- Suspended folder tabs no longer reopen a retired location after Haiku reports its volume was unmounted.
+
+## 0.38.0-36 (private test candidate)
+
+- When Haiku reports that a volume was unmounted, file panels browsing it clear their selection and return to Disks. Panels on other volumes stay where they are.
+
+## 0.38.0-35 (private test candidate)
+
+- The CLI identifies its owning folder tab. Right-click a tab to move it across the window or detach it to Einn.
+- Window → Move tab to window moves the active tab to a selected Listi window without closing other tabs or interrupting jobs in the source window.
+
+## 0.38.0-34 (private test candidate)
+
+- The separate Operations window is a normal Haiku window rather than a floating palette. Stack or tile it, or leave it behind the browser. It comes forward when a job needs a decision.
+- Detach a tab to Einn from the folder context menu. Its pane’s CLI follows it without restarting.
+- A detached CLI starts at the size of its file panel. Shelf opens narrower, at about half the area of the active panel.
+- The Inspector uses the panel color and a thin border instead of a white box. Both docked and detached views have a compact button, no duplicate heading and a bottom-aligned empty prompt.
+- Stop active directory scans when Listi detects that their volume was lost. This does not fix the Haiku kernel fault during interrupted FAT writes.
+
+## 0.38.0-33 (private test candidate)
+
+- Open Disks panels update automatically when Haiku mounts or unmounts a volume.
+- On ext4 volumes without Haiku Trash, Listi offers permanent deletion only after explicit confirmation.
+- Copying to ext4 can complete when the Haiku driver cannot write file attributes. Listi reports the omitted metadata.
+
+## 0.38.0-32 (private test candidate)
+
+- Choose whether file operation progress, errors and decisions appear in the browser or in a separate window. Existing settings keep the integrated view.
+
+## 0.38.0-31 (private USB test candidate)
+
+- After a removable disk reports an interrupted transfer, Listi blocks further access to the affected location across its windows. Switch to a local folder to continue. Safely reconnect and mount the disk before restarting Listi to use it again.
+- This is an application-side mitigation for the physical disconnect reported on revision 30. It is not a Haiku kernel fix. Physical verification is still pending.
+
+## 0.38.0-30 (local candidate)
+
+- Detach the live Inspector, move or resize its window, and dock it again without losing the selection or an open text draft.
+- Network and archive downloads retain local publication details and metadata warnings in the job report. A queued archive extraction no longer publishes a partial result when its private copy fails.
+- Open a saved history store directly to restore a new copy even when the original folder is gone. This mode cannot save new versions.
+- Manual and automatic folder history verify reused file contents before accepting a version. Large collections of BFS attributes are bounded during capture; restoring a symbolic link preserves its modification time.
+- When detaching a folder tab during a CLI session or file operation, the new window identifies the original window as the owner of that work.
+- Large tab collections no longer lay out hidden labels on every change. Cycling a single tab leaves its scan alone.
+- Batched Shelf changes avoid repeated layout work, and archiving many local sources resolves the destination folder once.
+
+## 0.38.0-24 (local candidate)
+
+- Folder tabs sit together at the left edge of each file panel. Close a tab with its × without changing the panel width.
+- When an open CLI prevents a window or the application from closing, cancel to keep working or explicitly close its CLI sessions and continue. Other quit blockers now explain what needs attention in a dialog.
+
 ## [0.38.0-23 alpha](https://github.com/kambuziarendal/listi/releases/tag/v0.38.0-23)
 
 - Added local BFS folder versions and an optional low-priority Deskbar history helper. Browse saved points by date in a window or in the opposite panel. Restore a single regular file or an entire folder into a new path.

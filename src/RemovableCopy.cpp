@@ -153,6 +153,15 @@ void AwaitIO(std::thread &io, const std::shared_ptr<Transfer> &state,
 }
 } // namespace
 
+bool IsRemovableIOError(int error) {
+#ifdef __HAIKU__
+  if (error == B_IO_ERROR || error == B_DEV_NOT_READY || error == B_DEV_MEDIA_CHANGED ||
+      error == B_DEV_NO_MEDIA)
+    return true;
+#endif
+  return error == EIO || error == ENODEV || error == ENXIO;
+}
+
 bool WriteRemovableStagingFile(int source, int staging, const struct stat &before,
                                const std::function<void(size_t)> &checkpoint,
                                bool privateStaging, StagingPermissions permissions,
@@ -182,7 +191,7 @@ bool WriteRemovableStagingFile(int source, int staging, const struct stat &befor
           "after reconnecting.");
   // The driver can fail the descriptor before its devfs node disappears.
   // Suspend the suspected endpoint even if the last devfs checkpoint passed.
-  if (state->error == EIO || state->error == ENODEV || state->error == ENXIO)
+  if (IsRemovableIOError(state->error))
     throw RemovableCopyInterrupted(
         "Removable disk I/O failed; no final file was published for this "
         "entry. Check for a temporary copy after reconnecting.");

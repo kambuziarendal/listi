@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "Pane.h"
+#include "UnavailableVolume.h"
 #include <Window.h>
 #include <Entry.h>
 #include <Roster.h>
@@ -100,7 +101,7 @@ void Pane::SelectByPattern(const BMessage &request, InlineAction &prompt,
 
 bool Pane::HandleOpenCommand(
     uint32 action, const BString &editor, const BMessenger &service,
-    const std::function<ImagePreview *()> &openPreview) {
+    const std::function<void(const std::string &)> &openPreview) {
   const char *missingSelection;
   switch (action) {
   case kFileTypeIcon:
@@ -124,6 +125,10 @@ bool Pane::HandleOpenCommand(
   }
 
   const auto path = SelectedPath();
+  if (Listi::InterruptedVolumes().Contains(path)) {
+    ShowStatus(Listi::kUnavailableVolumeText);
+    return true;
+  }
   if (path.empty()) {
     PostMainWindowNotice(missingSelection);
   } else if (action == kFileTypeIcon) {
@@ -145,10 +150,9 @@ bool Pane::HandleOpenCommand(
   } else if (action == kProperties) {
     OpenFileProperties(path, BMessenger(this));
   } else if (action == kPreviewOtherPanel) {
-    openPreview();
+    openPreview({});
   } else if (action == kEdit && !Listi::IsVirtual(path)) {
-    if (auto *target = openPreview())
-      target->BeginEditing(path);
+    openPreview(path);
   } else if (action == kView) {
     ImagePreview::OpenWindow(path);
   } else {

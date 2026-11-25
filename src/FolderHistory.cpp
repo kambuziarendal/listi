@@ -25,6 +25,7 @@ namespace {
 namespace fs = std::filesystem;
 constexpr size_t kManifestLimit = 64 * 1024 * 1024;
 constexpr off_t kAttributeLimit = 16 * 1024 * 1024;
+constexpr ssize_t kAttributeWriteChunk = 16 * 1024;
 constexpr char kBinding[] = "listi-history-v1";
 constexpr uint64 kMiB = 1024 * 1024;
 constexpr uint64 kAutomaticStoreBytes = 512 * kMiB;
@@ -53,7 +54,6 @@ struct AutomaticBudget {
   unsigned points = 0;
   uint64 read = kAutomaticReadBytes;
   uint64 write = 0;
-  uint64 metadata = kAutomaticManifestBytes;
   std::string latest;
   const bigtime_t deadline = system_time() + 90 * 1000000LL;
 
@@ -65,6 +65,24 @@ struct AutomaticBudget {
     Require(bytes <= budget, "Automatic history reached its size limit.");
     budget -= bytes;
   }
+};
+
+struct ManifestBudget {
+  explicit ManifestBudget(bool automatic)
+      : remaining(automatic ? kAutomaticManifestBytes : kManifestLimit),
+        diagnostic(automatic ? "Automatic history metadata exceeds 4 MiB." :
+                               "History manifest exceeds 64 MiB.") {}
+
+  void CheckRoom(ssize_t bytes) const {
+    if (bytes < 0 || bytes > remaining) throw std::runtime_error(diagnostic);
+  }
+  void Use(ssize_t bytes) {
+    CheckRoom(bytes);
+    remaining -= bytes;
+  }
+
+  ssize_t remaining;
+  const char *diagnostic;
 };
 
 struct FD {
@@ -85,6 +103,14 @@ struct stat Stat(int fd) {
   struct stat info{};
   Check(fstat(fd, &info) == 0, "Read node information");
   return info;
+}
+
+bool Unchanged(const struct stat &before, const struct stat &after) {
+  return before.st_size == after.st_size &&
+      before.st_ctim.tv_sec == after.st_ctim.tv_sec &&
+      before.st_ctim.tv_nsec == after.st_ctim.tv_nsec &&
+      before.st_mtim.tv_sec == after.st_mtim.tv_sec &&
+      before.st_mtim.tv_nsec == after.st_mtim.tv_nsec;
 }
 
 std::vector<std::string> Names(int fd, size_t limit = SIZE_MAX, bool firstOnly = false) {
@@ -181,23 +207,26 @@ struct Pending {
 };
 
 std::string Digest(int fd, int copy, const std::atomic_bool &cancel,
-                   AutomaticBudget *budget = nullptr) {
+                   off_t size, AutomaticBudget *budget = nullptr) {
+  Require(size >= 0, "Invalid history file size.");
+  if (budget) {
+    budget->Use(budget->read, size);
+    if (copy >= 0) budget->Use(budget->write, size);
+  }
   Sha256 sha;
   char bytes[64 * 1024];
-  while (true) {
+  while (size > 0) {
     CheckCancel(cancel);
     if (budget) budget->CheckTime(cancel);
-    auto count = read(fd, bytes, sizeof(bytes));
+    auto count = read(fd, bytes, std::min(size, off_t(sizeof(bytes))));
     if (count < 0 && errno == EINTR) continue;
     Check(count >= 0, "Read file contents");
-    if (!count) return sha.Finish();
-    if (budget) {
-      budget->Use(budget->read, count);
-      if (copy >= 0) budget->Use(budget->write, count);
-    }
+    Require(count > 0, "File shrank while reading history data.");
     sha.Update(bytes, count);
     if (copy >= 0) Write(copy, bytes, count);
+    size -= count;
   }
+  return sha.Finish();
 }
 
 bool Token(const std::string &token, const char *chars, size_t limit) {
@@ -210,7 +239,7 @@ bool Point(const std::string &name) {
 }
 
 void CollectAttributes(int fd, BMessage &entry, const std::atomic_bool &cancel,
-                       AutomaticBudget *budget) {
+                       AutomaticBudget *budget, ManifestBudget &manifest) {
   DIR *attrs = fs_fopen_attr_dir(fd);
   Check(attrs != nullptr, "Open BFS attributes");
   try {
@@ -225,12 +254,10 @@ void CollectAttributes(int fd, BMessage &entry, const std::atomic_bool &cancel,
       attr_info info{};
       Check(fs_stat_attr(fd, name->d_name, &info) == 0, "Read BFS attribute information");
       Require(info.size >= 0 && info.size <= kAttributeLimit, "BFS attribute exceeds the size limit.");
+      manifest.CheckRoom(info.size);
       if (budget) {
         budget->CheckTime(cancel);
         budget->Use(budget->read, info.size + 1);
-        budget->Use(budget->metadata, info.size + strlen(name->d_name) + 512);
-        Require(entry.FlattenedSize() + info.size < ssize_t(kAutomaticManifestBytes),
-                "Automatic history metadata exceeds 4 MiB.");
       }
       std::vector<char> bytes(size_t(info.size) + 1);
       Check(fs_read_attr(fd, name->d_name, info.type, 0, bytes.data(), info.size)
@@ -240,7 +267,9 @@ void CollectAttributes(int fd, BMessage &entry, const std::atomic_bool &cancel,
       Message(attribute.AddUInt32("type", info.type));
       if (info.size)
         Message(attribute.AddData("value", B_RAW_TYPE, bytes.data(), info.size, false));
+      const auto previousSize = entry.FlattenedSize();
       Message(entry.AddMessage("attr", &attribute));
+      manifest.Use(entry.FlattenedSize() - previousSize);
     }
   } catch (...) {
     fs_close_attr_dir(attrs);
@@ -258,21 +287,29 @@ void ApplyAttributes(int fd, const BMessage &entry, const std::atomic_bool &canc
     ssize_t length = 0;
     attr.FindData("value", B_RAW_TYPE, &bytes, &length);
     Require(*name && length >= 0 && length <= kAttributeLimit, "Invalid history attribute.");
-    Check(fs_write_attr(fd, name, attr.GetUInt32("type", 0), 0, bytes, length)
-        == length, "Restore BFS attribute");
+    const auto type = attr.GetUInt32("type", 0);
+    const auto *data = static_cast<const char *>(bytes);
+    ssize_t offset = 0;
+    do {
+      CheckCancel(cancel);
+      const auto count = std::min(length - offset, kAttributeWriteChunk);
+      Check(fs_write_attr(fd, name, type, offset, data, count) == count, "Restore BFS attribute");
+      offset += count;
+      if (count) data += count;
+    } while (offset < length);
   }
 }
 
 void SaveNode(int fd, int parent, const std::string &name, dev_t device,
               const PinnedDirectory &store, BMessage &node,
               const std::atomic_bool &cancel, unsigned depth,
-              AutomaticBudget *budget) {
+              AutomaticBudget *budget, ManifestBudget &manifest,
+              std::set<std::string> &verifiedObjects) {
   CheckCancel(cancel);
   if (budget) {
     budget->CheckTime(cancel);
     Require(budget->nodes > 0, "Automatic history reached its source entry limit.");
     --budget->nodes;
-    budget->Use(budget->metadata, name.size() + 512);
   }
   Require(depth <= 128, "History folder nesting exceeds 128 levels.");
   auto before = Stat(fd);
@@ -281,36 +318,41 @@ void SaveNode(int fd, int parent, const std::string &name, dev_t device,
   Message(node.AddInt32("mode", before.st_mode));
   Message(node.AddInt64("sec", before.st_mtim.tv_sec));
   Message(node.AddInt32("ns", before.st_mtim.tv_nsec));
-  CollectAttributes(fd, node, cancel, budget);
+  manifest.Use(node.FlattenedSize());
+  CollectAttributes(fd, node, cancel, budget, manifest);
   if (S_ISREG(before.st_mode)) {
-    if (budget)
-      Require(uint64(before.st_size) <= budget->read, "Automatic history reached its read limit.");
-    auto digest = Digest(fd, -1, cancel, budget);
-    auto object = "object-" + digest;
-    int dir = store.Descriptor();
-    struct stat stored{};
-    if (fstatat(dir, object.c_str(), &stored, AT_SYMLINK_NOFOLLOW)) {
-      Check(errno == ENOENT, "Check history object");
-      if (budget)
-        Require(uint64(before.st_size) <= std::min(budget->read, budget->write),
-                "Automatic history reached its copy limit.");
-      Pending pending(dir);
-      Check(lseek(fd, 0, SEEK_SET) == 0, "Rewind source file");
-      Require(Digest(fd, pending.file.fd, cancel, budget) == digest, "Source changed: " + name);
-      pending.Publish(object, store, cancel);
-    } else {
-      Require(S_ISREG(stored.st_mode) && stored.st_size == before.st_size,
-              "Invalid existing history object: " + name);
+    auto digest = Digest(fd, -1, cancel, before.st_size, budget);
+    if (verifiedObjects.insert(digest).second) {
+      const auto object = "object-" + digest;
+      const int dir = store.Descriptor();
+      const int existing = openat(dir, object.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+      if (existing < 0 && errno == ENOENT) {
+        Pending pending(dir);
+        Check(lseek(fd, 0, SEEK_SET) == 0, "Rewind source file");
+        Require(Digest(fd, pending.file.fd, cancel, before.st_size, budget) == digest &&
+                Unchanged(before, Stat(fd)), "Source changed: " + name);
+        pending.Publish(object, store, cancel);
+      } else {
+        FD input(existing, "Open existing history object");
+        const auto stored = Stat(input.fd);
+        Require(S_ISREG(stored.st_mode) && stored.st_size == before.st_size &&
+                Digest(input.fd, -1, cancel, stored.st_size, budget) == digest &&
+                Unchanged(stored, Stat(input.fd)),
+                "Invalid or damaged existing history object: " + name);
+      }
     }
+    const auto previousSize = node.FlattenedSize();
     Message(node.AddString("digest", digest.c_str()));
+    manifest.Use(node.FlattenedSize() - previousSize);
   } else if (S_ISLNK(before.st_mode)) {
     char target[B_PATH_NAME_LENGTH];
     auto length = readlinkat(parent, name.c_str(), target, sizeof(target));
     Check(length >= 0, "Read symbolic link");
     Require(size_t(length) < sizeof(target), "Symbolic link target is too long.");
-    if (budget) budget->Use(budget->metadata, length);
     target[length] = '\0';
+    const auto previousSize = node.FlattenedSize();
     Message(node.AddString("target", target));
+    manifest.Use(node.FlattenedSize() - previousSize);
   } else if (S_ISDIR(before.st_mode)) {
     for (const auto &child : Names(fd, budget ? budget->nodes : SIZE_MAX)) {
       struct stat info{};
@@ -322,20 +364,18 @@ void SaveNode(int fd, int parent, const std::string &name, dev_t device,
       Require(identity.st_ino == info.st_ino && identity.st_dev == info.st_dev,
               "Source changed: " + child);
       BMessage entry;
-      SaveNode(opened.fd, fd, child, device, store, entry, cancel, depth + 1, budget);
+      SaveNode(opened.fd, fd, child, device, store, entry, cancel, depth + 1,
+               budget, manifest, verifiedObjects);
+      const auto previousSize = node.FlattenedSize();
       Message(node.AddMessage("child", &entry));
-      Require(node.FlattenedSize() <= ssize_t(budget ? kAutomaticManifestBytes : kManifestLimit),
-              budget ? "Automatic history metadata exceeds 4 MiB." :
-                       "History manifest exceeds 64 MiB.");
+      // The child's complete flattened bytes were already charged recursively.
+      manifest.Use(node.FlattenedSize() - previousSize - entry.FlattenedSize());
     }
   } else {
     throw std::runtime_error("Unsupported entry: " + name);
   }
   auto after = Stat(fd);
-  Require(before.st_size == after.st_size && before.st_ctim.tv_sec == after.st_ctim.tv_sec &&
-      before.st_ctim.tv_nsec == after.st_ctim.tv_nsec &&
-      before.st_mtim.tv_sec == after.st_mtim.tv_sec &&
-      before.st_mtim.tv_nsec == after.st_mtim.tv_nsec, "Source changed: " + name);
+  Require(Unchanged(before, after), "Source changed: " + name);
   if (parent >= 0) {
     struct stat current{};
     Require(!fstatat(parent, name.c_str(), &current, AT_SYMLINK_NOFOLLOW) &&
@@ -367,9 +407,12 @@ bool Leaf(const std::string &name) {
 void RestoreBytes(int output, int store, const BMessage &entry, const std::atomic_bool &cancel) {
   std::string digest = entry.GetString("digest", "");
   Require(Token(digest, "0123456789abcdef", 64) && digest.size() == 64, "Invalid history digest.");
-  FD input(openat(store, ("object-" + digest).c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC), "Open saved file");
-  Require(S_ISREG(Stat(input.fd).st_mode), "Invalid content object.");
-  Require(Digest(input.fd, output, cancel) == digest, "Saved file content is damaged.");
+  FD input(openat(store, ("object-" + digest).c_str(),
+                  O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC), "Open saved file");
+  const auto before = Stat(input.fd);
+  Require(S_ISREG(before.st_mode), "Invalid content object.");
+  Require(Digest(input.fd, output, cancel, before.st_size) == digest &&
+          Unchanged(before, Stat(input.fd)), "Saved file content is damaged.");
 }
 
 BMessage FindRegularFile(BMessage folder, const fs::path &relative) {
@@ -412,6 +455,8 @@ void RestoreNode(int fd, int store, const BMessage &entry, const std::atomic_boo
       Check(symlinkat(child.GetString("target", ""), fd, name.c_str()) == 0, "Create link " + name);
       FD link(openat(fd, name.c_str(), O_RDONLY | O_NOTRAVERSE | O_CLOEXEC), name);
       ApplyAttributes(link.fd, child, cancel);
+      timespec times[] = {{0, UTIME_OMIT}, {child.GetInt64("sec", 0), child.GetInt32("ns", 0)}};
+      Check(utimensat(fd, name.c_str(), times, AT_SYMLINK_NOFOLLOW) == 0, "Restore link modification time");
     } else {
       throw std::runtime_error("Unknown history entry type.");
     }
@@ -428,32 +473,60 @@ struct HistoryStore::State {
   std::string source, folder;
   std::unique_ptr<PinnedDirectory> store, root;
 
+  void OpenStore(const fs::path &chosen) {
+    Require(chosen.is_absolute(), "Enter an absolute path to an existing history folder.");
+    folder = fs::canonical(chosen);
+    store = Pin(chosen);
+    Require(fs::canonical(chosen) == folder, "History folder changed while connecting.");
+  }
+
+  std::string ReadBinding() const {
+    store->Verify();
+    int fd = openat(store->Descriptor(), kBinding, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0 && errno == ENOENT) return {};
+    FD marker(fd, "Open history binding");
+    Require(S_ISREG(Stat(marker.fd).st_mode), "Invalid history binding.");
+    auto binding = Read(marker.fd, B_PATH_NAME_LENGTH + 64);
+    Require(!binding.empty(), "Invalid history binding.");
+    return binding;
+  }
+
   std::string Binding() const { return std::string(kBinding) + "\n" + source; }
   bool Bound() const {
-    store->Verify();
-    int fd = openat(store->Descriptor(), kBinding, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-    if (fd < 0 && errno == ENOENT) return false;
-    FD marker(fd, "Open history binding");
-    Require(S_ISREG(Stat(marker.fd).st_mode) && Read(marker.fd, B_PATH_NAME_LENGTH + 64) == Binding(),
-            "History belongs to a different source folder.");
+    const auto binding = ReadBinding();
+    if (binding.empty() && root) return false;
+    Require(binding == Binding(), "History belongs to a different source folder.");
     return true;
   }
 };
 
 HistoryStore::HistoryStore(const std::string &source, const std::string &folder)
     : state(std::make_unique<State>()) {
-  Require(fs::path(folder).is_absolute(), "Enter an absolute path to an existing history folder.");
-  const fs::path chosen(folder);
+  state->OpenStore(folder);
   state->source = fs::canonical(source);
-  state->folder = fs::canonical(chosen);
   Separate(state->source, state->folder);
   state->root = Pin(state->source);
-  state->store = Pin(chosen);
-  Require(fs::canonical(chosen) == state->folder, "History folder changed while connecting.");
   Require(state->Bound() || Names(state->store->Descriptor(), 1, true).empty(),
           "Choose an empty folder or an existing Listi history folder.");
 }
+
+HistoryStore::HistoryStore(const std::string &folder) : state(std::make_unique<State>()) {
+  state->OpenStore(folder);
+  const auto binding = state->ReadBinding();
+  const auto prefix = std::string(kBinding) + "\n";
+  Require(binding.compare(0, prefix.size(), prefix) == 0,
+          "Choose an existing Listi history folder.");
+  state->source = binding.substr(prefix.size());
+  const fs::path source(state->source);
+  Require(source.is_absolute() && source.lexically_normal().string() == state->source &&
+          state->source.find('\0') == std::string::npos, "Invalid original history path.");
+  Separate(source, state->folder);
+  state->store->Verify();
+}
+
 HistoryStore::~HistoryStore() = default;
+
+const std::string &HistoryStore::SourcePath() const { return state->source; }
 
 BMessage HistoryStore::Points() const {
   BMessage points;
@@ -468,7 +541,8 @@ BMessage HistoryStore::Points() const {
 
 BMessage HistoryStore::Browse(const std::string &point) const {
   Require(Point(point) && state->Bound(), "Select a saved history point.");
-  FD file(openat(state->store->Descriptor(), point.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC),
+  FD file(openat(state->store->Descriptor(), point.c_str(),
+                O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC),
           "Open history point");
   Require(S_ISREG(Stat(file.fd).st_mode), "Invalid point file.");
   std::string buffer = Read(file.fd, kManifestLimit);
@@ -484,6 +558,7 @@ void HistoryStore::Save(const std::atomic_bool &cancel) const {
 }
 
 BMessage HistoryStore::FolderIdentity() const {
+  Require(bool(state->root), "Saved history was opened for browsing and restoring only.");
   BMessage identity;
   for (const auto *folder : {state->root.get(), state->store.get()}) {
     folder->Verify();
@@ -507,6 +582,7 @@ bool HistoryStore::SaveAutomatically(const std::atomic_bool &cancel,
 }
 
 bool HistoryStore::SaveInternal(const std::atomic_bool &cancel, bool automatic) const {
+  Require(bool(state->root), "Saved history was opened for browsing and restoring only.");
   CheckCancel(cancel);
   auto &source = *state->root;
   auto &store = *state->store;
@@ -552,8 +628,10 @@ bool HistoryStore::SaveInternal(const std::atomic_bool &cancel, bool automatic) 
   }
   const auto point = "point-" + Unique();
   BMessage node;
+  std::set<std::string> verifiedObjects;
+  ManifestBudget manifest(automatic);
   SaveNode(source.Descriptor(), -1, "", Stat(source.Descriptor()).st_dev,
-           store, node, cancel, 0, automatic ? &limits : nullptr);
+           store, node, cancel, 0, automatic ? &limits : nullptr, manifest, verifiedObjects);
   source.Verify();
   auto size = node.FlattenedSize();
   Require(size > 0 && size <= ssize_t(kManifestLimit), "History manifest exceeds 64 MiB.");
@@ -562,11 +640,20 @@ bool HistoryStore::SaveInternal(const std::atomic_bool &cancel, bool automatic) 
   if (automatic) {
     limits.CheckTime(cancel);
     if (!limits.latest.empty()) {
-      FD latest(openat(dir, limits.latest.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC),
+      FD latest(openat(dir, limits.latest.c_str(),
+                       O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC),
                 "Open latest history point");
-      if (Stat(latest.fd).st_size == size &&
-          Read(latest.fd, kAutomaticManifestBytes) == std::string_view(data.data(), data.size()))
-        return false;
+      const auto previous = Stat(latest.fd);
+      Require(S_ISREG(previous.st_mode), "Invalid latest history point.");
+      if (previous.st_size == size) {
+        limits.Use(limits.read, size);
+        if (Read(latest.fd, kAutomaticManifestBytes) == std::string_view(data.data(), data.size())) {
+          limits.CheckTime(cancel);
+          source.Verify();
+          store.Verify();
+          return false;
+        }
+      }
     }
     limits.Use(limits.write, size);
   }
@@ -592,6 +679,7 @@ void HistoryStore::Restore(const std::string &point, const std::string &destinat
   auto parentPath = fs::canonical(entered.parent_path());
   auto leaf = entered.filename().string();
   auto target = parentPath / leaf;
+  Separate(entered.lexically_normal(), state->source);
   Separate(target, state->source);
   Separate(target, state->folder);
   auto parent = Pin(parentPath);

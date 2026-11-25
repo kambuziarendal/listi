@@ -109,6 +109,8 @@ enum : uint32 {
   kFileErrorSelected = 'ferr',
   kJobDone = 'jdon',
   kQueueWake = 'qwke',
+  kVolumeUnavailable = 'vuna',
+  kOperationErrorDismissed = 'oeam',
   kPause = 'paus',
   kAbort = 'abor',
   kConflict = 'conf',
@@ -125,6 +127,7 @@ struct Preferences : WorkspaceLayout {
       "Independent window", "Folder tab", "Ask each time"};
   FolderOpening folderOpening = NewWindow;
   bool separateWindows = true;
+  bool operationsInWindow = false;
   bool icons = true, size = true, date = true, alwaysFolderTabs = false;
   // Quick overrides are independent of saved layout profiles.
   int32 tviskiptButtons = -1, smidjaButtons = -1;

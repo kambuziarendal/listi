@@ -4,6 +4,7 @@
 #include "VirtualFile.h"
 #include "Common.h"
 #include "Pane.h"
+#include "UnavailableVolume.h"
 #include <Window.h>
 #include <Application.h>
 #include <Directory.h>
@@ -32,9 +33,17 @@ sem_id held, resume, released;
 std::string blockedPath;
 std::atomic<bool> blockOpen{false};
 std::atomic<thread_id> blockedReader{-1};
+std::atomic<thread_id> watchedReader{-1};
+std::atomic<int> readsAfterLoss{0};
 sem_id openEntered, allowOpen;
 }
 
+extern "C" dirent *__real_readdir(DIR *);
+extern "C" dirent *__wrap_readdir(DIR *dir) {
+  if (watchedReader.load() == find_thread(nullptr))
+    ++readsAfterLoss;
+  return __real_readdir(dir);
+}
 extern "C" DIR *__real_opendir(const char *);
 extern "C" DIR *__wrap_opendir(const char *path) {
   if (blockOpen.load() && blockedPath == path) {
@@ -307,6 +316,45 @@ int main() {
    if (renamed && rename(moved.c_str(), folder.c_str()) != 0)
      return 4;
  }
+ // Hold a scan after its first batch. Latch the path as a failed transfer
+ // would, without any UI notification, cancellation or serial change.
+ {
+   const auto fixture = root + "/interrupted-scan";
+   if (mkdir(fixture.c_str(), 0700))
+     return 4;
+   char canonical[PATH_MAX];
+   if (!realpath(fixture.c_str(), canonical))
+     return 4;
+   for (int i = 0; i < 20; ++i)
+     std::ofstream(fixture + "/" + std::to_string(i)) << "row";
+   auto *receiver = new Receiver;
+   receiver->Run();
+   auto epoch = std::make_shared<std::atomic<int64>>(1);
+   auto *reader = CreateDirectoryScanner(BMessenger(receiver), epoch);
+   reader->Run();
+   BMessage request(kScan);
+   request.AddInt64("serial", 1);
+   request.AddString("path", canonical);
+   request.AddBool("icons", false);
+   request.AddBool("firstScreen", true);
+   holdNextRows = true;
+   reader->PostMessage(&request);
+   const bool paused = acquire_sem_etc(held, 1, B_RELATIVE_TIMEOUT, 5000000) == B_OK;
+   InterruptedVolumes().Block(canonical);
+   watchedReader = reader->Thread();
+   release_sem(resume);
+   const bool completed = acquire_sem_etc(receiver->done, 1, B_RELATIVE_TIMEOUT, 5000000) == B_OK;
+   if (paused)
+     acquire_sem_etc(released, 1, B_RELATIVE_TIMEOUT, 5000000);
+   watchedReader = -1;
+   receiver->Lock();
+   check(paused && completed && readsAfterLoss == 0 &&
+             receiver->error == kUnavailableVolumeText,
+         "active scan stops before readdir after disk loss without waiting for a window broadcast");
+   receiver->Quit();
+   if (reader->Lock())
+     reader->Quit();
+ }
  // Mutate the directory after enumeration and before the terminal message.
  holdNextDone = true;
  pane->Navigate(folder.c_str());
@@ -336,15 +384,25 @@ int main() {
    snooze(20000);
  }
  check(converged, "pre-completion creation and removal converge without manual reload");
+ // This simulated lost volume must be independent of the healthy folder
+ // used by the ordinary blocked-opendir test below. The latch lasts until exit.
+ const auto lostFolder = root + "/removed-volume";
+ if (mkdir(lostFolder.c_str(), 0700) != 0 ||
+     !(std::ofstream(lostFolder + "/entry") << "disconnected file"))
+   return 4;
+ char canonicalLost[PATH_MAX];
+ if (!realpath(lostFolder.c_str(), canonicalLost))
+   return 4;
  window->Lock();
  holdNextRows = true;
- pane->Navigate(folder.c_str());
+ pane->Navigate(canonicalLost);
  window->Unlock();
  check(acquire_sem_etc(held, 1, B_RELATIVE_TIMEOUT, 5000000) == B_OK,
        "old reader is blocked before media loss");
  window->Lock();
+ InterruptedVolumes().Block(canonicalLost);
  BMessage interrupted(kJobDone);
- interrupted.AddString("interruptedCopyFolder", pane->Path());
+ interrupted.AddString("interruptedCopyFolder", canonicalLost);
  pane->MessageReceived(&interrupted);
  BMessage unrelated(kJobDone);
  pane->MessageReceived(&unrelated);

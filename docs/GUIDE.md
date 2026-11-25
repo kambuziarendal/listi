@@ -137,7 +137,7 @@ Modified**, each ascending or descending. in the ordinary local Details view. Re
   terminal, starting in the active local folder. For example, `pwd` prints
   that folder’s path. The shell stays open after the command finishes.
   Showing the field does not start a shell or run anything.
-- **Operations:** reopen the progress window after hiding it; pause/resume,
+- **Operations:** file jobs appear at the bottom of the browser by default. To make progress, errors and conflict prompts easier to see, choose the separate window in Settings. You can stack, tile or minimize it. When a job needs your decision, the window comes forward. The same job controls are available in either location: pause/resume,
   cancel and choose Replace/Skip/Abort when conflicts occur. Replace and Skip
   apply to just one collision unless you explicitly tick the repeat option. For a local copy
   between regular files, **Keep both** preserves the original and gives the
@@ -216,6 +216,7 @@ Choose the view that fits the task:
 - **View > Quick view** (Command+Shift+P) shows the current selection next to the active panel in any workspace. In a two-panel layout, it temporarily replaces the other panel on screen. Move through the active list to inspect another file. Toggle Quick view off to return to the previous layout; the other panel has not navigated away. Space still selects files.
 - From a file’s context menu, **Preview in other panel** (or **Preview beside file list** in a single-panel workspace) opens Quick view without toggling it off. Click **×** or press **Esc** to return to the file list. **Preview in window** opens a separate viewer.
 - **View** (Command+Shift+V) opens a separate viewer for one file. Escape or Command+W closes it. **View > Inspector panel** keeps an inspector in a two-panel layout instead.
+- **View > Detach Inspector** moves the live Inspector into a resizable window. Put it beside the browser or on another screen. It follows selections in its own browser, not in other Listi windows. Closing the Inspector window or choosing **Dock Inspector** returns it to that browser. An open text draft stays with the Inspector.
 - **Edit** (Command+E) opens a supported local text file for editing inside the lister. You can also click **Edit** in its preview. Use **Detach** to move the live draft into a separate editor window, or **Done** to return to the preview. For the configured external editor, use **Files > Edit in external editor**.
 
 ### Text, source code and unknown formats
@@ -636,9 +637,11 @@ files are copied into the saved search.
 
 Each file pane has its own folder tabs, separate from the Files, Search and Preview tools in Smiðja. **Window > Folder tabs** opens a new tab in the selected folder (otherwise here), duplicates a tab with its current state, renames or moves it, closes it, or reopens the last tab closed in that pane. A single tab stays hidden unless **Always show folder tabs** is selected or the last closed tab can be reopened from the strip. The last file tab cannot be closed on its own; close the window instead.
 
+Click a tab name to switch to it, or click its **×** to close that tab without switching first. The **…** menu shows tabs that do not fit and lets you reopen the last closed tab.
+
 While browsing files, use **Command+Option+T** for a new tab, **Command+Option+[** and **Command+Option+]** to cycle, and **Command+Option+W** to close a tab. Command+T and Command+Shift+T still open the terminal. The tab strip is for navigation, not a file-drop target: drop onto the file view of a real folder. Switching tabs does not redirect an already queued copy.
 
-**Window → Detach tab to Einn window** opens a compact single-pane window and moves the active tab, including its navigation history, filter, view and selection. If you detach the only tab, the original pane opens your home folder. The new window keeps its own queue and uses session-local layout preferences; its layout does not change the initial browser’s saved workspace. Closing the original window does not close a detached file window. Folder tabs last for the session and are not saved worksets.
+**Window → Detach tab to Einn window** opens a compact single-pane window and moves the active tab, including its navigation history, filter, view and selection. If you detach the only tab, the original pane opens your home folder. The new window keeps its own queue and uses session-local layout preferences; its layout does not change the initial browser’s saved workspace. Right-click a folder tab to detach that specific tab or move it to the opposite file panel. **Window → Move tab to window** moves the active tab into the active file panel of the window you choose. The source window stays open, including any jobs running there. The CLI label identifies its owning tab; when you move that tab its CLI follows it without restarting the shell. A running file operation and the other pane’s CLI stay in the original window. You can switch the detached window from Einn to any other workspace. Closing the original window does not close a detached file window. Folder tabs last for the session and are not saved worksets.
 
 ### Independent file windows
 
@@ -672,6 +675,10 @@ its saved versions directly. For a manual history, click **Choose history
 folder…** and select an existing dedicated BFS folder outside the source.
 Connecting does not write. **Save version** records the current tree.
 
+If the source has moved or no longer exists, choose **Files → Open saved folder history…**
+and select the history store itself. This read-only view shows the recorded source
+path and can restore to a new location; it cannot save versions or enable automatic history.
+
 Slide left to go back in time, right for newer versions, or use the arrows
 for one step at a time. Scrolling over the timeline also steps between versions. The date identifies the saved folder, not the live
 folder. Added and removed paths and changes to file bytes, link targets or
@@ -689,8 +696,8 @@ snapshot or an in-place rollback. For optional scheduled points, see below.
 Identical file bytes share an object independently of the name and BFS attributes. The store
 is not encrypted, and the old standalone F12 SQLite prototype is not compatible
 with this store. This version preserves typed BFS attributes, symlink text,
-file/folder modification times and ordinary permission bits; not symlink
-timestamps, ownership, hard-link relationships or volume indexes.
+file, folder and symlink modification times, and ordinary file/folder permission bits;
+not ownership, hard-link relationships or volume indexes.
 
 Canceling a save before publication leaves existing points readable. An
 interrupted save can leave complete, unreferenced blobs (or private temporary

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "Pane.h"
+#include "UnavailableVolume.h"
 #include "HistoryPaneHint.h"
 #include "SearchWorker.h"
 #include "AdaptiveScrollView.h"
@@ -258,31 +259,36 @@ void Pane::StartDirectoryReader() {
   scanner = CreateDirectoryScanner(BMessenger(this), generation, scanDelivery, directoryWatch);
   Listi::StartReadWorker(scanner);
 }
-void Pane::AfterInterruptedCopy(const char *folder) {
-  const std::string lost(folder);
-  const bool affected = path == folder || path.StartsWith((lost + "/").c_str());
-  if (scanning) {
-    // A reader in the old volume's opendir or icon lookup may never return.
-    // Don't join it or enqueue the new location behind it. The serial also
-    // rejects batches that were already in the window's port.
-    history.Complete(serial, path.String(), false);
-    generation->store(++serial);
-    Listi::RetireReadWorker(scanner);
-    scanning = refreshPending = false;
-    scanTimer.reset();
-  }
-  if (!affected) {
-    if (!mediaReadSuspended)
+void Pane::AfterInterruptedCopy() {
+  auto &volumes = Listi::InterruptedVolumes();
+  if (!volumes.Contains(SearchRoot()) && !volumes.ContainsDevice(folderIdentity.first)) {
+    const auto &rows = entries.Visible();
+    if (!mediaReadSuspended &&
+        (path == "@disks" || std::any_of(rows.begin(), rows.end(), [&](const auto *row) {
+          return volumes.Contains(row->path) || volumes.ContainsDevice(row->device);
+        })))
       Reload();
     return;
   }
+  if (mediaReadSuspended)
+    return;
+  history.Complete(serial, path.String(), false);
+  generation->store(++serial);
+  Listi::RetireReadWorker(scanner);
+  Listi::RetireReadWorker(queryWorker);
+  Listi::RetireReadWorker(iconReader);
+  scanTimer.reset();
+  directoryRefreshTimer.reset();
+  scanning = refreshPending = directoryRefreshPending = false;
   if (directoryWatch)
     directoryWatch->Begin(-1, false, BMessenger(this));
   mediaReadSuspended = true;
   locationValid = false;
+  folderIdentity = {-1, -1};
   ClearRows();
   UpdateNavigation();
-  SetNavigationError("Transfer stopped on this disk. Choose another folder, or reconnect and reload.");
+  SetNavigationError(Listi::kUnavailableVolumeText);
+  SendSelection();
 }
 void Pane::Activate() {
   if (Window()) {
@@ -582,6 +588,11 @@ void Pane::UpdateNavigation() {
 }
 void Pane::StartNavigation(const std::string &request, int target, bool trash, bool restore) {
   try {
+    const auto query = queries.find(request);
+    if (Listi::InterruptedVolumes().Contains(
+            query == queries.end() ? request : query->second.request.root) ||
+        (mediaReadSuspended && path == request.c_str()))
+      throw std::runtime_error(Listi::kUnavailableVolumeText);
     if (Listi::IsVirtual(request))
       Listi::RequireConnection(request);
   } catch (const std::exception &error) {
@@ -631,6 +642,7 @@ void Pane::StartNavigation(const std::string &request, int target, bool trash, b
     StartDirectoryReader();
   scanning = true;
   locationValid = false;
+  folderIdentity = {-1, -1};
   sidebar->UpdateLocation();
   refreshPending = false;
   serial++;
@@ -698,6 +710,8 @@ void Pane::ScheduleDirectoryRefresh() {
 }
 void Pane::RequestVisibleIcon(PaneEntry &row) {
   if (row.iconRequested || pendingIcons.size() >= 64 ||
+      Listi::InterruptedVolumes().ContainsDevice(row.device) ||
+      Listi::InterruptedVolumes().Contains(row.path) ||
       ((mode == 0 || mode == MillerMode) && !prefs.icons))
     return;
   if (!iconReader) {
@@ -833,8 +847,11 @@ void Pane::SendSelection(bool gesture) {
     changed.AddInt32("pane", id);
     if (auto *entry = entries.OnlySelected()) {
       auto found = transfers.find(entry->path);
-      if (found != transfers.end() && !found->second.error.empty())
+      if (found != transfers.end() && !found->second.error.empty()) {
         changed.AddString("operationError", found->second.error.c_str());
+        changed.AddInt64("operation", found->second.operation);
+        changed.AddString("path", entry->path.c_str());
+      }
     }
     Window()->PostMessage(&changed);
   }
@@ -901,6 +918,7 @@ void Pane::MessageReceived(BMessage *m) {
     std::string file = m->GetString("path", "");
     auto &transfer = transfers[file];
     transfer.state = m->GetInt32("state", 0);
+    transfer.operation = m->GetInt64("operation", 0);
     transfer.fraction = m->GetFloat("fraction", 0);
     transfer.error = m->GetString("error", "");
     if (entries.Transfer(file, transfer.state, transfer.fraction)) {
@@ -922,18 +940,43 @@ void Pane::MessageReceived(BMessage *m) {
       transfers.erase(transfers.begin());
     break;
   }
+  case kVolumeUnavailable:
+    AfterInterruptedCopy();
+    break;
+  case kOperationErrorDismissed: {
+    const auto operation = m->GetInt64("operation", 0);
+    if (!operation)
+      break;
+    const char *path = m->GetString("path", "");
+    std::vector<std::string> acknowledged;
+    for (const auto &[file, transfer] : transfers)
+      if (transfer.operation == operation && (!*path || file == path) &&
+          (transfer.state == 1 || transfer.state == 3))
+        acknowledged.push_back(file);
+    for (const auto &file : acknowledged) {
+      BMessage clear(kFileProgress);
+      clear.AddString("path", file.c_str());
+      MessageReceived(&clear);
+    }
+    break;
+  }
   case kJobDone:
     if (m->GetBool("beforeStart", false))
       break;
     directoryRefreshPending = false;
-    for (auto &transfer : transfers)
-      if (transfer.second.state == 1) {
-        transfer.second.state = 3;
-        transfer.second.error =
-            "Transfer did not complete. See Operations for details.";
-      }
-    if (const char *folder = m->GetString("interruptedCopyFolder", nullptr))
-      AfterInterruptedCopy(folder);
+    if (m->GetBool("errorDismissed", false)) {
+      BMessage dismissed(kOperationErrorDismissed);
+      dismissed.AddInt64("operation", m->GetInt64("operation", 0));
+      MessageReceived(&dismissed);
+    } else {
+      for (auto &[file, transfer] : transfers)
+        if (transfer.state == 1 && transfer.operation == m->GetInt64("operation", 0)) {
+          transfer.state = 3;
+          transfer.error = "Transfer did not complete. See Operations for details.";
+        }
+    }
+    if (m->HasString("interruptedCopyFolder"))
+      AfterInterruptedCopy();
     else if (!mediaReadSuspended)
       Reload();
     break;
@@ -1113,6 +1156,11 @@ void Pane::MessageReceived(BMessage *m) {
   case kColumnNavigate: {
     if (mode != MillerMode || m->GetInt64("serial", -1) != serial)
       break;
+    if (Listi::InterruptedVolumes().Contains(m->GetString("clickedPath", "")) ||
+        Listi::InterruptedVolumes().Contains(m->GetString("path", ""))) {
+      SetNavigationError(Listi::kUnavailableVolumeText);
+      break;
+    }
     if (!ColumnEntryUnchanged(*m)) {
       SetStatus("Column entry changed. Select it again.");
       break;
@@ -1195,6 +1243,11 @@ void Pane::MessageReceived(BMessage *m) {
     break;
   case kInvoke: {
     auto r = entries.Focused();
+    if (r && (Listi::InterruptedVolumes().ContainsDevice(r->device) ||
+              Listi::InterruptedVolumes().Contains(r->path))) {
+      SetNavigationError(Listi::kUnavailableVolumeText);
+      break;
+    }
     if (m->HasString("column") &&
         (scanning || path != m->GetString("column", "") || !r ||
          r->path != m->GetString("selection", "") || !ColumnEntryUnchanged(*m)))
@@ -1273,6 +1326,9 @@ void Pane::MessageReceived(BMessage *m) {
       }
       row->kind = e.GetInt32("kind", 0);
       row->device = e.GetInt64("device", -1);
+      if (Listi::InterruptedVolumes().ContainsDevice(row->device) ||
+          Listi::InterruptedVolumes().Contains(row->path))
+        continue;
       row->node = e.GetInt64("node", -1);
       // Virtual listings have no local node identity; retain their path-based
       // behavior. A replacement local entry must not inherit selection.
@@ -1402,9 +1458,20 @@ void Pane::MessageReceived(BMessage *m) {
     }
     break;
   }
-  case B_NODE_MONITOR:
-    ScheduleDirectoryRefresh();
+  case B_NODE_MONITOR: {
+    const auto opcode = m->GetInt32("opcode", 0);
+    const bool volumeChange = opcode == B_DEVICE_MOUNTED || opcode == B_DEVICE_UNMOUNTED;
+    const auto device = m->GetInt32("device", -1);
+    if (opcode == B_DEVICE_UNMOUNTED && device >= 0 && path != "@disks" &&
+        (folderIdentity.first == device ||
+         (directoryWatch && directoryWatch->WatchesDevice(serial, device)))) {
+      // Navigate without inspecting any cached entry on the retired mount.
+      // This also invalidates pending row batches and clears the selection.
+      Navigate("@disks");
+    } else if (volumeChange == (path == "@disks"))
+      ScheduleDirectoryRefresh();
     break;
+  }
   case B_COLORS_UPDATED:
     Apply(prefs);
     SetSource(active);

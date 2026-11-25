@@ -20,5 +20,6 @@ bool InspectorEditorsAllowQuit(BWindow *owner = nullptr);
 BView *OpenEmbeddedInspectorEditor(const std::string &path, BView *parent,
                                    BHandler *closeTarget);
 bool InspectorEditorAllowClose(BView *editor);
+void RefreshInspectorEditorTarget(BView *editor);
 bool DetachInspectorEditor(BView *editor);
 bool HandleInspectorEditorKey(BView *focus, const BMessage &key);

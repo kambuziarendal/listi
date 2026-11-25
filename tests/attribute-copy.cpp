@@ -7,6 +7,8 @@
 #include <fstream>
 #include <fcntl.h>
 #include <iostream>
+#include <iterator>
+#include <vector>
 #include <sys/stat.h>
 #include <unistd.h>
 int main() {
@@ -108,6 +110,75 @@ int main() {
                                sizeof(movedNumber)) == sizeof(movedNumber) &&
             movedNumber == number && access(linkFolder.c_str(), F_OK) != 0,
         "merged move preserves a dangling link and its typed metadata");
+  if (const char *extRoot = std::getenv("LISTI_TEST_EXT4_DIR")) {
+    const std::string extPattern = Listi::Join(extRoot, "Listi-attributes-XXXXXX");
+    std::vector<char> extPath(extPattern.begin(), extPattern.end());
+    extPath.push_back('\0');
+    const char *extFixture = mkdtemp(extPath.data());
+    check(extFixture != nullptr, "make isolated fixture on EXT");
+    if (extFixture) {
+      const std::string ext = extFixture;
+      const std::string image = Listi::Join(base, "test-image.png");
+      const std::string plain = Listi::Join(base, "untagged");
+      const std::string published = Listi::Join(ext, "test-image.png");
+      const std::string payload("image\0payload", 13);
+      constexpr char mime[] = "image/png";
+      { std::ofstream(image, std::ios::binary) << payload; }
+      { std::ofstream(plain) << "untagged"; }
+      BNode imageNode(image.c_str());
+      check(imageNode.WriteAttr("BEOS:TYPE", B_MIME_STRING_TYPE, 0, mime, sizeof(mime)) ==
+                sizeof(mime),
+            "tag fixture with native BEOS:TYPE");
+      const auto bytes = [](const std::string &path) {
+        std::ifstream file(path, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(file),
+                           std::istreambuf_iterator<char>());
+      };
+      Listi::Job extCopy{Listi::Action::Copy, {image}, ext};
+      const auto limited = Listi::Run(extCopy, {});
+      check(limited.completed == 1 && limited.errors.empty() &&
+                limited.copyLimitations && !limited.outcomes.empty() &&
+                limited.outcomes.front().detail.find("source attributes were not copied") !=
+                    std::string::npos &&
+                bytes(published) == payload && bytes(image) == payload &&
+                imageNode.GetAttrInfo("BEOS:TYPE", &info) == B_OK,
+            "EXT copy publishes the exact file bytes and reports omitted attributes");
+      for (const auto &error : limited.errors)
+        std::cout << error << '\n';
+
+      const std::string existing = "existing destination";
+      { std::ofstream(published, std::ios::binary) << existing; }
+      Listi::Hooks keepBoth;
+      keepBoth.copyConflict = [](const Listi::CopyConflict &) {
+        return Listi::Decision::KeepBoth;
+      };
+      const auto duplicate = Listi::Run(extCopy, keepBoth);
+      check(duplicate.completed == 1 && duplicate.errors.empty() &&
+                duplicate.copyLimitations &&
+                bytes(Listi::Join(ext, "test-image (2).png")) == payload &&
+                bytes(published) == existing,
+            "Keep both retains existing EXT file and omission warning");
+      for (const auto &error : duplicate.errors)
+        std::cout << error << '\n';
+
+      const auto untagged = Listi::Run({Listi::Action::Copy, {plain}, ext}, {});
+      check(untagged.completed == 1 && untagged.errors.empty() &&
+                !untagged.copyLimitations && bytes(Listi::Join(ext, "untagged")) == "untagged",
+            "EXT copy of untagged file completes without metadata warning");
+
+      Listi::Job extMove{Listi::Action::Move, {image}, ext};
+      const auto moved = Listi::Run(extMove, replace);
+      check(moved.completed == 0 && !moved.errors.empty() &&
+                moved.errors.front().find("BEOS:TYPE") != std::string::npos &&
+                bytes(image) == payload && bytes(published) == existing &&
+                imageNode.GetAttrInfo("BEOS:TYPE", &info) == B_OK,
+            "EXT move refuses metadata loss without replacing or removing originals");
+      for (const auto &error : moved.errors)
+        std::cout << error << '\n';
+      const auto removed = Listi::Run({Listi::Action::Delete, {ext}}, {});
+      check(removed.completed == 1 && removed.errors.empty(), "owned EXT fixture cleaned");
+    }
+  }
   Listi::Job cleanup;cleanup.action=Listi::Action::Delete;cleanup.sources={base};
   auto removed=Listi::Run(cleanup,{});
   check(removed.errors.empty(),"owned fixture cleaned");

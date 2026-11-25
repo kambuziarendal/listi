@@ -9,15 +9,19 @@
 class BView;
 
 namespace Listi {
-inline constexpr uint32 kFolderHistory = 'fhst', kPreviewHistory = 'fhpv';
+inline constexpr uint32 kFolderHistory = 'fhst', kPreviewHistory = 'fhpv',
+    kOpenSavedFolderHistory = 'fhop';
 BView *CreateHistoryPreview(const char *source, int32 pane);
 void OpenFolderHistory(const char *source);
+void OpenSavedFolderHistory();
 bool FolderHistoryBusy();
 
 class HistoryStore {
 public:
   HistoryStore(const std::string &source, const std::string &folder);
+  explicit HistoryStore(const std::string &folder);
   ~HistoryStore();
+  const std::string &SourcePath() const;
   BMessage Points() const;
   BMessage Browse(const std::string &point) const;
   void Save(const std::atomic_bool &cancel) const;

@@ -108,6 +108,13 @@ int main() {
     check(inside(targetBounds(appearance), window->FindView("color format")),
           "scrolling to the bottom reveals the appearance format hint");
     check(select(2, "Workflow"), "Workflow can be opened at narrow width");
+    auto *operations = dynamic_cast<BMenuField *>(
+        window->FindView("operations presentation"));
+    check(operations && operations->Menu()->CountItems() == 2 &&
+              operations->Menu()->ItemAt(0)->IsMarked(),
+          "Workflow defaults to integrated file operations");
+    if (operations)
+      operations->Menu()->ItemAt(1)->SetMarked(true);
     check(select(3, "Applications"),
           "Applications can be opened at narrow width");
     auto editor =
@@ -162,5 +169,6 @@ int main() {
         "only chosen default changed");
   check(prefs.editor == "Settings test editor",
         "an application setting survives category changes and Save");
+  check(prefs.operationsInWindow, "the separate operations option survives Settings Save");
   return failures ? 1 : 0;
 }

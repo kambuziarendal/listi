@@ -20,11 +20,9 @@ Pre-release hands-on testing on Haiku identified failures that scripted checks h
 
 ### Physical USB disconnect during copy
 
-**Disconnecting a physical USB disk during a copy has not been tested.** The steps below are a plan, not a result.
+A physical disconnect was followed by a kernel panic ([field report](#physical-usb-field-report-0380-30-2026-11-25)). Separately, a Haiku hrev59866+79 VM entered the kernel debugger inside the FAT driver during an interrupted write. Tracker passed an ordinary FAT copy and clean unmount/remount check; that does not establish how it behaves during an unexpected disconnect. Haiku [ticket #19105](https://dev.haiku-os.org/ticket/19105) documents a related, previously fixed issue, not a verified fix for this crash.
 
-1. Use disposable files and a spare USB disk. Record checksums for the source, a file already on the USB disk and an earlier completed copy.
-2. Start **Copy** in Listi. Unplug the USB disk while it is still being written to, then click **Cancel**. Record whether the window responds, the job's exact status and how long it stays in that state.
-3. After reconnecting and remounting the disk, record what is present at the destination and compare the three checksums. Note if a restart was necessary. Record the outcome here before changing roadmap priority 1.
+Do not deliberately unplug a drive during a transfer. If a disconnect happens accidentally, report the Haiku revision, Listi version and any debugger message already visible. Physical hot-unplug qualification remains open.
 
 ## Testing in Haiku VMs
 
@@ -373,3 +371,29 @@ Open it to check the explanation. Return the same store, navigate to an
 unconfigured folder and back in the same window: its count must recover without
 switching applications. In the neighbouring preview, step to the older version
 and back; closing it must return the previous folder without writing either one.
+
+### Physical USB field report: 0.38.0-30, 2026-11-25
+
+The tester unplugged the stick during Copy and dismissed the visible errors. The file remained red with “Needs attention”. Screenshots in the open folder could still be viewed. Attempting to open another folder on the disconnected stick was followed by a Haiku kernel panic. The photographed trace shows a directory reader, Listi directory scan frames and the FAT filesystem path. The root cause and exact FAT variant are not established. No post-remount checksums or BFS outcome were reported. Physical disconnect qualification failed; beta remains on hold pending a fix and hardware verification.
+
+### Second physical USB field report, 2026-11-25
+
+During another transfer **to** the USB stick, the tester removed it and Listi froze. MímisSendir also crashed. The tester could switch to the workspace containing Telegram but not back, could not take a screenshot, and reported that Telegram subsequently crashed. The photo records the unsent account, not a debugger trace. The installed Listi revision, kernel state, file integrity and cause are unknown. Record this separately from the earlier panic and the ext4 reports. Beta remains blocked. Investigate on a disposable Haiku VM before requesting another hardware disconnect.
+
+A separate disposable Haiku R1~beta6 VM (hrev59866+79) running the installed
+0.38.0-33 package entered the kernel debugger during an interrupted FAT USB
+write. The captured serial trace shows a kernel page fault during
+`dosfs_write` under Listi's `_kern_write`. This is not a returned I/O error:
+Listi cannot acknowledge it, retry it, or restore the desktop. This finding
+does not identify what happened on the tester's second physical run, establish
+a problem with ext4, or demonstrate that Listi alone triggers the fault. Do not
+request another physical disconnect as a routine beta check on this system.
+
+Physical retest reported on 2026-11-25: copying to ext4 and deleting on ext4 worked, and a newly mounted volume appeared immediately in an open @disks panel. This does not verify interrupted USB writes.
+
+On hrev59866+79, installed Listi -36 moved two affected browser windows to
+Disks after a normal BFS image unmount and kept an unrelated window in place.
+A suspended tab, however, reopened the old path after remount. In a separate
+Tracker observation a normal RAM-disk unmount entered the kernel debugger
+during window-state saving. That was not a FAT write or a physical USB test;
+it does not establish a common cause.

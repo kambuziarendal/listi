@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "MainWindowMenu.h"
+#include "WorkspaceSplit.h"
 #include "Common.h"
 #include "FlatView.h"
 #include "FolderTabs.h"
@@ -10,9 +11,9 @@
 #include "ShelfWindow.h"
 #include "WorkspaceActions.h"
 #include "WorkspaceEditor.h"
-#include "WindowOverview.h"
 #include "WorkingSets.h"
 #include <MenuItem.h>
+#include "WindowOverview.h"
 
 namespace {
 BMenuItem *AddCommand(BMenu *menu, const char *label, uint32 action,
@@ -44,6 +45,8 @@ MainWindowMenu::MainWindowMenu() : BMenuBar("menu") {
   AddCommand(tabs, "Move tab left", Listi::kTabLeft);
   AddCommand(tabs, "Move tab right", Listi::kTabRight);
   AddCommand(windows, "Detach tab to Einn window", Listi::kTabDetach);
+  tabDestinations = new BMenu("Move tab to window");
+  windows->AddItem(tabDestinations);
   AddCommand(tabs, "Close tab", Listi::kTabClose);
   AddCommand(tabs, "Reopen closed tab", Listi::kTabReopen);
   tabs->AddSeparatorItem();
@@ -54,6 +57,23 @@ MainWindowMenu::MainWindowMenu() : BMenuBar("menu") {
   AddCommand(help, "About Listi…", kAboutListi);
   AddCommand(help, "Layout introduction…", Listi::kShowLayoutGuide);
   AddItem(help);
+}
+
+void MainWindowMenu::SetTabDestinations(int64 sourceWindow, int side, int64 tab, bool enabled) {
+  while (auto *item = tabDestinations->RemoveItem(int32(0)))
+    delete item;
+  if (enabled) {
+    for (const auto &choice : Listi::WorkingSetChoices()) {
+      if (choice.id == sourceWindow)
+        continue;
+      auto *message = new BMessage(kMoveTabToWindow);
+      message->AddMessenger("destination", choice.target);
+      message->AddInt32("pane", side);
+      message->AddInt64("tab", tab);
+      tabDestinations->AddItem(new BMenuItem(choice.label.c_str(), message));
+    }
+  }
+  tabDestinations->SetEnabled(tabDestinations->CountItems() > 0);
 }
 
 void MainWindowMenu::AddFilesMenu() {
@@ -81,6 +101,7 @@ void MainWindowMenu::AddFilesMenu() {
   AddCommand(files, "Move to Trash", kDelete, 'D');
   AddCommand(files, "Restore from Trash", kRestore);
   AddCommand(files, "Folder history…", Listi::kFolderHistory);
+  AddCommand(files, "Open saved folder history…", Listi::kOpenSavedFolderHistory);
   AddCommand(files, "Automatic history settings…", Listi::kAutomaticHistorySettings);
   AddCommand(files, "Delete permanently...", kPermanentDelete);
   undoBulkRenameItem = AddCommand(files, "Undo last bulk rename", kUndoBulkRename);
@@ -143,6 +164,7 @@ void MainWindowMenu::AddViewMenu() {
   AddCommand(workspace, "Customize workspace…", kOpenWorkspaceEditor);
   viewMenu->AddItem(workspace);
   previewMenu = AddCommand(viewMenu, "Inspector panel", kPreviewToggle, 'P');
+  inspectorDockItem = AddCommand(viewMenu, "Detach Inspector", Listi::kDetachInspector);
   quickViewMenu = AddCommand(viewMenu, "Quick view", kQuickView, 'P', B_SHIFT_KEY);
   treeToggle = AddCommand(viewMenu, "Folder tree", kToggleTree);
   viewMenu->AddSeparatorItem();
@@ -235,10 +257,14 @@ void MainWindowMenu::SetFolderTree(bool available, bool visible) {
   treeToggle->SetMarked(available && visible);
 }
 
-void MainWindowMenu::SetPreview(const WorkspaceLayout &layout, bool showingQuickView) {
+void MainWindowMenu::SetPreview(const WorkspaceLayout &layout, bool showingQuickView,
+                                bool inspectorDetached) {
   quickViewMenu->SetMarked(showingQuickView);
-  previewMenu->SetMarked(layout.Preview() && !layout.SinglePane());
-  previewMenu->SetEnabled(!showingQuickView && !layout.SinglePane());
+  previewMenu->SetMarked(!inspectorDetached && layout.Preview() && !layout.SinglePane());
+  previewMenu->SetEnabled(!inspectorDetached && !showingQuickView && !layout.SinglePane());
+  inspectorDockItem->SetLabel(inspectorDetached ? "Dock Inspector" : "Detach Inspector");
+  inspectorDockItem->Message()->what = inspectorDetached ? Listi::kDockInspector
+                                                        : Listi::kDetachInspector;
 }
 
 void MainWindowMenu::SetFileActions(int32 viewMode, bool flat, bool canOpenFlatView,

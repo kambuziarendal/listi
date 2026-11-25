@@ -11,6 +11,8 @@
 #include "ShelfWindow.h"
 #include "PanelTools.h"
 #include "WorkspaceLayout.h"
+#include <GroupLayout.h>
+#include <GroupView.h>
 #include <Layout.h>
 #include <Window.h>
 
@@ -18,6 +20,7 @@ namespace Listi {
 namespace {
 constexpr float kWorkspaceSpacing = 6;
 constexpr int kInspector = 2;
+
 }
 
 WorkspaceSplit::WorkspaceSplit(Pane &first, Pane &second, Preferences &settings,
@@ -25,10 +28,13 @@ WorkspaceSplit::WorkspaceSplit(Pane &first, Pane &second, Preferences &settings,
     : BSplitView(B_HORIZONTAL, kWorkspaceSpacing), prefs(settings), menu(bar),
       source(prefs.SinglePane() ? prefs.singlePane : 0),
       panes{new PanelTools(0, first), new PanelTools(1, second)},
+      inspectorSlot(new BGroupView(B_VERTICAL, 0)),
       inspector(new ImagePreview()), splitterSize(SplitterSize()) {
   AddChild(panes[0]);
   AddChild(panes[1]);
-  AddChild(inspector);
+  inspectorSlot->GroupLayout()->AddView(inspector);
+  inspector->SetDockControl(false);
+  AddChild(inspectorSlot);
   const WorkspaceLayout defaults;
   for (int i = 0; i < 3; ++i)
     SetItemWeight(i, defaults.splitWeights[i], i == kInspector);
@@ -46,9 +52,9 @@ void WorkspaceSplit::PlaceInspector(bool first, float weight) {
   if (inspectorOnLeft == first)
     return;
 
-  GetLayout()->RemoveView(inspector);
+  GetLayout()->RemoveView(inspectorSlot);
   inspectorOnLeft = first;
-  AddChild(SplitIndex(kInspector), inspector, weight);
+  AddChild(SplitIndex(kInspector), inspectorSlot, weight);
   for (int i = 0; i < 3; ++i)
     SetCollapsible(SplitIndex(i), i == kInspector);
 }
@@ -69,7 +75,9 @@ void WorkspaceSplit::SetInspectorVisible(bool visible) {
     return;
 
   inspectorVisible = visible;
-  SetViewVisible(inspector, visible);
+  SetViewVisible(inspectorSlot, visible);
+  if (!floatingInspector)
+    SetViewVisible(inspector, visible);
 }
 
 void WorkspaceSplit::ApplyGeometry(const WorkspaceLayout &layout, bool quickView,
@@ -139,12 +147,6 @@ bool WorkspaceSplit::HasPanelPreview() const {
 
 bool WorkspaceSplit::CloseVisibleInspectorEditor() {
   return !InspectorVisible() || Inspector().CloseEditor();
-}
-
-void WorkspaceSplit::UpdatePreviews() {
-  Panel(0).UpdatePreview(Panel(1));
-  Panel(1).UpdatePreview(Panel(0));
-  Inspector().ShowFile(InspectorVisible() ? Panel(source).SelectedFile() : "");
 }
 
 ImagePreview *WorkspaceSplit::OpenPanelPreview(int pane) {
@@ -225,11 +227,13 @@ void WorkspaceSplit::SwitchPane() {
 }
 
 void WorkspaceSplit::RefreshPanels() {
-  Inspector().SetQuickViewCloseVisible(quickView);
-  SetInspectorVisible(quickView || (prefs.Preview() && !prefs.SinglePane() &&
-                                   !HasPanelPreview()));
+  if (!floatingInspector)
+    Inspector().SetQuickViewCloseVisible(quickView);
+  SetInspectorVisible(!floatingInspector &&
+                      (quickView || (prefs.Preview() && !prefs.SinglePane() &&
+                                     !HasPanelPreview())));
   UpdatePreviews();
-  menu.SetPreview(prefs, quickView || HasPanelPreview());
+  menu.SetPreview(prefs, quickView || HasPanelPreview(), InspectorDetached());
 }
 
 void WorkspaceSplit::RefreshAndFocus() {
@@ -262,7 +266,7 @@ void WorkspaceSplit::ApplyWorkspace() {
 }
 
 bool WorkspaceSplit::PrepareLayoutChange() {
-  if (!Inspector().CloseEditor() || !Panel(0).CloseEditor() ||
+  if ((!floatingInspector && !Inspector().CloseEditor()) || !Panel(0).CloseEditor() ||
       !Panel(1).CloseEditor())
     return false;
   quickView = false;
@@ -270,7 +274,7 @@ bool WorkspaceSplit::PrepareLayoutChange() {
 }
 
 bool WorkspaceSplit::SetQuickView(bool enabled) {
-  if (!enabled && !Inspector().CloseEditor())
+  if (floatingInspector || (!enabled && !Inspector().CloseEditor()))
     return false;
   quickView = enabled;
   return true;
@@ -357,7 +361,7 @@ bool WorkspaceSplit::DismissPanelTool() {
 }
 
 bool WorkspaceSplit::ToggleInspector() {
-  if (prefs.SinglePane() || quickView || HasPanelPreview() ||
+  if (floatingInspector || prefs.SinglePane() || quickView || HasPanelPreview() ||
       !CloseVisibleInspectorEditor())
     return false;
   prefs.SetPreview(!prefs.Preview());

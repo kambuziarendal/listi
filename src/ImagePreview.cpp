@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: MIT
 #include "ReadWorker.h"
+#include "UnavailableVolume.h"
 #include "StagingSpace.h"
 #include "AdaptiveScrollView.h"
 #include "ImagePreview.h"
 #include "WindowOverview.h"
+#include "WorkspaceSplit.h"
 #include "ViewVisibility.h"
 #include "BitmapMailbox.h"
 #include "Common.h"
@@ -228,6 +230,8 @@ public:
     try {
       c.Check();
       const std::string source = m->GetString("path", "");
+      if (Listi::InterruptedVolumes().ContainsResolved(source))
+        throw std::runtime_error(Listi::kUnavailableVolumeText);
       CachedPreview file(source, c);
       Inspector::Input input(file.path);
       kind = Inspector::Identify(Listi::LocationLeaf(source), input);
@@ -392,9 +396,9 @@ ImagePreview::ImagePreview(bool standalone)
                              B_FRAME_EVENTS | B_SUPPORTS_LAYOUT),
       replies(std::make_shared<BitmapMailbox>(2)),
       generation(std::make_shared<std::atomic<int64>>(0)), standalone(standalone) {
-  SetViewUIColor(B_DOCUMENT_BACKGROUND_COLOR);
-  SetLowUIColor(B_DOCUMENT_BACKGROUND_COLOR);
-  SetHighUIColor(B_DOCUMENT_TEXT_COLOR);
+  SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
+  SetLowUIColor(B_PANEL_BACKGROUND_COLOR);
+  SetHighUIColor(B_PANEL_TEXT_COLOR);
   SetExplicitMinSize(BSize(180, 128));
   SetExplicitPreferredSize(BSize(280, 400));
 
@@ -430,6 +434,9 @@ ImagePreview::ImagePreview(bool standalone)
   closeQuickView->ResizeTo(closeQuickView->Bounds().Height(), closeQuickView->Bounds().Height());
   closeQuickView->SetName("close quick view");
   closeQuickView->SetToolTip("Close Quick view (Esc)");
+  dockControl = addButton("↗", Listi::kDetachInspector);
+  const float side = std::ceil(be_plain_font->Size()) + 10;
+  dockControl->ResizeTo(side, side);
 }
 ImagePreview::~ImagePreview() {
   if (!textScroll->Parent())
@@ -440,6 +447,7 @@ ImagePreview::~ImagePreview() {
 }
 void ImagePreview::AttachedToWindow() {
   closeQuickView->SetTarget(Window());
+  dockControl->SetTarget(Window());
   fileAction->SetTarget(this);
   detachEditor->SetTarget(this);
   doneEditing->SetTarget(this);
@@ -454,7 +462,12 @@ void ImagePreview::AttachedToWindow() {
   loader = new Loader(BMessenger(this), generation, replies, terminal);
   Listi::StartReadWorker(loader);
   if (!path.empty() && !editor)
-    Request(1);
+    Request(page);
+}
+void ImagePreview::AllAttached() {
+  BView::AllAttached();
+  if (editor)
+    RefreshInspectorEditorTarget(editor);
 }
 void ImagePreview::DetachedFromWindow() {
   StopWatching(BMessenger(be_app), 'isav');
@@ -462,11 +475,13 @@ void ImagePreview::DetachedFromWindow() {
   // that posts completed reads to the token from the previous layout.
   ++*generation;
   Listi::RetireReadWorker(loader);
+  playing = false;
   terminal->Take();
   replies->Clear();
   BView::DetachedFromWindow();
 }
-bool ImagePreview::ShowFile(const std::string &p) {
+bool ImagePreview::ShowFile(const std::string &selection) {
+  const std::string p = Listi::InterruptedVolumes().Contains(selection) ? "" : selection;
   if (editor) {
     // Selection and listing updates can arrive while a draft is open.
     // Keep the document pinned, but restore the newest preview on exit.
@@ -478,6 +493,8 @@ bool ImagePreview::ShowFile(const std::string &p) {
   }
   if (path == p && !submissionFailed)
     return true;
+  if (Listi::InterruptedVolumes().Contains(path))
+    Listi::RetireReadWorker(loader);
   path = p;
   photoView = {};
   draggingPhoto = false;
@@ -491,7 +508,7 @@ bool ImagePreview::ShowFile(const std::string &p) {
   return true;
 }
 bool ImagePreview::BeginEditing(const std::string &p) {
-  if (p.empty() || Listi::IsVirtual(p))
+  if (p.empty() || Listi::IsVirtual(p) || Listi::InterruptedVolumes().Contains(p))
     return false;
   if (editor && (path == p || !CloseEditor()))
     return path == p;
@@ -540,6 +557,12 @@ void ImagePreview::Request(int requestedPage, bool playback) {
   int64 serial = ++*generation;
   terminal->Take();
   replies->Clear();
+  if (Listi::InterruptedVolumes().Contains(path)) {
+    Listi::RetireReadWorker(loader);
+    path.clear();
+    kind = Inspector::Kind::Unknown;
+    playing = false;
+  }
   if (!loader && Window() && !path.empty()) {
     loader = new Loader(BMessenger(this), generation, replies, terminal);
     Listi::StartReadWorker(loader);
@@ -632,7 +655,8 @@ void ImagePreview::MessageReceived(BMessage *m) {
       Request(1);
     return;
   case kFileAction: {
-    if (!ready || path.empty() || Listi::IsVirtual(path))
+    if (!ready || path.empty() || Listi::IsVirtual(path) ||
+        Listi::InterruptedVolumes().Contains(path))
       return;
     if (kind == Inspector::Kind::Audio || kind == Inspector::Kind::Video) {
       entry_ref ref;
@@ -808,6 +832,17 @@ void ImagePreview::SetQuickViewCloseVisible(bool visible) {
     FrameResized(Bounds().Width(), Bounds().Height());
 }
 
+void ImagePreview::SetDockControl(bool floating) {
+  dockControl->SetName(floating ? "dock inspector" : "detach inspector");
+  dockControl->SetLabel(floating ? "↙" : "↗");
+  dockControl->SetToolTip(floating ? "Dock Inspector in its browser"
+                                  : "Detach Inspector to its own window");
+  dockControl->SetMessage(new BMessage(floating ? Listi::kDockInspector
+                                                : Listi::kDetachInspector));
+  Listi::SetViewVisible(dockControl, true);
+  FrameResized(Bounds().Width(), Bounds().Height());
+}
+
 void ImagePreview::FrameResized(float, float) {
   LayoutControls();
   Invalidate();
@@ -828,7 +863,11 @@ void ImagePreview::LayoutControls() {
   const float width = Bounds().Width(), height = Bounds().Height();
   const float closeLeft = width - closeQuickView->Bounds().Width() - 5;
   closeQuickView->MoveTo(std::max(0.f, closeLeft), 3);
-  const float actionsRight = closeQuickView->IsHidden(closeQuickView) ? width : closeLeft;
+  float actionsRight = closeQuickView->IsHidden(closeQuickView) ? width : closeLeft;
+  if (!dockControl->IsHidden(dockControl)) {
+    actionsRight -= dockControl->Bounds().Width() + 4;
+    dockControl->MoveTo(std::max(0.f, actionsRight), 3);
+  }
   photoActions->MoveTo(std::max(0.f, actionsRight - photoActions->Bounds().Width() - 8), 3);
   fileAction->MoveTo(std::max(0.f, actionsRight - fileAction->Bounds().Width() - 8), 3);
   const float doneLeft = actionsRight - doneEditing->Bounds().Width() - 8;
@@ -836,8 +875,8 @@ void ImagePreview::LayoutControls() {
   const float detachLeft = doneLeft - detachEditor->Bounds().Width() - 5;
   detachEditor->MoveTo(std::max(0.f, detachLeft), 3);
   if (editor) {
-    editor->MoveTo(0, 35);
-    editor->ResizeTo(width, std::max(0.f, height - 35));
+    editor->MoveTo(1, 35);
+    editor->ResizeTo(std::max(0.f, width - 2), std::max(0.f, height - 36));
   }
   if (textScroll->Parent()) {
     textScroll->MoveTo(8, 35);
@@ -849,17 +888,21 @@ void ImagePreview::LayoutControls() {
   play->MoveTo(12, buttonTop);
 }
 void ImagePreview::Draw(BRect update) {
-  SetHighUIColor(B_DOCUMENT_BACKGROUND_COLOR);
+  SetHighUIColor(B_PANEL_BACKGROUND_COLOR);
   FillRect(update);
-  SetHighUIColor(B_DOCUMENT_TEXT_COLOR);
-  BString title(editor ? "Edit"
-                      : closeQuickView->IsHidden(closeQuickView) ? "Inspector" : "Quick view");
-  float right = Bounds().right;
-  for (auto button : {photoActions, fileAction, closeQuickView, detachEditor, doneEditing})
-    if (!button->IsHidden(button))
-      right = std::min(right, button->Frame().left);
-  TruncateString(&title, B_TRUNCATE_END, std::max(0.f, right - 16));
-  DrawString(title, BPoint(12, 22));
+  SetHighUIColor(B_CONTROL_BORDER_COLOR);
+  StrokeRect(Bounds());
+  SetHighUIColor(B_PANEL_TEXT_COLOR);
+  if (editor || !closeQuickView->IsHidden(closeQuickView)) {
+    BString title(editor ? "Edit" : "Quick view");
+    float right = Bounds().right;
+    for (auto button : {photoActions, fileAction, closeQuickView, dockControl,
+                        detachEditor, doneEditing})
+      if (!button->IsHidden(button))
+        right = std::min(right, button->Frame().left);
+    TruncateString(&title, B_TRUNCATE_END, std::max(0.f, right - 16));
+    DrawString(title, BPoint(12, 22));
+  }
   if (editor)
     return;
   BRect area = Bounds().InsetByCopy(12, 12);
@@ -899,8 +942,14 @@ void ImagePreview::Draw(BRect update) {
     SetDrawingMode(B_OP_COPY);
   }
   TruncateString(&line, B_TRUNCATE_END, std::max(0.f, Bounds().Width() - 24));
+  if (path.empty()) {
+    font_height font;
+    GetFontHeight(&font);
+    DrawString(line, BPoint(8, Bounds().bottom - std::ceil(font.descent) - 3));
+    return;
+  }
   DrawString(line, BPoint(12, Bounds().bottom - 26));
-  BString name(path.empty() ? "" : Listi::LocationLeaf(path).c_str());
+  BString name(Listi::LocationLeaf(path).c_str());
   TruncateString(&name, B_TRUNCATE_MIDDLE,
                  std::max(0.f, Bounds().Width() - 24));
   DrawString(name, BPoint(12, Bounds().bottom - 9));

@@ -15,10 +15,21 @@
 #include <fs_attr.h>
 #include <sys/stat.h>
 #include <sys/file.h>
+#include <vector>
 namespace fs=std::filesystem;
 using Listi::HistoryStore;
 namespace {
 std::atomic_bool *cancelAfterWrite = nullptr;
+const struct stat *oversizedFixture = nullptr;
+}
+
+extern "C" int __real_fstat(int, struct stat *);
+extern "C" int __wrap_fstat(int fd, struct stat *info) {
+  const int result = __real_fstat(fd, info);
+  if (result == 0 && oversizedFixture && info->st_dev == oversizedFixture->st_dev &&
+      info->st_ino == oversizedFixture->st_ino)
+    info->st_size = 256LL * 1024 * 1024 + 1;
+  return result;
 }
 
 extern "C" ssize_t __real_write(int, const void *, size_t);
@@ -59,10 +70,27 @@ int main() {
   const unsigned char binary[]={0,255,1};
   attr(source/"dir/note","Count",B_INT32_TYPE,&answer,sizeof(answer));
   attr(source/"dir/note","Bytes",B_RAW_TYPE,binary,sizeof(binary));
+  const std::string firstChunk(16 * 1024, 'a'), secondChunk(16 * 1024, 'b');
+  const std::string chunkedAttribute = firstChunk + secondChunk + "tail";
+  {
+    const int fd = open((source/"dir/note").c_str(), O_RDONLY);
+    assert(fd >= 0);
+    assert(fs_write_attr(fd, "Chunked", B_RAW_TYPE, 0, firstChunk.data(), firstChunk.size()) ==
+           ssize_t(firstChunk.size()));
+    assert(fs_write_attr(fd, "Chunked", B_RAW_TYPE, firstChunk.size(),
+                         secondChunk.data(), secondChunk.size()) == ssize_t(secondChunk.size()));
+    assert(fs_write_attr(fd, "Chunked", B_RAW_TYPE, firstChunk.size() + secondChunk.size(),
+                         "tail", 4) == 4);
+    close(fd);
+  }
   attr(source/"dir/note","BEOS:TYPE",B_MIME_STRING_TYPE,"text/plain",11);
   attr(source/"dir","Project",B_STRING_TYPE,"alpha",6);
   attr(source/"pointer","Status",B_STRING_TYPE,"link",5);
   attr(source, "Listi:RestoreIncomplete", B_STRING_TYPE, "user data", 10);
+  const timespec oldTimes[] = {{0, UTIME_OMIT}, {946684800, 125000000}};
+  assert(utimensat(AT_FDCWD, (source/"pointer").c_str(), oldTimes, AT_SYMLINK_NOFOLLOW) == 0);
+  struct stat originalLink{};
+  assert(lstat((source/"pointer").c_str(), &originalLink) == 0);
   HistoryStore history(source,store);
   std::atomic_bool cancel(false);
   auto count = [&] {
@@ -84,14 +112,18 @@ int main() {
     assert(fd>=0);
     attr_info info{};
     assert(fs_stat_attr(fd,name,&info)==0 && info.type==type && info.size==ssize_t(length));
-    char data[128];
-    assert(fs_read_attr(fd,name,type,0,data,sizeof(data))==ssize_t(length));
-    assert(memcmp(data,expected,length)==0);
+    std::vector<char> data(length + 1);
+    assert(fs_read_attr(fd,name,type,0,data.data(),data.size())==ssize_t(length));
+    assert(memcmp(data.data(),expected,length)==0);
     close(fd);
   };
-  auto reject = [](auto callback, const char *label) {
+  auto reject = [](auto callback, const char *label, const char *diagnostic = "") {
     try { callback(); }
-    catch(const std::exception &e) { std::cout << "PASS " << label << ": " << e.what() << std::endl; return; }
+    catch(const std::exception &e) {
+      assert(std::string(e.what()).find(diagnostic) != std::string::npos);
+      std::cout << "PASS " << label << ": " << e.what() << std::endl;
+      return;
+    }
     assert(false);
   };
   assert(count()==0 && fs::is_empty(store));
@@ -132,8 +164,18 @@ int main() {
   assert(fs::exists(base/"one/dir/note") && fs::exists(base/"two/dir/note") && fs::exists(base/"three/dir/renamed"));
   assert(!fs::exists(base/"last/dir/renamed"));
   assert(fs::read_symlink(base/"one/pointer")=="dir/note");
+  struct stat restoredLink{};
+  assert(lstat((base/"one/pointer").c_str(), &restoredLink) == 0 &&
+         restoredLink.st_mtim.tv_sec == originalLink.st_mtim.tv_sec &&
+         restoredLink.st_mtim.tv_nsec == originalLink.st_mtim.tv_nsec);
+  assert(fs::is_symlink(base/"last/pointer") && !fs::exists(base/"last/pointer") &&
+         lstat((base/"last/pointer").c_str(), &restoredLink) == 0 &&
+         restoredLink.st_mtim.tv_sec == originalLink.st_mtim.tv_sec &&
+         restoredLink.st_mtim.tv_nsec == originalLink.st_mtim.tv_nsec);
   checkAttr(base/"one/dir/note","Count",B_INT32_TYPE,&answer,sizeof(answer));
   checkAttr(base/"one/dir/note","Bytes",B_RAW_TYPE,binary,sizeof(binary));
+  checkAttr(base/"one/dir/note", "Chunked", B_RAW_TYPE,
+            chunkedAttribute.data(), chunkedAttribute.size());
   checkAttr(base/"one/dir/note","BEOS:TYPE",B_MIME_STRING_TYPE,"text/plain",11);
   checkAttr(base/"one/dir","Project",B_STRING_TYPE,"alpha",6);
   checkAttr(base/"one/pointer","Status",B_STRING_TYPE,"link",5);
@@ -170,6 +212,30 @@ int main() {
   fs::rename(source,base/"source-offline");
   reject([&]{ history.Save(cancel); }, "source missing");
   assert(count()==5);
+  {
+    HistoryStore savedHistory(store);
+    assert(savedHistory.SourcePath() == source && savedHistory.Browse(first).HasMessage("child"));
+    assert(savedHistory.Points().HasString("point"));
+    reject([&]{ savedHistory.Save(cancel); }, "read-only store cannot save", "browsing and restoring only");
+    reject([&]{ savedHistory.FolderIdentity(); }, "read-only store cannot approve a source",
+           "browsing and restoring only");
+    reject([&]{ savedHistory.SaveAutomatically(cancel, BMessage()); },
+           "read-only store cannot save automatically", "browsing and restoring only");
+    reject([&]{ savedHistory.Restore(first, source, cancel); }, "cannot restore over missing original path");
+    reject([&]{ savedHistory.Restore(first, store/"new-file", cancel, "same"); },
+           "cannot restore into history store");
+    assert(!fs::exists(source) && !fs::exists(store/"new-file"));
+    savedHistory.Restore(first, base/"without-source", cancel);
+    assert(fs::exists(base/"without-source/dir/note"));
+    reject([&]{ savedHistory.Restore(first, base/"without-source", cancel); },
+           "read-only folder restore remains exclusive");
+    savedHistory.Restore(first, base/"file-without-source", cancel, "dir/note");
+    checkAttr(base/"file-without-source", "Count", B_INT32_TYPE, &answer, sizeof(answer));
+    reject([&]{ savedHistory.Restore(first, base/"file-without-source", cancel, "dir/note"); },
+           "read-only file restore remains exclusive");
+    reject([&]{ HistoryStore unrelated((base/"without-source").string()); },
+           "unbound folder cannot be opened as saved history", "existing Listi history folder");
+  }
   fs::rename(base/"source-offline",source);
   fs::rename(store,base/"old");
   reject([&]{ history.Save(cancel); }, "store missing");
@@ -191,6 +257,32 @@ int main() {
   assert(fs::exists(base/"automatic/future"));
   std::cout << "PASS automatic saves only changed trees and uses the manual restore format" << std::endl;
 
+  fs::path originalObject;
+  for (const auto &entry : fs::directory_iterator(store)) {
+    if (entry.path().filename().string().find("object-") != 0) continue;
+    std::string contents;
+    std::ifstream(entry.path()) >> contents;
+    if (contents == "original") originalObject = entry.path();
+  }
+  assert(!originalObject.empty());
+  const auto cleanPoint = latest();
+  make(originalObject, "corrupt!");
+  assert(fs::file_size(originalObject) == fs::file_size(source/"same"));
+  reject([&]{ history.Save(cancel); }, "manual rejects a same-length corrupt reused object",
+         "damaged existing history object");
+  reject([&]{ history.SaveAutomatically(cancel, approved); },
+         "unchanged automatic save still verifies reused objects", "damaged existing history object");
+  reject([&]{ history.Restore(first, base/"damaged-single", cancel, "dir/note"); },
+         "single-file restore detects same-length corruption", "Saved file content is damaged");
+  checkAttr(base/"damaged-single", "Listi:RestoreIncomplete", B_STRING_TYPE,
+            incomplete, sizeof(incomplete));
+  assert(count() == 6 && latest() == cleanPoint && objects() == 3);
+  make(originalObject, "original");
+  assert(!history.SaveAutomatically(cancel, approved) && latest() == cleanPoint);
+  history.Restore(first, base/"recovered-single", cancel, "dir/note");
+  std::ifstream(base/"recovered-single") >> recovered;
+  assert(recovered == "original");
+
   int otherWriter = open(store.c_str(), O_RDONLY | O_DIRECTORY);
   assert(otherWriter >= 0 && flock(otherWriter, LOCK_EX | LOCK_NB) == 0);
   reject([&]{ history.Save(cancel); }, "another writer holds the folder");
@@ -203,6 +295,17 @@ int main() {
   make(source/"private", "never approved");
   HistoryStore replacement(source,store);
   reject([&]{ replacement.SaveAutomatically(cancel, approved); }, "replacement source not approved");
+  HistoryStore readOnlyWithReplacement(store);
+  assert(readOnlyWithReplacement.SourcePath() == source);
+  reject([&]{ readOnlyWithReplacement.Restore(first, source/"copy", cancel, "same"); },
+         "cannot restore inside the reused source path");
+  fs::create_directory_symlink(source, base/"replacement-alias");
+  reject([&]{ readOnlyWithReplacement.Restore(first, base/"replacement-alias/copy", cancel, "same"); },
+         "cannot restore through an alias into the reused source path");
+  assert(!fs::exists(source/"copy"));
+  readOnlyWithReplacement.Restore(first, base/"file-with-replacement", cancel, "same");
+  std::ifstream(base/"file-with-replacement") >> recovered;
+  assert(recovered == "original");
   assert(count() == 6);
 
   fs::remove_all(source);
@@ -216,6 +319,41 @@ int main() {
   reject([&]{ history.SaveAutomatically(cancel, approved); }, "automatic entry budget");
   assert(count() == 6 && objects() == beforeOversize);
   fs::remove_all(wide);
+
+  const auto tooLarge = source/"too-large";
+  make(tooLarge, "tiny real file");
+  struct stat fixture{};
+  assert(stat(tooLarge.c_str(), &fixture) == 0 && fixture.st_size < 1024);
+  // Simulate only the source size; no enormous BFS allocation or cleanup.
+  oversizedFixture = &fixture;
+  reject([&]{ history.SaveAutomatically(cancel, approved); }, "automatic read budget",
+         "reached its size limit");
+  oversizedFixture = nullptr;
+  assert(count() == 6 && objects() == beforeOversize);
+  fs::remove(tooLarge);
+
+  const auto attrTree = source/"attribute-tree";
+  fs::create_directory(attrTree);
+  // Keep each BFS journal write small while exceeding both aggregate limits.
+  const std::vector<char> attributePayload(16 * 1024, 'x');
+  for (int node = 0; node < 65; ++node) {
+    const auto folder = attrTree/std::to_string(node);
+    fs::create_directory(folder);
+    for (int field = 0; field < 64; ++field) {
+      const auto name = "payload-" + std::to_string(field);
+      attr(folder, name.c_str(), B_RAW_TYPE, attributePayload.data(), attributePayload.size());
+    }
+  }
+  reject([&]{ history.SaveAutomatically(cancel, approved); }, "automatic metadata budget",
+         "metadata exceeds 4 MiB");
+  assert(count() == 6 && objects() == beforeOversize);
+  reject([&]{ history.Save(cancel); }, "manual cumulative metadata budget across folders",
+         "manifest exceeds 64 MiB");
+  assert(count() == 6 && latest() == cleanPoint && objects() == beforeOversize);
+  fs::remove_all(attrTree);
+  history.Restore(cleanPoint, base/"after-metadata-rejection", cancel, "same");
+  std::ifstream(base/"after-metadata-rejection") >> recovered;
+  assert(recovered == "original");
 
   const auto saved = store/latest();
   for (int i = 0; i < 18; ++i)

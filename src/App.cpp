@@ -23,9 +23,14 @@
 #include <map>
 #include <mutex>
 #include <vector>
+#include <utility>
 #include <unistd.h>
 #include <cstring>
 #include <exception>
+
+namespace {
+constexpr uint32 kConfirmAppCLIQuit = 'accl';
+}
 
 class App : public BApplication {
   BLooper *services = nullptr;
@@ -38,6 +43,8 @@ class App : public BApplication {
   std::vector<BrowserRequest> requests;
   bool ready = false;
   std::vector<std::string> initialHistory;
+  BMessenger cliQuitAlert;
+  bool closeCLIOnQuit = false;
 
   void Broadcast(BMessage *message) {
     for (auto &entry : browsers)
@@ -187,37 +194,92 @@ public:
     }
   }
   bool QuitRequested() override {
-    if (Listi::FolderHistoryBusy()) {
-      PostMainWindowNotice("Finish or cancel the folder history operation before quitting Listi.");
-      return false;
-    }
+    const bool closeCLI = std::exchange(closeCLIOnQuit, false);
     if (CurrentMessage() && CurrentMessage()->GetBool("lastBrowser", false)) {
       Drain();
       if (!browsers.empty())
-        return false;
+        return false; // A queued window request superseded automatic exit.
     }
+    if (!CheckSharedQuitBlockers())
+      return false;
+    std::vector<BMessenger> cliOwners;
     for (const auto &entry : browsers) {
       auto target = entry.second;
       if (!target.IsValid())
         continue;
-      if (target.LockTargetWithTimeout(500000) != B_OK)
+      if (target.LockTargetWithTimeout(500000) != B_OK) {
+        ShowQuitBlocker("A Listi window is busy. Wait for it to respond, then try again.");
         return false;
+      }
       BLooper *looper = nullptr;
       target.Target(&looper);
-      const bool allowed = BrowserAllowsQuit(static_cast<BWindow *>(looper));
+      auto *window = static_cast<BWindow *>(looper);
+      const bool allowed = CheckBrowserQuitBlockers(window);
+      if (allowed && BrowserHasCLIs(window))
+        cliOwners.push_back(target);
       looper->Unlock();
       if (!allowed)
         return false;
     }
     if (services) {
       BMessage fence(kDrainServices), reply;
-      if (BMessenger(services).SendMessage(&fence, &reply, 500000, 2000000) != B_OK)
+      if (BMessenger(services).SendMessage(&fence, &reply, 500000, 2000000) != B_OK) {
+        ShowQuitBlocker("Listi is still processing requests. Wait for them to finish, then try again.");
+        return false;
+      }
+    }
+    if (!cliOwners.empty() && !closeCLI) {
+      if (!cliQuitAlert.IsValid())
+        cliQuitAlert = ConfirmClosingCLIs(BMessenger(this), kConfirmAppCLIQuit, true);
+      return false;
+    }
+    for (auto &target : cliOwners) {
+      if (!target.IsValid())
+        continue;
+      if (target.LockTargetWithTimeout(500000) != B_OK) {
+        ShowQuitBlocker("A Listi window is busy. Wait for it to respond, then try again.");
+        return false;
+      }
+      BLooper *looper = nullptr;
+      target.Target(&looper);
+      const bool closed = CloseBrowserCLIs(static_cast<BWindow *>(looper));
+      looper->Unlock();
+      if (!closed)
         return false;
     }
-    return InspectorEditorsAllowQuit() && FilePropertiesAllowQuit() && OpenWithAllowQuit() &&
-           ArchiveEditorsAllowQuit() && BApplication::QuitRequested();
+    // Haiku can close independently registered windows in either order.
+    // Return each popup's live view to its owner before the native quit loop.
+    const auto suspendOperations = [this](bool suspend) {
+      bool all = true;
+      for (const auto &entry : browsers) {
+        const auto &target = entry.second;
+        if (!target.IsValid())
+          continue;
+        if (target.LockTargetWithTimeout(500000) != B_OK) {
+          all = false;
+          continue;
+        }
+        BLooper *looper = nullptr;
+        target.Target(&looper);
+        SuspendBrowserOperationsWindow(static_cast<BWindow *>(looper), suspend);
+        looper->Unlock();
+      }
+      return all;
+    };
+    if (!suspendOperations(true) || !BApplication::QuitRequested()) {
+      suspendOperations(false);
+      ShowQuitBlocker("A Listi window is not ready to close. Check open windows or wait for their work to finish, then try again.");
+      return false;
+    }
+    return true;
   }
   void MessageReceived(BMessage *m) override {
+    if (m->what == kConfirmAppCLIQuit) {
+      cliQuitAlert = {};
+      if (m->GetInt32("which", 0) == 1)
+        closeCLIOnQuit = PostMessage(B_QUIT_REQUESTED) == B_OK;
+      return;
+    }
     if (m->what == Listi::kFolderHistory) {
       const auto *path = m->GetString("source", "");
       if (*path == '/') {
@@ -233,6 +295,10 @@ public:
     }
     if (m->what == B_SILENT_RELAUNCH && prefs.separateWindows) {
       Queue({});
+      return;
+    }
+    if (m->what == kVolumeUnavailable) {
+      Broadcast(m);
       return;
     }
     if (m->what == kBrowserClosed) {

@@ -4,14 +4,18 @@
 #include "../src/Common.h"
 #include "../src/FunctionButtonBank.h"
 #include "../src/ImagePreview.h"
+#include "../src/InspectorEditor.h"
 #include "../src/FileClipboard.h"
+#include "../src/FolderTabs.h"
 #include "../src/MainWindow.h"
 #include "../src/MainWindowMenu.h"
 #include "../src/Pane.h"
+#include "../src/UnavailableVolume.h"
 #include "../src/PanelTools.h"
 #include "../src/PaneSidebar.h"
 #include "../src/SavedPlaces.h"
 #include "../src/SavedSearches.h"
+#include "../src/TerminalPanel.h"
 #include "../src/WindowKeyFilter.h"
 #include "../src/WorkspaceSplit.h"
 #include "../src/WorkspaceEditor.h"
@@ -25,6 +29,7 @@
 #include <MenuBar.h>
 #include <MenuField.h>
 #include <MenuItem.h>
+#include <NodeMonitor.h>
 #include <TextControl.h>
 #include <TextView.h>
 #include <Window.h>
@@ -34,7 +39,9 @@
 #include <cassert>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <stdexcept>
 #include <sys/stat.h>
@@ -203,6 +210,253 @@ static void CheckWorkspaceSplit(Listi::WorkspaceSplit &split, BView *first) {
   assert(near(split.ItemWeight(0), 0.48f));
   split.RememberWeights(layout, true);
   assert(near(layout.splitWeights[2], 0.2f));
+}
+
+static void CheckFloatingInspector(BApplication &app) {
+  char directory[] = "/tmp/Listi-floating-inspector-XXXXXX";
+  assert(mkdtemp(directory));
+  const auto root = std::filesystem::canonical(directory);
+  const std::string first = (root / "first.txt").string();
+  const std::string second = (root / "second.txt").string();
+  const std::string content = "Second file\n";
+  std::ofstream(first) << "First file\n";
+  std::ofstream(second) << content;
+  Preferences prefs;
+  prefs.workspace = Workspace::tviskipt;
+  prefs.SetPreview(true);
+  BrowserRequest request;
+  request.path = root.string();
+  auto *browser = CreateMainWindow(prefs, {}, {}, false, {}, false, request);
+  auto *other = CreateMainWindow(prefs, {}, {}, false, {}, false, request);
+  BMessenger owner(browser), independent(other);
+  browser->Show();
+  other->Show();
+  auto with = [](const BMessenger &target, auto check) {
+    if (target.LockTargetWithTimeout(500000) != B_OK)
+      return false;
+    BLooper *looper = nullptr;
+    target.Target(&looper);
+    const bool result = check(*static_cast<BWindow *>(looper));
+    looper->Unlock();
+    return result;
+  };
+  auto wait = [](auto check, const char *label) {
+    const auto until = system_time() + 8000000;
+    while (!check()) {
+      if (system_time() >= until) {
+        fprintf(stderr, "FAIL %s\n", label);
+        std::exit(1);
+      }
+      snooze(20000);
+    }
+    printf("PASS %s\n", label);
+  };
+  auto select = [&](const BMessenger &target, const char *name) {
+    return with(target, [&](BWindow &window) {
+      auto *panel = dynamic_cast<Listi::PanelTools *>(window.FindView("first panel tools"));
+      if (!panel || !panel->Files().LocationValid() || panel->Files().IsScanning())
+        return false;
+      panel->Files().MatchPattern(name, true);
+      return !panel->Files().SelectedPath().empty();
+    });
+  };
+  auto find = [&](const char *title) {
+    for (int32 i = 0; i < app.CountWindows(); ++i) {
+      auto *window = app.WindowAt(i);
+      if (window && window->Title() && std::string(window->Title()) == title)
+        return BMessenger(window);
+    }
+    return BMessenger{};
+  };
+  auto workspace = [&] {
+    BMessage request(B_GET_PROPERTY), reply;
+    request.AddSpecifier("Workspace");
+    if (owner.SendMessage(&request, &reply, 1000000, 1000000) != B_OK)
+      return std::string{};
+    return std::string(reply.GetString("result", ""));
+  };
+  ImagePreview *original = nullptr;
+  wait([&] { return select(owner, "first.txt") && with(owner, [&](BWindow &window) {
+    original = dynamic_cast<ImagePreview *>(window.FindView("inspector"));
+    return original && !original->IsHidden();
+  }); }, "browser exposes a docked Inspector");
+  assert(owner.SendMessage(Listi::kDetachInspector) == B_OK);
+  BMessenger floating;
+  wait([&] {
+    floating = find("Listi: Inspector");
+    return with(floating, [&](BWindow &window) {
+      return window.FindView("inspector") == original && original->File() == first;
+    });
+  }, "detach the same Inspector and preview the browser selection");
+  assert(with(floating, [&](BWindow &window) {
+    window.ResizeTo(640, 460);
+    return window.Bounds().Width() == 640 && window.Bounds().Height() == 460;
+  }));
+  assert(owner.SendMessage(kQuickView) == B_OK);
+  assert(workspace() == WorkspaceName(Workspace::tviskipt));
+  wait([&] { return with(owner, [&](BWindow &window) {
+    auto *right = window.FindView("second panel tools");
+    return right && !right->IsHidden() && !window.FindView("inspector");
+  }); }, "Quick view keeps both panels docked and raises the floating Inspector");
+  wait([&] { return select(owner, "second.txt") && select(independent, "first.txt"); },
+       "change selections in both browsers");
+  wait([&] { return with(floating, [&](BWindow &) { return original->File() == second; }); },
+       "Inspector follows its owner, not the other browser");
+  assert(owner.SendMessage(kEdit) == B_OK);
+  BTextView *body = nullptr;
+  wait([&] { return with(floating, [&](BWindow &window) {
+    body = dynamic_cast<BTextView *>(window.FindView("editor text"));
+    if (!body)
+      return false;
+    body->Insert("Unsaved draft ");
+    return original->HasEditor();
+  }); }, "Edit opens the Inspector's embedded editor while floating");
+  BMessage change(kWorkspace);
+  change.AddInt32("workspace", int32(Workspace::smidja));
+  assert(owner.SendMessage(&change) == B_OK);
+  wait([&] { return workspace() == WorkspaceName(Workspace::smidja) &&
+    with(floating, [&](BWindow &window) { return window.FindView("editor text") == body; });
+  }, "Smiðja keeps the detached Inspector and its draft");
+  assert(!InspectorEditorsAllowQuit());
+  assert(owner.SendMessage(B_QUIT_REQUESTED) == B_OK);
+  wait([&] {
+    return with(find("Cannot close Listi"), [&](BWindow &window) {
+      auto *alert = dynamic_cast<BAlert *>(&window);
+      return owner.IsValid() && alert && alert->ButtonAt(0)->Invoke() == B_OK;
+    });
+  }, "dirty floating editor blocks closing its owner and remains open");
+  assert(independent.SendMessage(B_QUIT_REQUESTED) == B_OK);
+  wait([&] { return !independent.IsValid() && floating.IsValid(); },
+       "dirty floating editor does not block an unrelated browser from closing");
+  assert(floating.SendMessage(B_QUIT_REQUESTED) == B_OK);
+  wait([&] { return !floating.IsValid() && with(owner, [&](BWindow &window) {
+    auto *editorText = dynamic_cast<BTextView *>(window.FindView("editor text"));
+    return window.FindView("inspector") == original && editorText == body &&
+           std::string(editorText->Text()).find("Unsaved draft ") != std::string::npos;
+  }); }, "closing the floating window redocks the same unsaved draft");
+  assert(owner.SendMessage(Listi::kDetachInspector) == B_OK);
+  wait([&] {
+    floating = find("Listi: Inspector");
+    return with(floating, [&](BWindow &window) {
+      if (window.FindView("editor text") != body)
+        return false;
+      body->SetText(content.c_str());
+      return true;
+    });
+  }, "detach the existing draft again without creating another Inspector");
+  assert(InspectorEditorsAllowQuit());
+  assert(owner.SendMessage(B_QUIT_REQUESTED) == B_OK);
+  wait([&] { return !owner.IsValid() && !floating.IsValid(); },
+       "closing the clean owner also closes its detached Inspector");
+  assert(unlink(first.c_str()) == 0 && unlink(second.c_str()) == 0 && rmdir(directory) == 0);
+}
+
+static void CheckWindowCLIQuit(BApplication &app) {
+  auto *window = CreateMainWindow(Preferences{}, BMessenger{}, {}, false, {}, false);
+  auto *other = CreateMainWindow(Preferences{}, BMessenger{}, {}, false, {}, false);
+  auto startCLI = [](BWindow &owner, uint32 action, int lister) {
+    BMessage open(action);
+    open.AddInt32("terminal lister", lister);
+    assert(owner.PostMessage(&open) == B_OK);
+  };
+  BMessenger owner(window), survivor(other), detached;
+  window->Show();
+  other->Show();
+  startCLI(*window, Listi::kLeftCLI, 0);
+  startCLI(*window, Listi::kShowFloatingTerminal, 1);
+  startCLI(*other, Listi::kLeftCLI, 0);
+
+  auto wait = [](auto condition) {
+    for (int i = 0; i < 250; ++i) {
+      if (condition())
+        return;
+      snooze(20000);
+    }
+    assert(false && "Timed out waiting for CLI quit state");
+  };
+  auto findWindow = [&](const std::string &title, bool prefix = false) {
+    for (int32 i = 0; i < app.CountWindows(); ++i) {
+      auto *candidate = app.WindowAt(i);
+      if (candidate && candidate->Title() && (prefix ? std::string(candidate->Title()).find(title) == 0 : candidate->Title() == title))
+        return BMessenger(candidate);
+    }
+    return BMessenger{};
+  };
+  auto hasCLI = [](BMessenger target, int lister) {
+    if (target.LockTargetWithTimeout(500000) != B_OK)
+      return false;
+    BLooper *looper = nullptr;
+    target.Target(&looper);
+    auto *terminal = dynamic_cast<Listi::TerminalPanel *>(
+        static_cast<BWindow *>(looper)->FindView(Listi::TerminalName(lister)));
+    const bool active = terminal && terminal->Active() && !terminal->IsHidden();
+    looper->Unlock();
+    return active;
+  };
+  wait([&] {
+    detached = findWindow(std::string(Listi::TerminalName(1)) + " | Tab 1: ", true);
+    return hasCLI(owner, 0) && hasCLI(detached, 1) && hasCLI(survivor, 0);
+  });
+
+  auto withTabs = [](BMessenger target, auto action) {
+    if (target.LockTargetWithTimeout(500000) != B_OK)
+      return false;
+    BLooper *looper = nullptr;
+    target.Target(&looper);
+    auto &browser = *static_cast<BWindow *>(looper);
+    auto *panel = dynamic_cast<Listi::PanelTools *>(browser.FindView("first panel tools"));
+    const bool result = panel && action(browser, panel->FolderBar());
+    looper->Unlock();
+    return result;
+  };
+  int64 activeTab = -1;
+  assert(withTabs(owner, [&](BWindow &browser, Listi::FolderTabs &tabs) {
+    const auto background = tabs.ActiveId();
+    for (int i = 0; i < 12; ++i) {
+      BMessage duplicate(Listi::kTabDuplicate);
+      duplicate.AddInt32("pane", 0);
+      browser.MessageReceived(&duplicate);
+    }
+    activeTab = tabs.ActiveId();
+    BMessage close(Listi::kTabClose);
+    close.AddInt32("pane", 0);
+    close.AddInt64("tab", background);
+    browser.MessageReceived(&close);
+    return tabs.Count() == 12 && tabs.CanReopen() && tabs.ActiveId() == activeTab;
+  }));
+  const auto tabsIntact = [&](BWindow &, Listi::FolderTabs &tabs) {
+    return tabs.Count() == 12 && tabs.CanReopen() && tabs.ActiveId() == activeTab;
+  };
+  assert(hasCLI(owner, 0) && hasCLI(detached, 1) && hasCLI(survivor, 0));
+  puts("Tab overflow and background close leave docked and detached CLIs active");
+
+  for (int answer : {0, 1}) {
+    assert(owner.SendMessage(B_QUIT_REQUESTED) == B_OK);
+    BMessenger alert;
+    wait([&] {
+      alert = findWindow("Close CLI sessions?");
+      return alert.IsValid();
+    });
+    assert(alert.LockTargetWithTimeout(500000) == B_OK);
+    BLooper *looper = nullptr;
+    alert.Target(&looper);
+    auto *dialog = dynamic_cast<BAlert *>(looper);
+    assert(dialog && dialog->DefaultButton() == dialog->ButtonAt(0));
+    assert(std::string(dialog->ButtonAt(answer)->Label()) ==
+           (answer == 0 ? "Cancel" : "Close CLI and window"));
+    assert(dialog->ButtonAt(answer)->Invoke() == B_OK);
+    looper->Unlock();
+    wait([&] { return !alert.IsValid(); });
+    if (answer == 0) {
+      assert(hasCLI(owner, 0) && hasCLI(detached, 1) && hasCLI(survivor, 0));
+      assert(withTabs(owner, tabsIntact));
+    }
+  }
+  wait([&] { return !owner.IsValid() && !detached.IsValid(); });
+  assert(hasCLI(survivor, 0));
+  assert(other->Lock());
+  other->Quit();
+  puts("Window quit: Cancel preserves CLIs; confirm closes this window's CLIs only");
 }
 
 int main(int argc, char **argv) {
@@ -657,7 +911,7 @@ int main(int argc, char **argv) {
     actions.ShowAddPicker(*pane, BMessenger(window));
   }
   send(kDelete);
-  assert(promptButton("Move to Trash"));
+  waitFor([&] { return promptButton("Move to Trash"); });
   send(kInlineCancel);
   assert(!promptButton("Move to Trash"));
   const auto originalMarker = marker + ".original";
@@ -751,11 +1005,106 @@ int main(int argc, char **argv) {
     puts("Clipboard: queued confirmation retained original bytes; next paste available");
   }
 
+  // Optional native fixture on a disposable ext4 volume, not a mock.
+  if (const char *ext4 = getenv("LISTI_TEST_EXT4_DIR")) {
+    std::string fixture = std::string(ext4) + "/Listi-trash-XXXXXX";
+    assert(mkdtemp(fixture.data()));
+    const auto torrent = fixture + "/test.torrent";
+    const auto original = fixture + "/original";
+    auto writeTorrent = [&] { assert(std::ofstream(torrent) << "fixture"); };
+    writeTorrent();
+    Listi::Job job;
+    job.action = Listi::Action::Trash;
+    job.sources = {torrent};
+    const auto direct = Listi::Run(job, {});
+    assert(direct.completed == 0 && direct.errors.size() == 1);
+    assert(direct.errors.front().find("Haiku has no Trash on this ext4 volume") !=
+           std::string::npos);
+    assert(access(torrent.c_str(), F_OK) == 0);
+
+    pane->Navigate(fixture.c_str());
+    waitFor([&] { return !pane->IsScanning(); });
+    auto ask = [&] {
+      assert(pane->MatchPattern("*.torrent", true) == 1);
+      send(kDelete);
+      waitFor([&] { return promptButton("Delete permanently"); });
+      const auto *question = dynamic_cast<BTextView *>(window->FindView("question"));
+      assert(question && std::string(question->Text()).find("No Trash on ext4 volumes") !=
+                         std::string::npos);
+      assert(promptButton("Cancel") && !promptButton("Move to Trash"));
+    };
+    ask();
+    send(kInlineCancel);
+    assert(!promptButton("Delete permanently"));
+    assert(access(torrent.c_str(), F_OK) == 0);
+
+    ask();
+    assert(rename(torrent.c_str(), original.c_str()) == 0);
+    writeTorrent();
+    assert(promptButton("Delete permanently")->Invoke() == B_OK);
+    waitFor([&] { return !promptButton("Delete permanently"); });
+    // The old inode and the new occupant must both survive this confirmation.
+    pane->Reload();
+    waitFor([&] { return !pane->IsScanning(); });
+    assert(access(torrent.c_str(), F_OK) == 0 && access(original.c_str(), F_OK) == 0);
+
+    ask();
+    assert(promptButton("Delete permanently")->Invoke() == B_OK);
+    waitFor([&] { return access(torrent.c_str(), F_OK) != 0; });
+    assert(access(original.c_str(), F_OK) == 0);
+    pane->Navigate(sourcePath.c_str());
+    waitFor([&] { return !pane->IsScanning(); });
+    assert(unlink(original.c_str()) == 0 && rmdir(fixture.c_str()) == 0);
+    puts("ext4 Trash: no silent fallback, Cancel, stale identity and explicit permanent delete OK");
+  }
+
+  // Simulate a lost mount with normal directories. Neither a stale pane
+  // nor a separate pane may start reading another folder below that mount.
+  pane->Navigate(elsewhere.c_str());
+  rightPane->Navigate(sourcePath.c_str());
+  waitFor([&] { return !pane->IsScanning() && !rightPane->IsScanning(); });
+  assert(pane->LocationValid() && rightPane->LocationValid());
+  // An ordinary unmount is not an I/O quarantine. Invalidate stale rows
+  // immediately, including when no Listi file operation has failed.
+  assert(rightPane->MatchPattern("visible.txt", true) == 1);
+  assert(rightPane->Selected().size() == 1);
+  const auto mountedDevice = rightPane->FolderIdentity().first;
+  assert(mountedDevice >= 0);
+  BMessage unmounted(B_NODE_MONITOR);
+  unmounted.AddInt32("opcode", B_DEVICE_UNMOUNTED);
+  unmounted.AddInt32("device", mountedDevice + 1);
+  rightPane->MessageReceived(&unmounted);
+  assert(sourcePath == rightPane->Path() && rightPane->LocationValid());
+  unmounted.ReplaceInt32("device", mountedDevice);
+  rightPane->MessageReceived(&unmounted);
+  assert(std::string(rightPane->Path()) == "@disks" && rightPane->Selected().empty());
+  waitFor([&] { return !rightPane->IsScanning(); });
+  rightPane->Navigate(sourcePath.c_str());
+  waitFor([&] { return !rightPane->IsScanning(); });
+  assert(sourcePath == rightPane->Path() && rightPane->LocationValid());
+  puts("Unmount notification invalidates only the affected pane without quarantining a clean mount");
+
+  Listi::InterruptedVolumes().Block(pane->Path());
+  BMessage volumeUnavailable(kVolumeUnavailable);
+  window->MessageReceived(&volumeUnavailable);
+  assert(!pane->LocationValid() && !pane->IsScanning() && pane->Selected().empty());
+  waitFor([&] { return !rightPane->IsScanning(); });
+  assert(rightPane->LocationValid());
+  pane->Reload();
+  assert(!pane->IsScanning());
+  rightPane->Navigate((elsewhere + "/subfolder").c_str());
+  assert(!rightPane->IsScanning() && sourcePath == rightPane->Path());
+  pane->Navigate(sourcePath.c_str());
+  waitFor([&] { return !pane->IsScanning(); });
+  assert(pane->LocationValid() && sourcePath == pane->Path());
+
   assert(rmdir(created.c_str()) == 0 && rmdir(elsewhere.c_str()) == 0);
   assert(unlink(file.c_str()) == 0 && rmdir(temp) == 0);
   auto *split = dynamic_cast<Listi::WorkspaceSplit *>(left->Parent());
   assert(split);
   CheckWorkspaceSplit(*split, left);
   window->Quit();
+  CheckFloatingInspector(app);
+  CheckWindowCLIQuit(app);
   puts("Main window: menu shortcuts and workspace routing OK");
 }
