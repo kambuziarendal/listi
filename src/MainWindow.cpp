@@ -1,9 +1,23 @@
 // SPDX-License-Identifier: MIT
 #include <stdexcept>
+#include "../build/ListiBuildIdentity.h"
+#include "FileClipboard.h"
+#include <Alert.h>
+#include <sys/utsname.h>
 #include "MainWindow.h"
-#include "RecoveryInventory.h"
-#include "AdaptiveScrollView.h"
-#include "ThemeTextView.h"
+#include "WindowOverview.h"
+#include "FolderTabs.h"
+#include <Screen.h>
+#include "WorkingSets.h"
+#include <atomic>
+#include <MenuItem.h>
+#include "LayoutIntroduction.h"
+#include "FolderHistory.h"
+#include "AutomaticHistory.h"
+#include "HistorySettings.h"
+#include "HistoryPaneHint.h"
+#include "FileListExportWindow.h"
+#include "RecoveryReviewWindow.h"
 #include "FlatView.h"
 #include "MainWindowMenu.h"
 #include "ApplicationServices.h"
@@ -18,6 +32,9 @@
 #include "PropertiesWindow.h"
 #include "OpenWith.h"
 #include "SavedNavigationController.h"
+#include "FilePanelFavorite.h"
+#include <FindDirectory.h>
+#include <Path.h>
 #include "SearchWindow.h"
 #include "ShelfController.h"
 #include "ShelfWindow.h"
@@ -47,13 +64,31 @@
 using Listi::PanelPage;
 
 void PostMainWindowNotice(const char *text) {
+  if (auto *window = dynamic_cast<BWindow *>(BLooper::LooperForThread(find_thread(nullptr)))) {
+    if (window->FindView("first panel tools")) {
+      BMessage local(kInlineNotice);
+      local.AddString("error", text);
+      window->PostMessage(&local);
+      return;
+    }
+  }
   BMessage error(kServiceError);
   error.AddString("error", text);
   be_app->PostMessage(&error);
 }
 
 namespace {
-class MainWindow : public BWindow {
+std::atomic<int> browserCount{0};
+class MainWindow : public Listi::WorkingWindow {
+  BMessenger overview, guide;
+  std::vector<BMessage> historyPairs;
+  bool readingConfig = false, refreshConfig = false, automaticEnabled = false;
+  std::string titleLocation;
+  std::array<std::string, 2> tabLocations, probedFolders;
+  bool sessionLayout = false;
+  std::optional<bool> wasEinn;
+  BRect wideFrame, einnFrame;
+  BrowserOpener openBrowser;
   Preferences prefs;
   BMessenger service;
   BMessenger searchWindow;
@@ -76,14 +111,18 @@ class MainWindow : public BWindow {
       pane->SetPlaces(savedNavigation.Places(), savedNavigation.CanEditPlaces());
   }
   void Save() {
+    // Only the initial browser persists a default layout for future sessions.
+    if (sessionLayout)
+      return;
     auto saved = prefs.Save();
     saved.what = kSavePreferences;
-    service.SendMessage(&saved);
+    saved.AddMessenger("origin", BMessenger(this));
+    be_app->PostMessage(&saved);
   }
   bool PromptBlocksCommand() {
     if (!actionArea->Pending())
       return false;
-    queue.ErrorInfo("Finish or cancel the open question first.");
+    actionArea->FocusQuestion();
     return true;
   }
   void CloseAction() {
@@ -106,16 +145,80 @@ class MainWindow : public BWindow {
     split->Focus();
   }
   void UpdateTransferTarget() {
+    for (int side = 0; side < 2; ++side) {
+      const auto *pane = panes[side];
+      bool known = false;
+      int32 versions = Listi::kUnknownVersions;
+      if (pane->LocationValid() && !pane->IsSearchList()) {
+        const auto [device, node] = pane->FolderIdentity();
+        for (const auto &pair : historyPairs)
+          if (strcmp(pane->Path(), pair.GetString("path", 0, "")) == 0 &&
+              device == pair.GetInt64("node", 0, -1) && node == pair.GetInt64("node", 1, -1)) {
+            known = true;
+            versions = pair.GetInt32("versions", Listi::kUnknownVersions);
+            break;
+          }
+      }
+      panes[side]->SetHistoryHint(known, automaticEnabled, versions);
+      // A store may return or receive new points while its source is not displayed.
+      if (!known && probedFolders[side] != pane->Path())
+        probedFolders[side].clear();
+      if (known && probedFolders[side] != pane->Path() && !readingConfig)
+        ReadHistoryConfig();
+      if (tabLocations[side] != panes[side]->Path()) {
+        tabLocations[side] = panes[side]->Path();
+        split->Panel(side).FolderBar().UpdateLabel();
+      }
+    }
     const int source = split->Source();
+    const char *current = panes[source]->Path();
+    const bool copyTarget = split->Panel(source).Current() == PanelPage::Files &&
+        panes[source]->LocationValid() && !panes[source]->IsSearchList() && current[0] == '/';
+    const auto [device, node] = panes[source]->FolderIdentity();
+    SetCopyFolder(copyTarget ? current : "", copyTarget
+        ? Listi::NodeIdentity{int32_t(device), node} : Listi::NodeIdentity{});
+    if (titleLocation != current) {
+      titleLocation = current;
+      const auto last = titleLocation.find_last_not_of('/');
+      std::string leaf = "/";
+      if (titleLocation == "@disks")
+        leaf = "Disks";
+      else if (last != std::string::npos) {
+        auto slash = titleLocation.rfind('/', last);
+        size_t start = slash == std::string::npos ? 0 : slash + 1;
+        leaf = titleLocation.substr(start, last - start + 1);
+      }
+      if (panes[source]->IsSearchList()) leaf = panes[source]->LocationLabel();
+      Describe(leaf + " · Listi", titleLocation);
+    }
     const auto &target = *panes[1 - source];
     const bool available = !prefs.SinglePane() && split->AllowsCommand(kCopy);
-    const bool folder = target.LocationValid() && strcmp(target.Path(), "@disks") != 0;
+    const bool folder = !target.IsSearchList() && target.LocationValid() && strcmp(target.Path(), "@disks") != 0;
     toolbar.SetTransferTarget(source, available, folder ? target.Path() : nullptr);
   }
   void ApplyWorkspace() {
+    const bool einn = prefs.workspace == Workspace::einn;
+    const bool switchSize = !wasEinn || *wasEinn != einn;
+    if (wasEinn && switchSize)
+      (*wasEinn ? einnFrame : wideFrame) = Frame();
+    for (int side = 0; side < 2; ++side)
+      split->Panel(side).ShowFolderTabs(prefs.alwaysFolderTabs);
     toolbar.Arrange();
     split->ApplyWorkspace();
     queue.SetCompact(prefs.SinglePane());
+    if (switchSize) {
+      const auto saved = einn ? einnFrame : wideFrame;
+      if (saved.IsValid()) {
+        ResizeTo(saved.Width(), saved.Height());
+        MoveTo(saved.LeftTop());
+      } else {
+        const auto screen = BScreen(this).Frame();
+        ResizeTo(std::min(einn ? 540.f : 1140.f, screen.Width() - 32),
+                 std::min(einn ? 320.f : 650.f, screen.Height() - 56));
+      }
+      MoveOnScreen();
+      wasEinn = einn;
+    }
     UpdateTransferTarget();
     // Fit the buttons after the rest of the workspace has its final geometry.
     toolbar.ApplyVisibility(actionArea->Pending());
@@ -144,9 +247,100 @@ class MainWindow : public BWindow {
     return &split->Inspector();
   }
 
+  bool HandleFolderTab(BMessage &message) {
+    using namespace Listi;
+    switch (message.what) {
+    case kTabNew: case kTabDuplicate: case kTabClose: case kTabReopen:
+    case kTabRename: case kTabNamed: case kTabLeft: case kTabRight:
+    case kTabNext: case kTabPrevious: case kTabChoose: case kTabDetach: case kTabAlways:
+      break;
+    default:
+      return false;
+    }
+    if (PromptBlocksCommand())
+      return true;
+    const int side = message.GetInt32("pane", split->Source());
+    if (!split->ActivateFiles(side))
+      return true;
+    auto &bar = split->Panel(side).FolderBar();
+    switch (message.what) {
+    case kTabAlways: {
+      prefs.alwaysFolderTabs = !prefs.alwaysFolderTabs;
+      BMessage delta(kSharedPreferences);
+      delta.AddBool("alwaysFolderTabs", prefs.alwaysFolderTabs);
+      delta.AddMessenger("origin", BMessenger(this));
+      be_app->PostMessage(&delta);
+      for (int index = 0; index < 2; ++index)
+        split->Panel(index).ShowFolderTabs(prefs.alwaysFolderTabs);
+      Save();
+      return true;
+    }
+    case kTabRename: {
+      BMessage accepted(kTabNamed);
+      accepted.AddInt32("pane", side);
+      accepted.AddInt64("tab", bar.ActiveId());
+      accepted.AddBool("placeLabel", true);
+      const auto tab = bar.Snapshot();
+      AskInline("Name this tab:", "Save name", accepted, tab.alias.c_str());
+      return true;
+    }
+    case kTabNamed:
+      if (message.GetInt64("tab", -1) == bar.ActiveId())
+        bar.Rename(message.GetString("name", ""));
+      return true;
+    case kTabDetach: {
+      if (openBrowser && openBrowser({{}, bar.Snapshot(), Frame().LeftTop() + BPoint(24, 24)}))
+        bar.AfterDetach();
+      break;
+    }
+    default:
+      bar.Change(message.what, message.GetInt64("tab", -1));
+    }
+    split->RefreshPanels();
+    split->Focus();
+    return true;
+  }
+
   bool HandleNavigation(BMessage *m) {
     const int source = split->Source();
     switch (m->what) {
+    case kFilePanelFavorite:
+    case kFilePanelFavoriteNamed:
+      try {
+        if (m->what == kFilePanelFavorite) {
+          const auto &pane = *panes[source];
+          const std::filesystem::path folder(pane.Path());
+          if (!pane.LocationValid() || pane.IsSearchList() || Listi::IsVirtual(pane.Path()))
+            throw std::runtime_error("Open an available local folder first.");
+          const auto info = Listi::FavoriteFolderIdentity(folder);
+          BMessage accepted(kFilePanelFavoriteNamed);
+          accepted.AddString("folder", folder.c_str());
+          accepted.AddInt64("device", info.st_dev);
+          accepted.AddInt64("inode", info.st_ino);
+          const auto leaf = folder.filename().string();
+          AskInline(("Favorite name for " + folder.string()).c_str(), "Add favorite",
+                    accepted, leaf.empty() ? "Root" : leaf.c_str());
+        } else {
+          BPath settings;
+          if (find_directory(B_USER_SETTINGS_DIRECTORY, &settings) != B_OK)
+            throw std::runtime_error("Could not locate your Haiku settings folder.");
+          const std::string name = m->GetString("name", "");
+          auto result = Listi::AddFilePanelFavorite(settings.Path(), m->GetString("folder", ""),
+              name, m->GetInt64("device", -1), m->GetInt64("inode", -1));
+          if (result == Listi::FavoriteResult::NameInUse) {
+            BMessage retry(*m);
+            retry.RemoveName("name");
+            AskInline("That favorite name is in use. Choose another:", "Add favorite",
+                      retry, name.c_str());
+          } else {
+            panes[source]->ShowStatus(result == Listi::FavoriteResult::Added
+                ? "Added to Haiku file panel favorites." : "This folder is already a favorite.");
+          }
+        }
+      } catch (const std::exception &error) {
+        PostMainWindowNotice(error.what());
+      }
+      break;
     case kPlaceAction:
     case kPlaceAccepted:
       try {
@@ -186,8 +380,9 @@ class MainWindow : public BWindow {
         searchWindow.SendMessage(kSearch);
       else
         searchWindow = OpenFileSearch(BMessenger(this), source,
-                                      panes[source]->Path(), savedNavigation.SearchStore());
+                                      panes[source]->SearchRoot(), savedNavigation.SearchStore());
       break;
+    case Listi::kOpenSearchList:
     case kRevealSearch: {
       int32 which = m->GetInt32("pane", -1);
       if (which < 0 || which > 1)
@@ -283,11 +478,31 @@ class MainWindow : public BWindow {
     case kPreferences:
       OpenPreferences(BMessenger(this), prefs);
       break;
-    case kApplyPreferences:
+    case kSharedPreferences: {
+      const Preferences before = prefs;
+      prefs.ApplyShared(*m);
+      BMessage changes = prefs.SharedChanges(&before);
+      changes.RemoveName("separateWindows");
+      changes.RemoveName("alwaysFolderTabs");
+      if (!changes.IsEmpty())
+        Apply();
+      else if (before.alwaysFolderTabs != prefs.alwaysFolderTabs)
+        for (int side = 0; side < 2; ++side)
+          split->Panel(side).ShowFolderTabs(prefs.alwaysFolderTabs);
+      break;
+    }
+    case kApplyPreferences: {
+      BMessage delta;
+      if (m->FindMessage("sharedChanges", &delta) == B_OK && !delta.IsEmpty()) {
+        delta.what = kSharedPreferences;
+        delta.AddMessenger("origin", BMessenger(this));
+        be_app->PostMessage(&delta);
+      }
       prefs.ApplyDialog(*m);
       Apply();
       Save();
       break;
+    }
     default:
       return false;
     }
@@ -297,11 +512,11 @@ class MainWindow : public BWindow {
 public:
   MainWindow(const Preferences &p, BMessenger svc,
              const Listi::SavedPlaces &saved, bool writable,
-             const Listi::SavedSearches &queries, bool queriesWritable)
-      : BWindow(BRect(70, 70, 1170, 710), "Listi 0.38.0", B_TITLED_WINDOW,
+             const Listi::SavedSearches &queries, bool queriesWritable, BrowserRequest request, BrowserOpener open)
+      : Listi::WorkingWindow(BRect(70, 70, 1170, 710), "Listi", "File manager",
                 B_AUTO_UPDATE_SIZE_LIMITS),
-        prefs(p), service(svc),
-        savedNavigation(svc, saved, writable, queries, queriesWritable) {
+        sessionLayout(request.localLayout || request.detached.has_value() || request.workingSet.has_value()), openBrowser(std::move(open)), prefs(p), service(svc),
+        savedNavigation(svc, saved, writable, queries, queriesWritable, BMessenger(this)) {
     panes[0] = new Pane(0, prefs, shelf.Model());
     panes[1] = new Pane(1, prefs, shelf.Model());
     split = new Listi::WorkspaceSplit(*panes[0], *panes[1], prefs, *menu);
@@ -327,7 +542,39 @@ public:
     Apply();
     PublishPlaces();
     split->Focus();
-    ResizeTo(1140, 650);
+    ++browserCount;
+    if (request.workingSet) {
+      const auto &savedWindow = *request.workingSet;
+      SetWorkingSetName(savedWindow.GetString("workingSetName", ""));
+      SetAlias(savedWindow.GetString("alias", ""));
+      for (int side = 0; side < 2; ++side) {
+        BMessage panel;
+        if (savedWindow.FindMessage("panel", side, &panel) == B_OK)
+          split->Panel(side).FolderBar().RestoreTabs(panel);
+      }
+      split->SetSource(savedWindow.GetInt32("source", 0) == 1 ? 1 : 0);
+      split->Focus();
+      BRect frame;
+      if (savedWindow.FindRect("frame", &frame) == B_OK && frame.IsValid()) {
+        ResizeTo(frame.Width(), frame.Height());
+        MoveTo(frame.LeftTop());
+        MoveOnScreen();
+      }
+    }
+    if (request.position) {
+      MoveTo(*request.position);
+      MoveOnScreen();
+    }
+    if (request.detached)
+      split->Panel(0).FolderBar().Adopt(std::move(*request.detached));
+    else if (!request.path.empty())
+      panes[split->Source()]->Navigate(request.path.c_str());
+  }
+  ~MainWindow() override {
+    --browserCount;
+    BMessage closed(kBrowserClosed);
+    closed.AddInt64("id", WindowId());
+    be_app->PostMessage(&closed);
   }
   void FrameResized(float width, float height) override {
     BWindow::FrameResized(width, height);
@@ -355,47 +602,230 @@ public:
     if (!quitting)
       UpdateTransferTarget();
   }
+  void ReadHistoryConfig() {
+    if (readingConfig) { refreshConfig = true; return; }
+    probedFolders = {panes[0]->Path(), panes[1]->Path()};
+    readingConfig = Listi::RequestHistoryConfig(BMessenger(this), probedFolders);
+  }
+  void WindowActivated(bool active) override {
+    BWindow::WindowActivated(active);
+    if (active) ReadHistoryConfig();
+  }
   void MenusBeginning() override {
     BWindow::MenusBeginning();
     const auto &pane = *panes[split->Source()];
     const char *path = pane.Path();
     const auto page = split->Panel(split->Source()).Current();
     const bool flat = page == PanelPage::Flat;
+    const auto &bar = split->Panel(split->Source()).FolderBar();
+    const bool filePage = page == PanelPage::Files;
+    menu->FindItem(kCopyToWindow)->SetEnabled(filePage || flat);
+    for (uint32 cmd : {Listi::kTabNew, Listi::kTabDuplicate, Listi::kTabRename,
+                       Listi::kTabDetach, Listi::kTabAlways})
+      menu->FindItem(cmd)->SetEnabled(filePage);
+    for (uint32 cmd : {Listi::kTabPrevious, Listi::kTabNext, Listi::kTabClose})
+      menu->FindItem(cmd)->SetEnabled(filePage && bar.Count() > 1);
+    menu->FindItem(Listi::kTabLeft)->SetEnabled(filePage && bar.Index() > 0);
+    menu->FindItem(Listi::kTabRight)->SetEnabled(filePage && bar.Index() + 1 < bar.Count());
+    menu->FindItem(Listi::kTabReopen)->SetEnabled(filePage && bar.CanReopen());
+    menu->FindItem(Listi::kTabAlways)->SetMarked(prefs.alwaysFolderTabs);
+    menu->FindItem(kSelectedBrowser)->SetEnabled(filePage && !pane.SelectedFolder().empty());
     menu->SetFolderTree(page == PanelPage::Files && pane.CanToggleTree(),
                         SidebarHasTree(pane.Sidebar()));
     const bool canSaveClipboard =
-        !actionArea->Pending() && Listi::CanSaveClipboardIn(path);
+        !pane.IsSearchList() && !actionArea->Pending() && Listi::CanSaveClipboardIn(path);
     const bool canUndoBulkRename =
         !actionArea->Pending() && queue.CanUndoBulkRename();
+    if (auto *paste = menu->FindItem(kClipboardPaste))
+      paste->SetEnabled(!pane.IsSearchList());
     menu->SetFileActions(pane.CurrentView(), flat, split->CanOpenFlat(),
                          canSaveClipboard, canUndoBulkRename);
   }
 
   bool QuitRequested() override {
-    if (!InspectorEditorsAllowQuit() || !FilePropertiesAllowQuit() || !OpenWithAllowQuit() ||
-        !ArchiveEditorsAllowQuit())
+    if (browserCount == 1 && Listi::FolderHistoryBusy()) {
+      PostMainWindowNotice("Finish or cancel the folder history operation before closing Listi.");
       return false;
+    }
+    if (PreferencesOpenFor(BMessenger(this))) {
+      queue.ErrorInfo("Apply or close this window's preferences first.");
+      return false;
+    }
+    if (browserCount > 1 && !InspectorEditorsAllowQuit(this))
+      return false;
+    if (browserCount == 1 && (!InspectorEditorsAllowQuit() || !FilePropertiesAllowQuit() ||
+        !OpenWithAllowQuit() || !ArchiveEditorsAllowQuit()))
+      return false;
+    if (terminalDock->HasSessions()) {
+      queue.ErrorInfo("Close this window's CLI sessions first.");
+      return false;
+    }
     if (savedNavigation.Saving()) {
-      PostMainWindowNotice(
+      queue.ErrorInfo(
           "Saved places or searches are still being written. Please try quitting again shortly.");
       return false;
     }
     if (queue.Busy() || clipboard.Busy()) {
       queue.Show();
-      PostMainWindowNotice("File operations are still running. Let them finish, or use "
+      queue.ErrorInfo("File operations are still running. Let them finish, or use "
              "Cancel all before quitting.");
       return false;
     }
     if (clipboard.ArchivePromptPending())
       CloseAction();
-    be_app->PostMessage(B_QUIT_REQUESTED);
     return true;
   }
   void MessageReceived(BMessage *m) override {
+    if (m->what == Listi::kReadHistoryConfig) {
+      readingConfig = false;
+      historyPairs = Listi::HistoryPairs(*m);
+      automaticEnabled = m->GetBool("enabled", false);
+      if (refreshConfig) { refreshConfig = false; ReadHistoryConfig(); }
+      return;
+    }
+    if (m->what == kQuitListi) {
+      be_app->PostMessage(B_QUIT_REQUESTED);
+      return;
+    }
+    if (m->what == kNewBrowser || m->what == kSelectedBrowser) {
+      auto &pane = *panes[split->Source()];
+      std::string path = m->what == kNewBrowser ? pane.SearchRoot() : pane.SelectedFolder();
+      if (!path.empty() && openBrowser)
+        openBrowser({path, {}, Frame().LeftTop() + BPoint(24, 24)});
+      return;
+    }
+    if (m->what == Listi::kCaptureWorkingWindow) {
+      BMessage snapshot(Listi::kCaptureWorkingWindow);
+      WorkspaceLayout savedLayout = prefs;
+      split->RememberWeights(savedLayout, split->QuickView());
+      savedLayout.Archive(snapshot);
+      snapshot.AddBool("visibleButtons", prefs.ActionButtonsVisible());
+      snapshot.AddInt32("source", split->Source());
+      snapshot.AddString("alias", Alias().c_str());
+      snapshot.AddRect("frame", Frame());
+      for (int side = 0; side < 2; ++side) {
+        auto panel = split->Panel(side).FolderBar().ArchiveTabs();
+        snapshot.AddMessage("panel", &panel);
+      }
+      m->SendReply(&snapshot);
+      return;
+    }
+    if (m->what == Listi::kOpenWorkingSet || m->what == Listi::kSaveWorkingSet) {
+      Listi::ShowWorkingSets(*this, m->what == Listi::kSaveWorkingSet, openBrowser);
+      return;
+    }
+    if (HandleFolderTab(*m) || HandleWindowAction(m))
+      return;
+    if (m->what == kAboutListi) {
+      std::string text = "Listi " LISTI_PACKAGE_VERSION "\nBuild: " LISTI_BUILD_ID;
+      struct utsname os {};
+      text += "\nSystem: ";
+      if (uname(&os) == 0)
+        text += std::string(os.sysname) + " " + os.release + " " + os.version +
+                "\nArchitecture: " + os.machine;
+      else
+        text += "unknown\nArchitecture: unknown";
+      text += "\nABI: " __HAIKU_ARCH_ABI;
+      text += std::string("\nWorkspace: ") + WorkspaceName(prefs.workspace);
+      for (int i = 0; i < (prefs.SinglePane() ? 1 : 2); ++i) {
+        text += i == 0 ? "\nPanel 1: " : "\nPanel 2: ";
+        switch (split->Panel(i).Current()) {
+        case PanelPage::Flat: text += "Flat View"; break;
+        case PanelPage::Search: text += "Search"; break;
+        case PanelPage::History: text += "Folder history"; break;
+        case PanelPage::Preview: text += "Preview"; break;
+        case PanelPage::Files: text += ViewModeLabel(panes[i]->CurrentView()); break;
+        }
+      }
+      auto *about = new BAlert("About Listi", text.c_str(), "Close",
+                               "Copy diagnostic information");
+      if (about->Go() == 1) {
+        try {
+          Listi::PutPathsAsText({text});
+        } catch (const std::exception &error) {
+          PostMainWindowNotice(error.what());
+        }
+      }
+      return;
+    }
+    if (m->what == Listi::kAutomaticHistorySettings) {
+      if (Listi::LaunchHistoryHelper(true) != B_OK)
+        PostMainWindowNotice("Could not open automatic history. Install the complete Listi package.");
+      return;
+    }
+    if (m->what == Listi::kFolderHistory || m->what == Listi::kPreviewHistory) {
+      int side = m->GetInt32("pane", split->Source());
+      if (PromptBlocksCommand() || !split->ActivateFiles(side)) return;
+      const auto &pane = *panes[side];
+      if (!pane.LocationValid() || pane.IsSearchList() || pane.Path()[0] != '/')
+        PostMainWindowNotice("Open a local folder before using folder history.");
+      else if (m->what == Listi::kFolderHistory)
+        Listi::OpenFolderHistory(pane.Path());
+      else if (!prefs.SinglePane() && !split->QuickView() && split->Panel(1 - side).OpenHistory(pane.Path()))
+        split->RefreshPanels();
+      else PostMainWindowNotice("Open a second file panel to preview history here.");
+      return;
+    }
+    if (m->what == Listi::kOpenWindowOverview) {
+      overview = Listi::OpenWindowOverview(*this, overview);
+      return;
+    }
+    if (m->what == kExternalTab) {
+      int side = split->Source();
+      const char *path = m->GetString("path", "");
+      if (!*path) return;
+      if (!split->ActivateFiles(side)) {
+        if (!openBrowser || !openBrowser({path, {}, {}}))
+          queue.ErrorInfo("Could not open folder.");
+        return;
+      }
+      split->Panel(side).FolderBar().OpenDirectory(path);
+      if (IsMinimized()) Minimize(false);
+      Activate();
+      split->Focus();
+      return;
+    }
+    if (m->what == Listi::kShowLayoutGuide) {
+      guide = Listi::OpenLayoutIntroduction(*this, guide, prefs,
+                                           m->GetBool("firstRun", false));
+      return;
+    }
+    if (m->what == Listi::kGuideChoice) {
+      const int32 value = m->GetInt32("workspace", -1);
+      if (value < 0 || value > 3) {
+        if (m->GetBool("firstRun", false)) Save();
+        return;
+      }
+      if (!split->PrepareLayoutChange()) return;
+      prefs.workspace = Workspace(value);
+      prefs.singlePane = split->Source();
+      const int32 sidebar = m->GetInt32("sidebarChoice", 0);
+      if (sidebar >= 1 && sidebar <= 3) {
+        const SidebarMode modes[] = {SidebarMode::Hidden, SidebarMode::FolderTree,
+                                     SidebarMode::Shelf};
+        for (int i = 0; i < 2; ++i)
+          prefs.SetSidebar(i, modes[sidebar - 1]);
+      }
+      if (!prefs.SinglePane()) {
+        prefs.SetPreview(m->GetBool("preview", prefs.Preview()));
+        prefs.command = m->GetBool("command", prefs.command);
+        if (m->GetBool("buttons", prefs.ActionButtonsVisible()) != prefs.ActionButtonsVisible())
+          (prefs.IsSmidja() ? prefs.smidjaButtons : prefs.tviskiptButtons) =
+              m->GetBool("buttons", false);
+      }
+      Preferences before = prefs;
+      prefs.ApplyShared(*m);
+      if (prefs.folderOpening != before.folderOpening) {
+        BMessage delta = prefs.SharedChanges(&before);
+        be_app->PostMessage(&delta);
+      }
+      ApplyWorkspace();
+      Save();
+      return;
+    }
     if (m->what == Listi::kFlatContext) {
       const int pane = m->GetInt32("pane", -1);
-      if (pane >= 0 && pane < 2 && split->Panel(pane).Current() == PanelPage::Flat &&
-          !PromptBlocksCommand()) {
+      if (pane >= 0 && pane < 2 && split->Panel(pane).Current() == PanelPage::Flat) {
         auto *view = split->Panel(pane).Page(PanelPage::Flat);
         split->FollowFocus(view);
         if (split->Source() == pane)
@@ -403,7 +833,42 @@ public:
       }
       return;
     }
+    try {
+      Listi::Job job;
+      if (HandleCopyFolder(*m, job)) {
+        if (job.checkDestinationWindow)
+          queue.Enqueue(job);
+        return;
+      }
+    } catch (const std::exception &error) {
+      PostMainWindowNotice(error.what());
+      return;
+    }
     const int source = split->Source();
+    if (m->what == kCopyToWindow) {
+      if (PromptBlocksCommand())
+        return;
+      try {
+        auto &panel = split->Panel(source);
+        Listi::Job job;
+        if (panel.Current() == PanelPage::Flat)
+          job = Listi::FlatSelection(*panel.Page(PanelPage::Flat));
+        else if (panel.Current() == PanelPage::Files) {
+          job.sources = panes[source]->Selected();
+          job.expectedSources = panes[source]->SelectedLocalIdentities();
+        }
+        if (job.sources.empty())
+          throw std::runtime_error("Select one or more local entries first.");
+        for (const auto &path : job.sources)
+          if (path.empty() || path.front() != '/' || Listi::IsVirtual(path))
+            throw std::runtime_error("Copy to window supports local entries only.");
+        job.action = Listi::Action::Copy;
+        PickCopyFolder(std::move(job));
+      } catch (const std::exception &error) {
+        PostMainWindowNotice(error.what());
+      }
+      return;
+    }
     if (Listi::HandleWindowScript(*m, prefs.workspace, *panes[source],
                                   *panes[1 - source], queue))
       return;
@@ -415,8 +880,18 @@ public:
     // after USB removal. Do not synchronously probe that stale mount on retry.
     const bool panelTransfer = m->what == kCopy || m->what == kMove;
     const bool writesHere = m->what == kClipboardPaste || m->what == kClipboardSaveText ||
-                           m->what == kClipboardSaveImage || m->what == kMkdir;
+                           m->what == kClipboardSaveImage || m->what == kMkdir || m->what == kNewFile;
     const Pane &destination = *panes[panelTransfer ? 1 - source : source];
+    const bool needsOtherFolder = panelTransfer || m->what == kCreateLink ||
+        m->what == kCreateArchive || m->what == kExtractArchive || m->what == kCompareFolders;
+    const bool needsCurrentFolder = writesHere || m->what == kBulkRename ||
+        m->what == kRename || m->what == kCompareFolders ||
+        m->what == kCommand || m->what == Listi::kTerminalWindow;
+    if ((needsOtherFolder && panes[prefs.SinglePane() ? source : 1 - source]->IsSearchList()) ||
+        (needsCurrentFolder && panes[source]->IsSearchList())) {
+      queue.ErrorInfo("Choose a real folder for this action, not a search list.");
+      return;
+    }
     if ((panelTransfer || writesHere) && !destination.LocationValid() &&
         !destination.IsScanning()) {
       queue.ErrorInfo("Choose an available destination folder, or reconnect the disk and reload.");
@@ -443,8 +918,7 @@ public:
         return;
       case kOpenSystem: case kClipboardCopy: case kClipboardCut: case kCopyPaths:
       case kAll: case kNone: case kInvert: case Listi::kAddToShelf:
-        if (!PromptBlocksCommand())
-          flat->MessageReceived(m);
+        flat->MessageReceived(m);
         return;
       }
     }
@@ -459,12 +933,7 @@ public:
       return;
     switch (m->what) {
     case kInlineNotice:
-      if (actionArea->Pending()) {
-        queue.ErrorInfo(m->GetString("error", "Operation failed"));
-        break;
-      }
-      AskInline(m->GetString("error", "Operation failed"), "OK",
-                BMessage(kInlineCancel));
+      queue.ErrorInfo(m->GetString("error", "Operation failed"));
       break;
     case kInlineClosed:
       if (!actionArea->Pending()) {
@@ -490,8 +959,6 @@ public:
       }
       break;
     case kContextMenu: {
-      if (PromptBlocksCommand())
-        break;
       const int32 owner = m->GetInt32("pane", -1);
       if (!split->ActivateFiles(owner))
         break;
@@ -515,6 +982,9 @@ public:
     }
     case 'apfg':
       Listi::ForgetArchivePasswords();
+      break;
+    case kExportFileList:
+      Listi::ShowFileListExport(pane.ExportModel());
       break;
     case kResumeArchiveEdits:
       ResumeArchiveEditors(prefs.editor.String());
@@ -558,37 +1028,17 @@ public:
     case kShowJobs:
       queue.Toggle();
       break;
-    case kReviewRecovery: {
-      std::string text;
-      try {
-        text = queue.Busy() ? "Wait for the active operation before reviewing recovery records."
-                            : Listi::ReviewRecovery();
-      } catch (const std::exception &error) {
-        text = error.what();
-      }
-      auto *review = new BWindow(BRect(0, 0, 610, 365),
-                                 "Listi recovery review", B_TITLED_WINDOW,
-                                 B_CLOSE_ON_ESCAPE | B_AUTO_UPDATE_SIZE_LIMITS);
-      auto *report = new ThemeTextView("recovery records",
-                                       B_DOCUMENT_BACKGROUND_COLOR,
-                                       B_DOCUMENT_TEXT_COLOR);
-      report->MakeEditable(false);
-      report->MakeSelectable(true);
-      report->SetWordWrap(true);
-      report->SetText(text.c_str());
-      auto *scroll = new Listi::AdaptiveScrollView("recovery scroll", report, false);
-      scroll->SetExplicitMinSize(BSize(320, 140));
-      BLayoutBuilder::Group<>(review, B_VERTICAL)
-          .SetInsets(8)
-          .Add(scroll);
-      review->CenterIn(Frame());
-      review->Show();
+    case kReviewRecovery:
+      if (queue.Busy())
+        queue.ErrorInfo("Wait for the active operation before reviewing recovery records.");
+      else
+        Listi::OpenRecoveryReview(Frame());
       break;
-    }
     case kCompareFolders:
       OpenFolderCompare(pane.Path(), panes[1 - source]->Path());
       break;
     case kOpenPaths:
+      m->AddMessenger("origin", BMessenger(this));
       service.SendMessage(m);
       break;
     case kTerminal:
@@ -600,6 +1050,10 @@ public:
                          : m->GetInt32("terminal lister", source);
       if (lister < 0 || lister > 1)
         break;
+      if (split->Panel(lister).Current() == PanelPage::History || panes[lister]->IsSearchList()) {
+        PostMainWindowNotice("Open a local folder before starting a terminal.");
+        break;
+      }
       if (auto prompt = terminalDock->Open(*m, lister, panes[lister]->Path()))
         AskInline(prompt->text.String(), "Start new CLI", prompt->accepted);
       break;
@@ -613,12 +1067,13 @@ public:
       break;
     case Listi::kTerminalWindow:
     case kCommand: {
-      if (!strcmp(pane.Path(), "@disks") ||
+      if (panel.Current() == PanelPage::History || !strcmp(pane.Path(), "@disks") ||
           Listi::IsVirtual(pane.Path())) {
         PostMainWindowNotice("Open a local folder first.");
         break;
       }
       BMessage launch(kOpenPaths);
+      launch.AddMessenger("origin", BMessenger(this));
       launch.AddString("path", pane.Path());
       launch.AddString("mode", m->what == Listi::kTerminalWindow ? "terminal"
                                                                : "command");
@@ -641,7 +1096,23 @@ public:
 
 BWindow *CreateMainWindow(const Preferences &prefs, BMessenger service,
                           const Listi::SavedPlaces &places, bool placesWritable,
-                          const Listi::SavedSearches &searches, bool searchesWritable) {
-  return new MainWindow(prefs, service, places, placesWritable,
-                        searches, searchesWritable);
+                          const Listi::SavedSearches &searches, bool searchesWritable, BrowserRequest request, BrowserOpener open) {
+  auto layout = prefs;
+  if (request.workingSet) {
+    layout.WorkspaceLayout::Load(*request.workingSet);
+    bool visible;
+    if (!layout.SinglePane() && request.workingSet->FindBool("visibleButtons", &visible) == B_OK)
+      (layout.IsSmidja() ? layout.smidjaButtons : layout.tviskiptButtons) = visible;
+  }
+  if (request.detached) {
+    layout.workspace = Workspace::einn;
+    layout.singlePane = 0;
+  }
+  return new MainWindow(layout, service, places, placesWritable,
+                        searches, searchesWritable, std::move(request), std::move(open));
+}
+
+bool BrowserAllowsQuit(BWindow *window) {
+  auto *browser = dynamic_cast<MainWindow *>(window);
+  return !browser || browser->QuitRequested();
 }

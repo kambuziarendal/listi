@@ -21,6 +21,7 @@ struct SearchHit {
   std::string path;
   int64_t device = -1, node = -1;
   std::string relativeFolder = {};
+  int64_t size = 0, modified = 0;
 };
 struct SearchSummary {
   size_t visited = 0, matched = 0, skipped = 0;

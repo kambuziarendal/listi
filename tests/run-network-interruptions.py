@@ -37,7 +37,14 @@ for protocol in protocols:
   wanted=b'n'*2097152 if mode in ('none','publish-reply','cleanup') else b'old contents'
   actual=(share/'input').read_bytes() if (share/'input').exists() else None
   previous=[x.read_bytes() for x in share.glob('*.previous')]
-  ok=p.returncode==0 and (mode in ('none','cancel-download') or state['triggered']) and actual==wanted
+  destination_safe=actual==wanted
+  if protocol=='smb' and mode in ('backup-reply','publish-before'):
+   # SMB cannot enforce a cleanup deadline. Keep the original under its
+   # reported recovery name instead of trying an unbounded rollback.
+   backups=list(share.glob('*.previous'))
+   destination_safe=(actual is None and len(backups)==1 and previous==[wanted]
+                     and backups[0].name in p.stdout)
+  ok=p.returncode==0 and (mode in ('none','cancel-download') or state['triggered']) and destination_safe
   if mode=='corrupt-stage':
    extras=set(files)-{'input','hello','download'}
    ok=ok and len(extras)==1 and next(iter(extras)).endswith('.part') and 'Uploaded content differs' in p.stdout and '.part' in p.stdout

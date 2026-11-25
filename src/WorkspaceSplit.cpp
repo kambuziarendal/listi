@@ -190,9 +190,11 @@ bool WorkspaceSplit::AllowsCommand(uint32 action) const {
   case kClipboardPaste:
   case kClipboardSaveText: case kClipboardSaveImage: case kUndoBulkRename:
   case kEdit: case kEditExternally: case kView: case kPreviewOtherPanel:
+  case kExportFileList:
+  case kFileTypeIcon: case kFilePanelFavorite:
   case kOpenWith: case kProperties:
   case kDelete: case kRestore: case kPermanentDelete: case kRename:
-  case kBulkRename: case kMkdir: case kAddArchive: case kRemoveArchive:
+  case kBulkRename: case kNewFile: case kMkdir: case kAddArchive: case kRemoveArchive:
   case kSelectType: case kSelectPattern:
   case Listi::kApplyPattern: case kNetwork:
     return Panel(source).Current() == PanelPage::Files;
@@ -237,7 +239,7 @@ void WorkspaceSplit::RefreshAndFocus() {
 
 void WorkspaceSplit::ClosePanelTool(int pane) {
   auto &panel = Panel(pane);
-  const int focus = panel.Current() == PanelPage::Preview ? 1 - pane : pane;
+  const int focus = (panel.Current() == PanelPage::Preview || panel.Current() == PanelPage::History) ? 1 - pane : pane;
   if (panel.CloseCurrent()) {
     SetSource(focus);
     RefreshAndFocus();
@@ -247,6 +249,8 @@ void WorkspaceSplit::ClosePanelTool(int pane) {
 void WorkspaceSplit::ApplyWorkspace() {
   PlaceInspector(quickView ? source == 1 : prefs.inspectorLeft, prefs.splitWeights[2]);
   for (int i = 0; i < 2; ++i) {
+    if (prefs.SinglePane() && Panel(i).Current() == PanelPage::History)
+      Panel(i).CloseCurrent();
     Panel(i).EnableTools(prefs.IsSmidja());
     SetPaneVisible(i, i == source || (!quickView && !prefs.SinglePane()));
     Panel(i).Files().SetWorkspace(prefs);
@@ -275,7 +279,8 @@ bool WorkspaceSplit::SetQuickView(bool enabled) {
 void WorkspaceSplit::HandlePageCommand(const BMessage &message) {
   const int pane = message.GetInt32("pane", -1);
   if (pane < 0 || pane > 1 || !paneVisible[pane] ||
-      (!prefs.IsSmidja() && Panel(pane).Current() != PanelPage::Flat))
+      (!prefs.IsSmidja() && Panel(pane).Current() != PanelPage::Flat &&
+       Panel(pane).Current() != PanelPage::History))
     return;
   if (message.what == kClosePanelPage) {
     ClosePanelTool(pane);
@@ -333,6 +338,7 @@ void WorkspaceSplit::TogglePanelPreview() {
 
 bool WorkspaceSplit::DismissPanelTool() {
   switch (Panel(source).Current()) {
+  case PanelPage::History:
   case PanelPage::Flat:
   case PanelPage::Preview:
     ClosePanelTool(source);
@@ -342,7 +348,7 @@ bool WorkspaceSplit::DismissPanelTool() {
     RefreshAndFocus();
     return true;
   case PanelPage::Files:
-    if (!HasPanelPreview())
+    if (!HasPanelPreview() && Panel(1 - source).Current() != PanelPage::History)
       return false;
     ClosePanelTool(1 - source);
     return true;
@@ -410,7 +416,13 @@ bool WorkspaceSplit::HandlePanelCommand(BMessage *m) {
   case kSame:
     if (prefs.SinglePane())
       break;
-    Panel(1 - source).Files().Navigate(Panel(source).Files().Path());
+    if (Panel(source).Files().IsSearchList()) {
+      const auto state = Panel(source).Files().CaptureNavigation();
+      BMessage open(kOpenSearchList);
+      state.queries.at(state.location).WriteTo(open);
+      Panel(1 - source).Files().MessageReceived(&open);
+    } else
+      Panel(1 - source).Files().Navigate(Panel(source).Files().Path());
     break;
   case kRefresh:
     if (auto &active = Panel(source); active.Current() == PanelPage::Flat) {

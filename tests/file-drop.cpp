@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "FileDrop.h"
+#include "FolderDropTarget.h"
 #include "TransferCommand.h"
 #include "FileClipboard.h"
 #include <Application.h>
@@ -20,7 +21,40 @@ int main(){BApplication app("application/x-vnd.Kambuzi-DropTests");char tmp[]="/
 try{
  auto f=a+"/æ $' file.txt";Write(f,"original");Write(a+"/two","second");
  auto drag=MakeFileDrag({f,a+"/two"});Check(drag.what==B_SIMPLE_DATA && drag.HasRef("refs"),"native drag uses file refs");
+ PaneEntry folderRow;
+ folderRow.path = b;
+ folderRow.directory = true;
+ folderRow.kind = 1;
+ Check(FolderDropTarget(root, &folderRow) == b, "ordinary local folder is the receiving target");
+ Check(FolderDropTarget(root, nullptr).empty(), "background has no child target");
+ Check(FolderDropTarget("@query:1", &folderRow).empty(), "query results are not targets");
+ folderRow.parent = true;
+ Check(FolderDropTarget(root, &folderRow).empty(), "parent entry is not a child target");
+ folderRow.parent = false;
+ folderRow.kind = 2;
+ Check(FolderDropTarget(root, &folderRow).empty(), "link to a folder is not a target");
+ Check(IsFileHover(B_INSIDE_VIEW, &drag) && !IsFileHover(B_EXITED_VIEW, &drag),
+       "file hover ends on exit");
  auto job=PrepareFileDrop(drag,b);Check(job.sources.size()==2 && job.expectedSources.size()==2,"multi-selection identities frozen");
+ std::string leaf;
+ auto parent = PrepareFileDrop(drag, b+"/apps/", true, &leaf);
+ Check(leaf=="apps" && !Exists(b+"/apps"), "cancelled missing-folder prompt leaves no folder");
+ Check(Reject([&]{PrepareFileDrop(drag,b+"/missing/apps",true,&leaf);}) &&
+       !Exists(b+"/missing"), "missing ancestors are not created");
+ parent = PrepareFileDrop(drag,b+"/apps",true,&leaf);
+ auto created = CreateFileDropDestination(parent,leaf);
+ Check(Reject([&]{CreateFileDropDestination(parent,leaf);}),
+       "occupied leaf refuses a second copy job");
+ auto copied = Run(created,{});
+ Check(copied.completed==2 && Read(b+"/apps/two")=="second" && Read(a+"/two")=="second",
+       "confirmed missing-folder copy preserves source and uses the new directory");
+ auto stalePath = root+"/old-parent";
+ mkdir(stalePath.c_str(),0755);
+ parent = PrepareFileDrop(drag,stalePath+"/apps",true,&leaf);
+ rename(stalePath.c_str(),(root+"/moved-parent").c_str());
+ mkdir(stalePath.c_str(),0755);
+ Check(Reject([&]{CreateFileDropDestination(parent,leaf);}) && !Exists(stalePath+"/apps"),
+       "replaced parent produces neither folder nor job");
  Check(CanMoveFileDrop(job), "same-volume local drop offers move");
  auto mixedVolumes = job;
  mixedVolumes.expectedSources.at(f).device = job.expectedDestination.device == 1 ? 2 : 1;

@@ -3,6 +3,7 @@
 #include "FileClipboard.h"
 #include "FileContextMenu.h"
 #include "JobSnapshot.h"
+#include "MainWindow.h"
 #include "Pane.h"
 #include "PropertiesWindow.h"
 #include "SavedPlaces.h"
@@ -25,7 +26,7 @@ PaneContextMenuResult RunPaneContextMenu(
   const bool background = request.GetBool("folderContext", false);
   if (!background && selected.empty())
     return {};
-  const bool folderLocal = folder != "@disks" && !Listi::IsVirtual(folder);
+  const bool folderLocal = !pane.IsSearchList() && folder != "@disks" && !Listi::IsVirtual(folder);
   bool local = true;
   for (const auto &path : selected)
     local &= !Listi::IsVirtual(path);
@@ -67,8 +68,9 @@ PaneContextMenuResult RunPaneContextMenu(
   options.selected = selected.size();
   options.directory = request.GetBool("directory", false);
   options.local = local;
-  options.dual = dual;
+  options.dual = dual && !other.IsSearchList();
   options.folderLocal = folderLocal;
+  options.history = folderLocal && pane.HasHistoryHint();
   const auto folderLocation = Listi::ParseLocation(folder);
   options.folderArchive = folderLocation.Archive();
   options.archiveAdd =
@@ -105,6 +107,14 @@ PaneContextMenuResult RunPaneContextMenu(
       folder != pane.Path() || destination != other.Path())
     throw std::runtime_error(
         "The panel changed. Open the file menu again.");
+  // Browsing a directory (including a volume root) needs no transfer identity.
+  if (action == kSelectedBrowser && options.directory && selected.size() == 1)
+    return {BMessage(action), {}};
+  if (action == kCopyPaths || action == kCopyNames || action == kCopyRelative) {
+    CopySelectionText(action, selected, folder);
+    pane.ShowStatus("Selection copied as text.");
+    return {};
+  }
   if (action == kRestoreSidebar) {
     BMessage restore(kRestoreSidebar);
     pane.MessageReceived(&restore);
@@ -157,7 +167,7 @@ PaneContextMenuResult RunPaneContextMenu(
       pane.Reload();
       return {};
     }
-  } else if (local && action != kCopyPaths) {
+  } else if (local) {
     if (fileSnapshotError)
       std::rethrow_exception(fileSnapshotError);
     Listi::ReadFileClipboard(snapshot);

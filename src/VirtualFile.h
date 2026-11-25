@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #pragma once
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <stdexcept>
@@ -9,12 +10,36 @@
 
 namespace Listi {
 struct Cancelled : std::exception {};
+// Shared by all remote calls made to reconcile one failed upload. Never used
+// to limit the original transfer or to authorize an unverified mutation.
+struct NetworkCleanupBudget {
+  using Clock = std::chrono::steady_clock;
+  Clock::time_point deadline = Clock::now() + std::chrono::seconds(2);
+  uint64_t remaining = 1024 * 1024;
+
+  long TimeoutMs() const {
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()).count();
+    if (ms <= 0 || !remaining)
+      throw std::runtime_error("Remote cleanup budget exhausted.");
+    return static_cast<long>(ms);
+  }
+  void Consume(size_t n) {
+    if (n > remaining) {
+      remaining = 0;
+      throw std::runtime_error("Remote cleanup byte budget exceeded.");
+    }
+    remaining -= n;
+  }
+};
 struct TransferControl {
   std::function<bool()> proceed;
   std::function<void(uint64_t)> progress;
+  NetworkCleanupBudget *cleanup = nullptr;
   void Check() const {
     if (proceed && !proceed())
       throw Cancelled();
+    if (cleanup)
+      cleanup->TimeoutMs();
   }
   void Tick(uint64_t n) const {
     Check();
@@ -37,6 +62,33 @@ struct FileEntry {
   int64_t size = 0, modified = 0;
   unsigned permissions = 0644;
   bool modifiedKnown = false; // Distinguishes an explicit epoch from an absent timestamp.
+  // Decimal digits, without insignificant trailing zeros. Do not round
+  // the source revision to the precision of time_t or of the local filesystem.
+  std::string modifiedFraction;
+
+  bool SameModification(const FileEntry &other) const {
+    return modifiedKnown == other.modifiedKnown && modified == other.modified &&
+           modifiedFraction == other.modifiedFraction;
+  }
+
+  void SetModification(int64_t seconds, long nanoseconds) {
+    modified = seconds;
+    modifiedKnown = true;
+    modifiedFraction.clear();
+    if (nanoseconds > 0 && nanoseconds < 1000000000) {
+      modifiedFraction = std::to_string(1000000000 + nanoseconds).substr(1);
+      while (modifiedFraction.back() == '0')
+        modifiedFraction.pop_back();
+    }
+  }
+
+  long ModifiedNanoseconds() const {
+    long ns = 0;
+    for (size_t i = 0; i < 9; ++i)
+      ns = ns * 10 +
+           (i < modifiedFraction.size() ? modifiedFraction[i] - '0' : 0);
+    return ns;
+  }
 };
 struct Connection {
   std::string username, password, domain, privateKey, knownHosts, keyPassphrase;
@@ -51,11 +103,17 @@ std::string DecodePath(const std::string &);
 std::string ChildLocation(const std::string &, const std::string &);
 std::string ParentLocation(const std::string &);
 std::string LocationLeaf(const std::string &);
-void SetConnection(const std::string &url, const Connection &);
+// Interim single-account mode: a normalized route can be registered only
+// once per process. Existing panes and queued work never adopt new credentials.
+bool SetConnection(const std::string &url, const Connection &);
+void RequireConnection(const std::string &url);
 Connection GetConnection(const std::string &url);
 std::vector<FileEntry> ListFiles(const std::string &,
                                  const TransferControl & = {});
-bool StatFile(const std::string &, FileEntry &, const TransferControl & = {});
+// Only a copy's initial FTP/SFTP lookup may reuse an entry from its traversal.
+// Leave discovered unset when checking the current revision.
+bool StatFile(const std::string &, FileEntry &, const TransferControl & = {},
+              const FileEntry *discovered = nullptr);
 using DataSink = std::function<void(const char *, size_t)>;
 void ReadFile(const std::string &, const DataSink &,
               const TransferControl & = {});
@@ -74,7 +132,8 @@ void ReadArchive(const Location &, const DataSink &, const TransferControl &);
 bool ArchiveAvailable();
 bool NetworkAvailable(const std::string &scheme);
 std::vector<FileEntry> ListNetwork(const Location &, const TransferControl &);
-bool StatNetwork(const Location &, FileEntry &, const TransferControl &);
+bool StatNetwork(const Location &, FileEntry &, const TransferControl &,
+                 const FileEntry *discovered = nullptr);
 void ReadNetwork(const Location &, const DataSink &, const TransferControl &);
 void UploadNetwork(const std::string &, const Location &,
                    const TransferControl &);

@@ -2,6 +2,7 @@
 #pragma once
 #include "Common.h"
 #include "FileOperation.h"
+#include "JobReportStore.h"
 #include <condition_variable>
 #include <deque>
 #include <mutex>
@@ -32,9 +33,10 @@ public:
   bool CancelWaiting(int64 operation);
   struct JobReport {
     std::string summary;
-    Listi::Result result;
+    std::shared_ptr<const Listi::JobReportStore> details;
   };
-  // Immutable completed results, retained until explicitly cleared by the user.
+  static constexpr size_t kFinishedReportLimit = 24;
+  // The newest finished reports by job ID, until cleared or the window closes.
   std::shared_ptr<const JobReport> Report(int64 operation);
   void ForgetReports(const std::vector<int64> &presented);
   // With an ID, cancel all only if that job is still running.
@@ -49,11 +51,12 @@ private:
   int64 EnqueueLocked(const Listi::Job &);
   void Loop();
   void Publish(const BMessage &);
-  void Finish(BMessage &, Listi::Result);
+  void Finish(BMessage &, std::shared_ptr<Listi::JobReportStore>);
   bool CancelOne(int64 operation, bool waitingOnly);
   void PublishCancelled(const QueuedJob &);
   bool Proceed();
-  Listi::Decision Ask(const std::string &);
+  Listi::Decision Ask(const std::string &, const Listi::CopyConflict * = nullptr,
+                      const std::string *fatDestination = nullptr);
   class ProgressView *view;
   BMessenger main, display;
   std::thread thread;
@@ -69,5 +72,6 @@ private:
   int answer = -1;
   int64 conflictSerial = 0, operationSerial = 0;
   int64 runningOperation = 0;
+  bool allowKeepBoth = false, askingFat = false;
   bool awaitingAnswer = false;
 };

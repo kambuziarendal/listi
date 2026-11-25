@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+#include "ReadWorker.h"
 #include "FolderTree.h"
 #include "Common.h"
 #include "VirtualFile.h"
@@ -11,13 +12,14 @@
 #include <algorithm>
 namespace {
 constexpr uint32 kTreeRead = 'trrd', kTreeLoaded = 'trld';
-class TreeReader : public BLooper {
+class TreeReader : public Listi::ReadWorker {
   BMessenger target;
+  std::shared_ptr<TerminalReplies> terminal;
   std::shared_ptr<std::atomic<int64>> generation;
 
 public:
-  TreeReader(BMessenger t, std::shared_ptr<std::atomic<int64>> g)
-      : BLooper("folder tree reader"), target(t), generation(g) {}
+  TreeReader(BMessenger t, std::shared_ptr<std::atomic<int64>> g, std::shared_ptr<TerminalReplies> queue)
+      : ReadWorker("folder tree reader"), target(t), terminal(queue), generation(g) {}
   void MessageReceived(BMessage *m) override {
     if (m->what != kTreeRead) {
       BLooper::MessageReceived(m);
@@ -28,6 +30,7 @@ public:
     c.proceed = [&] { return generation->load() == serial; };
     BMessage result(kTreeLoaded);
     result.AddInt64("serial", serial);
+    result.AddInt64("request", m->GetInt64("request", -1));
     result.AddString("path", m->GetString("path", ""));
     try {
       auto children = Listi::ListFiles(m->GetString("path", ""), c);
@@ -45,14 +48,17 @@ public:
     } catch (const std::exception &e) {
       result.AddString("error", e.what());
     }
-    target.SendMessage(&result, (BHandler *)nullptr, 500000);
+    terminal->Deliver(result, *generation, [&] {
+      return target.SendMessage(&result, (BHandler *)nullptr, 50000);
+    });
   }
 };
 } // namespace
 class TreeItem : public BStringItem {
 public:
   std::string path;
-  bool loaded = false, pending = false;
+  bool loaded = false;
+  int64 pending = 0;
   TreeItem(const std::string &p, const char *label, uint32 level = 0)
       : BStringItem(label, level, false), path(p) {}
 };
@@ -96,7 +102,7 @@ public:
   }
 };
 FolderTree::FolderTree(BHandler *target)
-    : BView("folder tree panel", B_WILL_DRAW | B_SUPPORTS_LAYOUT),
+    : BView("folder tree panel", B_PULSE_NEEDED | B_WILL_DRAW | B_SUPPORTS_LAYOUT),
       navigationTarget(target),
       generation(std::make_shared<std::atomic<int64>>(0)) {
   list = new TreeList(this);
@@ -107,11 +113,11 @@ FolderTree::FolderTree(BHandler *target)
 }
 FolderTree::~FolderTree() {
   generation->store(-1);
-  if (reader && reader->Lock())
-    reader->Quit();
+  Listi::RetireReadWorker(reader);
   Clear();
 }
 void FolderTree::Clear() {
+  terminal->Take();
   std::vector<BListItem *> all;
   for (int32 i = 0; i < list->FullListCountItems(); ++i)
     all.push_back(list->FullListItemAt(i));
@@ -124,8 +130,17 @@ void FolderTree::Clear() {
 void FolderTree::AttachedToWindow() {
   if (reader)
     return;
-  reader = new TreeReader(BMessenger(this), generation);
-  reader->Run();
+  reader = new TreeReader(BMessenger(this), generation, terminal);
+  Listi::StartReadWorker(reader);
+  if (!desired.empty())
+    ShowPath(desired);
+}
+void FolderTree::DetachedFromWindow() {
+  ++*generation;
+  Clear();
+  root.clear();
+  Listi::RetireReadWorker(reader);
+  BView::DetachedFromWindow();
 }
 std::string FolderTree::PathAt(BPoint screen) const {
   const BPoint point = list->ConvertFromScreen(screen);
@@ -141,7 +156,7 @@ void FolderTree::NavigateSelection(const std::string &path) {
   BMessenger(navigationTarget).SendMessage(&m);
 }
 void FolderTree::ShowPath(const std::string &path) {
-  if (!reader || IsHidden())
+  if (!Window() || IsHidden())
     return;
   try {
     const bool overview = path == "@disks";
@@ -180,14 +195,22 @@ void FolderTree::Reset() {
 }
 void FolderTree::ExpandPath(const std::string &path) {
   auto found = items.find(path);
-  if (found == items.end() || found->second->loaded || found->second->pending ||
-      !reader)
+  if (found == items.end() || found->second->loaded || found->second->pending)
     return;
-  found->second->pending = true;
+  if (!reader && Window()) {
+    reader = new TreeReader(BMessenger(this), generation, terminal);
+    Listi::StartReadWorker(reader);
+  }
+  found->second->pending = ++requestID;
   BMessage m(kTreeRead);
   m.AddString("path", path.c_str());
   m.AddInt64("serial", generation->load());
-  reader->PostMessage(&m);
+  m.AddInt64("request", found->second->pending);
+  if (!reader || reader->PostMessage(&m) != B_OK) {
+    m.what = kTreeLoaded;
+    m.AddString("error", "Folder reader busy. Expand again to retry.");
+    MessageReceived(&m);
+  }
 }
 void FolderTree::Follow() {
   // Disks is not a directory. Late branch reads must not reselect the last
@@ -210,6 +233,10 @@ void FolderTree::Follow() {
     }
   }
 }
+void FolderTree::Pulse() {
+  for (auto &reply : terminal->Take())
+    MessageReceived(&reply);
+}
 void FolderTree::MessageReceived(BMessage *m) {
   if (m->what != kTreeLoaded) {
     BView::MessageReceived(m);
@@ -218,11 +245,11 @@ void FolderTree::MessageReceived(BMessage *m) {
   if (m->GetInt64("serial", -1) != generation->load())
     return;
   auto found = items.find(m->GetString("path", ""));
-  if (found == items.end())
+  if (found == items.end() || found->second->pending != m->GetInt64("request", -1))
     return;
   list->Parent()->InvalidateLayout();
   auto parent = found->second;
-  parent->pending = false;
+  parent->pending = 0;
   while (auto child = list->ItemUnderAt(parent, true, 0)) {
     list->RemoveItem(child);
     delete child;

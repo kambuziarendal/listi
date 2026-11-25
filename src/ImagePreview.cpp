@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT
+#include "ReadWorker.h"
 #include "StagingSpace.h"
 #include "AdaptiveScrollView.h"
 #include "ImagePreview.h"
+#include "WindowOverview.h"
 #include "ViewVisibility.h"
 #include "BitmapMailbox.h"
 #include "Common.h"
@@ -200,15 +202,16 @@ BBitmap *DecodeImage(Inspector::Input &input, const Listi::TransferControl &cont
   return image;
 }
 
-class Loader : public BLooper {
+class Loader : public Listi::ReadWorker {
   BMessenger target;
+  std::shared_ptr<TerminalReplies> terminal;
   std::shared_ptr<BitmapMailbox> replies;
   std::shared_ptr<std::atomic<int64>> generation;
 
 public:
   Loader(BMessenger t, std::shared_ptr<std::atomic<int64>> g,
-         std::shared_ptr<BitmapMailbox> r)
-      : BLooper("image preview reader"), target(t), replies(r), generation(g) {}
+         std::shared_ptr<BitmapMailbox> r, std::shared_ptr<TerminalReplies> queue)
+      : ReadWorker("image preview reader"), target(t), terminal(queue), replies(r), generation(g) {}
   void MessageReceived(BMessage *m) override {
     if (m->what != kLoad) {
       BLooper::MessageReceived(m);
@@ -312,8 +315,16 @@ public:
 
 private:
   void Send(BMessage &message, std::unique_ptr<BBitmap> image) {
+    if (message.GetInt64("serial", -1) != generation->load())
+      return;
     int64 reply = image ? replies->Put(image.release()) : -1;
     message.AddInt64("bitmap", reply);
+    if (message.what == kReady) {
+      terminal->Deliver(message, *generation, [&] {
+        return target.SendMessage(&message, (BHandler *)nullptr, 50000);
+      });
+      return;
+    }
     if (target.SendMessage(&message, (BHandler *)nullptr, 50000) != B_OK)
       replies->Take(reply);
   }
@@ -364,8 +375,9 @@ BBitmap *LoadPreviewBitmap(const std::string &source,
   }
 }
 void ImagePreview::OpenWindow(const std::string &path) {
-  auto window = new BWindow(BRect(120, 100, 900, 650), path.c_str(),
-                            B_TITLED_WINDOW, B_AUTO_UPDATE_SIZE_LIMITS);
+  auto window = new Listi::WorkingWindow(BRect(120, 100, 900, 650), path.c_str(),
+                                         "Preview", B_AUTO_UPDATE_SIZE_LIMITS);
+  window->Describe(path, path);
   auto inspector = new ImagePreview(true);
   inspector->ShowFile(path);
   BLayoutBuilder::Group<>(window, B_VERTICAL, 0).Add(inspector);
@@ -376,7 +388,7 @@ void ImagePreview::OpenWindow(const std::string &path) {
 }
 
 ImagePreview::ImagePreview(bool standalone)
-    : BView("inspector", B_WILL_DRAW | B_FULL_UPDATE_ON_RESIZE |
+    : BView("inspector", B_PULSE_NEEDED | B_WILL_DRAW | B_FULL_UPDATE_ON_RESIZE |
                              B_FRAME_EVENTS | B_SUPPORTS_LAYOUT),
       replies(std::make_shared<BitmapMailbox>(2)),
       generation(std::make_shared<std::atomic<int64>>(0)), standalone(standalone) {
@@ -394,8 +406,8 @@ ImagePreview::ImagePreview(bool standalone)
   text->SetInsets(4, 3, 4, 3);
   text->SetResizingMode(B_FOLLOW_ALL);
   textScroll = new Listi::AdaptiveScrollView("preview scroll", text, false);
-  AddChild(textScroll);
-  textScroll->Hide();
+  // Mount the text surface only for text. A stale native scroll child must
+  // never clip the image drawn by this view after an editor closes.
 
   auto addButton = [this](const char *label, uint32 command) {
     auto button = new BButton(label, new BMessage(command));
@@ -420,10 +432,10 @@ ImagePreview::ImagePreview(bool standalone)
   closeQuickView->SetToolTip("Close Quick view (Esc)");
 }
 ImagePreview::~ImagePreview() {
+  if (!textScroll->Parent())
+    delete textScroll;
   generation->store(-1);
-  // Cancel first, then join; a posted quit can outlive BApplication teardown.
-  if (loader && loader->Lock())
-    loader->Quit();
+  Listi::RetireReadWorker(loader);
   delete bitmap;
 }
 void ImagePreview::AttachedToWindow() {
@@ -439,8 +451,8 @@ void ImagePreview::AttachedToWindow() {
   FrameResized(Bounds().Width(), Bounds().Height());
   if (loader)
     return;
-  loader = new Loader(BMessenger(this), generation, replies);
-  loader->Run();
+  loader = new Loader(BMessenger(this), generation, replies, terminal);
+  Listi::StartReadWorker(loader);
   if (!path.empty() && !editor)
     Request(1);
 }
@@ -449,9 +461,8 @@ void ImagePreview::DetachedFromWindow() {
   // A reattached view receives a new handler token. Do not keep a loader
   // that posts completed reads to the token from the previous layout.
   ++*generation;
-  if (loader && loader->Lock())
-    loader->Quit();
-  loader = nullptr;
+  Listi::RetireReadWorker(loader);
+  terminal->Take();
   replies->Clear();
   BView::DetachedFromWindow();
 }
@@ -465,7 +476,7 @@ bool ImagePreview::ShowFile(const std::string &p) {
       pendingFile = p;
     return path == p;
   }
-  if (path == p)
+  if (path == p && !submissionFailed)
     return true;
   path = p;
   photoView = {};
@@ -494,8 +505,9 @@ bool ImagePreview::BeginEditing(const std::string &p) {
   path = p;
   pendingFile.reset();
   ++*generation;
+  terminal->Take();
   replies->Clear();
-  Listi::SetViewVisible(textScroll, false);
+  SetTextVisible(false);
   delete bitmap;
   bitmap = nullptr;
   UpdateControls();
@@ -524,16 +536,23 @@ void ImagePreview::RemoveEditor() {
 }
 void ImagePreview::Request(int requestedPage, bool playback) {
   ready = false;
+  submissionFailed = false;
   int64 serial = ++*generation;
+  terminal->Take();
   replies->Clear();
+  if (!loader && Window() && !path.empty()) {
+    loader = new Loader(BMessenger(this), generation, replies, terminal);
+    Listi::StartReadWorker(loader);
+    submissionFailed = !loader;
+  }
   if (kind == Inspector::Kind::Unknown) {
     delete bitmap;
     bitmap = nullptr;
   }
   caption = path.empty() ? "Select a file to inspect"
                         : playback ? "Playing preview (up to 15 seconds)"
-                                   : "Loading preview…";
-  Listi::SetViewVisible(textScroll, false);
+                                   : loader ? "Loading preview…" : "Preview reader unavailable.";
+  SetTextVisible(false);
   if (!path.empty() && loader) {
     BMessage m(kLoad);
     m.AddInt64("serial", serial);
@@ -541,7 +560,10 @@ void ImagePreview::Request(int requestedPage, bool playback) {
     m.AddInt32("page", requestedPage);
     m.AddBool("play", playback);
     m.AddBool("standalone", standalone);
-    loader->PostMessage(&m);
+    if (loader->PostMessage(&m) != B_OK) {
+      submissionFailed = true;
+      caption = "Preview reader busy. Select the file again.";
+    }
   }
   UpdateControls();
 }
@@ -571,6 +593,10 @@ void ImagePreview::UpdateControls() {
   play->SetLabel(playing ? "Stop preview" : "Play preview");
   LayoutControls();
   Invalidate();
+}
+void ImagePreview::Pulse() {
+  for (auto &reply : terminal->Take())
+    MessageReceived(&reply);
 }
 void ImagePreview::MessageReceived(BMessage *m) {
   switch (m->what) {
@@ -675,7 +701,7 @@ void ImagePreview::MessageReceived(BMessage *m) {
       text->SetText(content);
       text->Select(0, 0);
       text->ScrollToOffset(0);
-      textScroll->Show();
+      SetTextVisible(true);
     }
     if (kind == Inspector::Kind::Unknown && !bitmap && canEdit)
       caption = "Unknown format. Try opening it as UTF-8 text?";
@@ -787,6 +813,17 @@ void ImagePreview::FrameResized(float, float) {
   Invalidate();
 }
 
+void ImagePreview::SetTextVisible(bool visible) {
+  if (visible && !textScroll->Parent()) {
+    AddChild(textScroll);
+    LayoutControls();
+    textScroll->InvalidateLayout();
+  } else if (!visible && textScroll->Parent()) {
+    textScroll->RemoveSelf();
+    Invalidate();
+  }
+}
+
 void ImagePreview::LayoutControls() {
   const float width = Bounds().Width(), height = Bounds().Height();
   const float closeLeft = width - closeQuickView->Bounds().Width() - 5;
@@ -802,14 +839,18 @@ void ImagePreview::LayoutControls() {
     editor->MoveTo(0, 35);
     editor->ResizeTo(width, std::max(0.f, height - 35));
   }
-  textScroll->MoveTo(8, 35);
-  textScroll->ResizeTo(std::max(32.f, width - 16), std::max(32.f, height - 70));
+  if (textScroll->Parent()) {
+    textScroll->MoveTo(8, 35);
+    textScroll->ResizeTo(std::max(32.f, width - 16), std::max(32.f, height - 70));
+  }
   const float buttonTop = height - 44 - previous->Bounds().Height();
   previous->MoveTo(12, buttonTop);
   next->MoveTo(20 + previous->Bounds().Width(), buttonTop);
   play->MoveTo(12, buttonTop);
 }
-void ImagePreview::Draw(BRect) {
+void ImagePreview::Draw(BRect update) {
+  SetHighUIColor(B_DOCUMENT_BACKGROUND_COLOR);
+  FillRect(update);
   SetHighUIColor(B_DOCUMENT_TEXT_COLOR);
   BString title(editor ? "Edit"
                       : closeQuickView->IsHidden(closeQuickView) ? "Inspector" : "Quick view");
@@ -839,7 +880,7 @@ void ImagePreview::Draw(BRect) {
                  std::max(0., region.height*region.scale-1));
       dest.OffsetTo(area.left + region.x, area.top + region.y);
       SetDrawingMode(B_OP_ALPHA);
-      DrawBitmap(bitmap, src, dest);
+      DrawBitmap(bitmap, src, dest, region.scale < 1 ? B_FILTER_BITMAP_BILINEAR : 0);
       SetDrawingMode(B_OP_COPY);
       line << " · " << int32(std::lround(region.scale * 100)) << "%";
     }

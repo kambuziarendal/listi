@@ -125,8 +125,8 @@ int main() try {
       ++found;
       auto own = inventory / entry.path().filename();
       fs::copy_file(entry.path(), own);
-      const auto report = ReviewRecovery(inventory);
-      Require(report == ReviewRecovery(inventory) && report.find(source) != std::string::npos &&
+      const auto report = ReviewRecovery(inventory, RecoveryReview::CheckLocalPaths);
+      Require(report == ReviewRecovery(inventory, RecoveryReview::CheckLocalPaths) && report.find(source) != std::string::npos &&
               report.find(target) != std::string::npos, "Restart review is not idempotent");
       if (boundary == Renamed || boundary == Published || boundary == RetireFull || boundary == Publishing)
         Require(report.find("Uncertain publication") != std::string::npos, "Lost rename mislabelled");
@@ -137,7 +137,7 @@ int main() try {
       if (fs::exists(stage)) {
         fs::rename(stage, root / "moved");
         fs::create_symlink(source, stage);
-        Require(ReviewRecovery(inventory).find("identity changed") != std::string::npos &&
+        Require(ReviewRecovery(inventory, RecoveryReview::CheckLocalPaths).find("identity changed") != std::string::npos &&
                 fs::is_symlink(stage) && Bytes(stage) == payload, "Substituted entry not retained");
         fs::remove(stage);
         fs::remove(root / "moved");

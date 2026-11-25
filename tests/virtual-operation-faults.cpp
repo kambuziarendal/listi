@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: MIT
 // Compile on POSIX: c++ -std=c++17 -Isrc tests/virtual-operation-faults.cpp
-// src/VirtualOperation.cpp src/VirtualFile.cpp src/VirtualLocation.cpp src/Sha256.cpp -o /tmp/listi-faults
+// src/JobReportStore.cpp src/DirectoryFinalization.cpp src/VirtualOperation.cpp
+// src/VirtualFile.cpp src/VirtualLocation.cpp src/Sha256.cpp -lsqlite3 -o /tmp/listi-faults
 // Real staging/dispatch code, deterministic fake network commit failures.
 #include "FileOperation.h"
 #include "VirtualFile.h"
+#include <fcntl.h>
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <sys/stat.h>
 #include <unistd.h>
 // The portable transport fixture has no Haiku BMessage or settings store.
 // Native tests link the real durable inventory; only its storage is mocked here.
@@ -33,9 +36,14 @@ void RecoveryRecord::NoteFailure(bool) noexcept {}
 }
 #endif
 namespace {
-struct Remote { std::string data; int64_t modified = 1; };
+struct Remote { std::string data; int64_t modified = 1; long nanoseconds = 0; };
 std::map<std::string, Remote> files;
 bool corruptUpload = false, denyReadback = false, cancelReadback = false;
+bool cancelAtReadyCheck = false;
+unsigned postCancelReadCalls = 0;
+bool commitFailed = false, expireDuringCleanup = false;
+size_t cleanupReadBytes = 0;
+bool editSmbSourceOnRead = false;
 bool truncateUpload = false, omitStageSize = false, growSourceOnRead = false;
 bool failCommit = false, failRollback = false, failPartCleanup = false,
      failBackupCleanup = false, cancelAfterBackup = false, cancelled = false,
@@ -55,13 +63,20 @@ bool StatArchive(const Location &, FileEntry &, const TransferControl &) { throw
 void ReadArchive(const Location &, const DataSink &, const TransferControl &) {
   throw std::runtime_error("Unexpected archive dispatch");
 }
-bool StatNetwork(const Location &l, FileEntry &entry, const TransferControl &c) {
+bool StatNetwork(const Location &l, FileEntry &entry, const TransferControl &c,
+                 const FileEntry *) {
+  if (expireDuringCleanup && c.cleanup)
+    c.cleanup->deadline = NetworkCleanupBudget::Clock::now();
+  // The target is statted before staging, then again after Ready.
+  if (cancelAtReadyCheck && l.URL() == destination && files.size() == 2)
+    cancelled = true;
   c.Check();
   auto it = files.find(l.URL());
   if (it == files.end()) return false;
   entry.path = l.URL(); entry.name = LocationLeaf(entry.path);
   entry.sizeKnown = !omitStageSize || !suffix(l.URL(), ".part");
-  entry.size = it->second.data.size(); entry.modified = it->second.modified;
+  entry.size = it->second.data.size();
+  entry.SetModification(it->second.modified, it->second.nanoseconds);
   return true;
 }
 std::vector<FileEntry> ListNetwork(const Location &l, const TransferControl &c) {
@@ -76,6 +91,8 @@ std::vector<FileEntry> ListNetwork(const Location &l, const TransferControl &c) 
   return out;
 }
 void ReadNetwork(const Location &l, const DataSink &sink, const TransferControl &c) {
+  if (cancelled)
+    ++postCancelReadCalls;
   c.Check();
   if (cancelReadback && suffix(l.URL(), ".part")) {
     cancelled = true;
@@ -83,11 +100,17 @@ void ReadNetwork(const Location &l, const DataSink &sink, const TransferControl 
   }
   if (denyReadback && suffix(l.URL(), ".part")) throw std::runtime_error("readback denied");
   auto &data = files.at(l.URL()).data;
+  if (commitFailed)
+    cleanupReadBytes += data.size();
   if (growSourceOnRead && l.URL() == "sftp://fixture/in/input") {
     std::string grown = data + "more data";
     sink(grown.data(), grown.size());
   } else {
     sink(data.data(), data.size());
+  }
+  if (editSmbSourceOnRead && l.scheme == "smb") {
+    data = "changed";
+    files.at(l.URL()).nanoseconds = 654000000;
   }
   c.Tick(data.size());
 }
@@ -111,8 +134,11 @@ void ChangeNetwork(const Location &l, const char *action,
   }
   if (std::string(action) != "rename")
     throw std::runtime_error("Unexpected operation");
-  if ((suffix(source, ".part") && failCommit) ||
-      (suffix(source, ".previous") && failRollback))
+  if (suffix(source, ".part") && failCommit) {
+    commitFailed = true;
+    throw std::runtime_error("injected commit failure");
+  }
+  if (suffix(source, ".previous") && failRollback)
     throw std::runtime_error("injected rename failure");
   if (!files.count(source) || files.count(target))
     throw std::runtime_error("rename precondition");
@@ -137,6 +163,10 @@ int main() {
     std::cout << (ok ? "PASS " : "FAIL ") << label << '\n';
   };
   auto reset = [&] {
+    postCancelReadCalls = 0;
+    commitFailed = expireDuringCleanup = false;
+    cleanupReadBytes = 0;
+    cancelAtReadyCheck = false;
     cancelReadback = corruptUpload = denyReadback = truncateUpload = omitStageSize = false;
     files = {{destination, {"old contents", 1}}}; done = 0;
     failCommit = failRollback = failPartCleanup = failBackupCleanup = false;
@@ -148,6 +178,16 @@ int main() {
   };
   auto errorHas = [](const Result &r, const char *text) {
     for (auto &error : r.errors) if (error.find(text) != std::string::npos) return true;
+    return false;
+  };
+  auto reportedCopy = [&](const Result &r, const char *suffixText, const std::string &bytes) {
+    if (r.outcomes.size() != 1 || !r.outcomes.front().upload)
+      return false;
+    for (const auto &path : r.outcomes.front().upload->recoveryPaths) {
+      const auto found = files.find(path);
+      if (suffix(path, suffixText) && found != files.end() && found->second.data == bytes)
+        return true;
+    }
     return false;
   };
   Hooks hooks;
@@ -173,6 +213,29 @@ int main() {
         files.at(destination).data == "old contents",
         "staging rejects actual bytes beyond the declared source size before upload");
   growSourceOnRead = false;
+  const std::string smb = "smb://fixture/in/edited";
+  const std::string downloaded = std::string(dir) + "/edited";
+  reset();
+  files[smb] = {"initial", 1, 123000000};
+  editSmbSourceOnRead = true;
+  r = RunVirtual(Job{Action::Copy, {smb}, dir}, hooks);
+  check(!r.completed && !done && !r.errors.empty() && access(downloaded.c_str(), F_OK),
+        "same-size SMB source edit with a distinct fractional revision is rejected");
+  editSmbSourceOnRead = false;
+  const timespec referenceTime[] = {{0, UTIME_OMIT}, {1, 654000000}};
+  FileEntry expected;
+  expected.SetModification(0, 123400000);
+  const auto prior = expected;
+  expected.SetModification(0, 0);
+  check(prior.modifiedFraction == "1234" && expected.modifiedKnown &&
+            expected.modifiedFraction.empty() && !prior.SameModification(expected),
+        "epoch fractions normalize, distinguish revisions, and clear on reuse");
+  struct stat reference{};
+  check(!utimensat(AT_FDCWD, source.c_str(), referenceTime, 0) &&
+            !stat(source.c_str(), &reference) && StatFile(source, expected) &&
+            expected.modified == reference.st_mtim.tv_sec &&
+            expected.ModifiedNanoseconds() == reference.st_mtim.tv_nsec,
+        "StatFile preserves the local filesystem timestamp precision");
   reset(); truncateUpload = true; r = RunVirtual(job, hooks);
   check(!r.completed && !done && !r.errors.empty() && files.size() == 2 && has(".part") && errorHas(r, ".part") &&
         files.at(destination).data == "old contents",
@@ -218,10 +281,44 @@ int main() {
   check(r.completed == 0 && !r.errors.empty() && done == 0 && files.size() == 1 &&
         files.at(destination).data == "old contents",
         "failed commit restores original and removes staged upload");
-  reset(); cancelAfterBackup = true; r = RunVirtual(job, hooks);
-  check(r.cancelled && r.completed == 0 && done == 0 && files.size() == 1 &&
-        files.at(destination).data == "old contents",
-        "cancellation between backup and commit rolls back without cancellation blocking recovery");
+  reset();
+  const std::string largeOriginal(2 * 1024 * 1024, 'o');
+  files.at(destination).data = largeOriginal;
+  failCommit = true;
+  r = RunVirtual(job, hooks);
+  check(commitFailed && !r.cancelled && !r.completed && !done && !files.count(destination) &&
+            cleanupReadBytes <= 1024 * 1024 && reportedCopy(r, ".previous", largeOriginal) &&
+            errorHas(r, ".previous"),
+        "failed publication leaves oversized original at reported backup without a full reread");
+  reset();
+  failCommit = expireDuringCleanup = true;
+  r = RunVirtual(job, hooks);
+  check(commitFailed && !r.cancelled && !r.completed && !done && !files.count(destination) &&
+            cleanupReadBytes == 0 && reportedCopy(r, ".previous", "old contents") &&
+            reportedCopy(r, ".part", "new contents"),
+        "expired cleanup deadline retains both recovery paths without further reads");
+  for (bool afterBackup : {false, true}) {
+    reset();
+    cancelAtReadyCheck = !afterBackup;
+    cancelAfterBackup = afterBackup;
+    r = RunVirtual(job, hooks);
+    check(r.cancelled && !r.completed && !done && postCancelReadCalls == 0,
+          afterBackup ? "cancel after backup starts no further remote reads"
+                      : "cancel after Ready starts no further remote reads");
+    std::ifstream input(source);
+    std::string retained(std::istreambuf_iterator<char>(input), {});
+    const bool verifiedButUnpublished = r.outcomes.size() == 1 && r.outcomes.front().upload &&
+        r.outcomes.front().upload->contentVerified &&
+        r.outcomes.front().upload->publication == Publication::NotAttempted;
+    const auto target = files.find(destination);
+    const bool targetIntact = target != files.end() && target->second.data == "old contents";
+    check(verifiedButUnpublished && retained == "new contents" && files.size() == 2 &&
+              reportedCopy(r, ".part", retained) &&
+              (afterBackup ? target == files.end() && reportedCopy(r, ".previous", "old contents")
+                           : targetIntact),
+          afterBackup ? "cancel after backup retains source and reports both recovery files"
+                      : "cancel after Ready retains source and old target and reports staged bytes");
+  }
   reset(); failCommit = failRollback = true; r = RunVirtual(job, hooks);
   check(r.completed == 0 && done == 0 && !files.count(destination) &&
         has(".previous") && !has(".part") && errorHas(r, ".previous"),

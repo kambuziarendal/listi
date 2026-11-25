@@ -5,9 +5,11 @@
 #include "ArchivePasswords.h"
 #include "ArchiveSettings.h"
 #include "MessageStore.h"
+#include "RecoveryInventory.h"
 #include "JobSnapshot.h"
 #include "VirtualFile.h"
 #include <Application.h>
+#include <FindDirectory.h>
 #include <TextControl.h>
 #include <StringView.h>
 #include <Window.h>
@@ -182,6 +184,46 @@ void *run(void *) {
     check(vread(ChildLocation(OpenArchive(job.destination), "compressible.txt")) == contents &&
               PrepareArchiveEditTarget(job.destination).archiveFormat == format.id,
           format.id + " compressed result is readable and editable");
+  }
+  if (madeArchives.count("zip")) {
+    const auto original = madeArchives.at("zip");
+    const auto originalBytes = read(original);
+    const auto child = ChildLocation(OpenArchive(original), "cancelled-folder");
+    auto edit = PrepareArchiveMutation(Job{Action::MakeDirectory, {}, child});
+    BPath inventory;
+    check(find_directory(B_USER_SETTINGS_DIRECTORY, &inventory) == B_OK &&
+              inventory.Append("Listi-recovery") == B_OK,
+          "locate recovery inventory for publication cancellation");
+    // Observe only this fixture's journal. Request an ordinary cancellation
+    // after the Publishing checkpoint, without changing any archive or stage.
+    const std::string prefix = ".Listi-archive-stage-";
+    std::string recordPath;
+    bool sawPublishing = false;
+    Hooks cancel;
+    cancel.proceed = [&] {
+      if (recordPath.empty()) {
+        BDirectory folder(out.c_str());
+        BEntry entry;
+        char name[B_FILE_NAME_LENGTH];
+        while (folder.GetNextEntry(&entry, false) == B_OK) {
+          if (entry.GetName(name) == B_OK && std::string(name).find(prefix) == 0) {
+            recordPath = std::string(inventory.Path()) + "/record-" +
+                         std::string(name).substr(prefix.size());
+            break;
+          }
+        }
+      }
+      if (!recordPath.empty()) {
+        const auto record = LoadMessageStore(recordPath, true);
+        sawPublishing = record.GetString("destination", "") == edit.destination &&
+                        record.GetInt32("phase", -1) == int(RecoveryPhase::Publishing);
+      }
+      return !sawPublishing;
+    };
+    const auto stopped = RunArchiveJob(edit, cancel);
+    check(sawPublishing && stopped.cancelled && stopped.errors.empty() &&
+              stopped.completed == 0 && read(original) == originalBytes,
+          "cancellation after the publication checkpoint preserves the archive");
   }
   if (madeArchives.count("iso")) {
     // Renamed images still have the same format; copying bytes without the

@@ -101,7 +101,7 @@ bool Same(const Item &a, const Item &b) {
   auto &y = b.entry;
   return x.directory == y.directory && x.link == y.link &&
          x.sizeKnown == y.sizeKnown && (!x.sizeKnown || x.size == y.size) &&
-         x.modified == y.modified;
+         x.SameModification(y);
 }
 void Validate(const Tree &before, const Tree &after) {
   Need(before.size() == after.size(),
@@ -120,6 +120,19 @@ std::string Digest(const Item &i, const TransferControl &control) {
     Need(S_ISREG(now.st_mode),
          "Special file cannot be compared: " + i.entry.path);
   }
+  Item expected = i;
+  if (ParseLocation(i.entry.path).scheme == "sftp") {
+    // Directory listings cannot supply an exact SFTP time. Compare two
+    // file stats around the read without weakening the listing's type/size check.
+    FileEntry before;
+    Need(StatFile(i.entry.path, before, control),
+         "File changed before reading: " + i.entry.path);
+    expected.entry.modified = before.modified;
+    expected.entry.modifiedKnown = before.modifiedKnown;
+    expected.entry.modifiedFraction = before.modifiedFraction;
+    Need(Same(expected, Inspect(before)),
+         "File changed before reading: " + i.entry.path);
+  }
   Sha256 hash;
   uint64_t count = 0;
   ReadFile(
@@ -133,7 +146,7 @@ std::string Digest(const Item &i, const TransferControl &control) {
   Need(!i.entry.sizeKnown || count == uint64_t(i.entry.size),
        "Byte count changed while reading: " + i.entry.path);
   FileEntry after;
-  Need(StatFile(i.entry.path, after, control) && Same(i, Inspect(after)),
+  Need(StatFile(i.entry.path, after, control) && Same(expected, Inspect(after)),
        "File changed while reading: " + i.entry.path);
   return hash.Finish();
 }

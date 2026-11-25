@@ -3,7 +3,7 @@
 #include "Common.h"
 #include "IconCache.h"
 #include "PaneModel.h"
-#include "NavigationHistory.h"
+#include "PaneNavigationState.h"
 #include "SavedPlaces.h"
 #include "FileSearch.h"
 #include <Button.h>
@@ -12,6 +12,7 @@
 #include <TextControl.h>
 #include <View.h>
 #include <functional>
+#include <optional>
 class FileDetails;
 class FileGrid;
 class ImagePreview;
@@ -25,6 +26,7 @@ class BGroupView;
 class BSplitView;
 class BMenuField;
 namespace Listi {
+class ReadWorker;
 class Shelf;
 inline constexpr uint32 kApplyPattern = 'spap';
 }
@@ -41,6 +43,14 @@ public:
                           const std::string &selection = {},
                           bool invoke = false, bool context = false,
                           BPoint at = {}, const PaneEntry *clicked = nullptr);
+  Listi::PaneNavigationState CaptureNavigation();
+  void RestoreNavigation(const Listi::PaneNavigationState &);
+  bool IsSearchList() const { return queries.count(path.String()) != 0; }
+  std::string LocationLabel() const;
+  const char *SearchRoot() const {
+    auto query = queries.find(path.String());
+    return query == queries.end() ? path.String() : query->second.request.root.c_str();
+  }
   void Reload();
   void SetPlaces(const Listi::SavedPlaces &, bool writable);
   void SetSource(bool);
@@ -62,11 +72,16 @@ public:
   std::map<std::string, Listi::NodeIdentity> SelectedLocalIdentities(size_t limit = SIZE_MAX) const {
     return entries.SelectedLocalIdentities(limit);
   }
+  std::string SelectedFolder() const {
+    const auto *entry = entries.OnlySelected();
+    return entry && entry->directory ? entry->path : "";
+  }
   std::string SelectedPath() const {
     const auto *entry = entries.OnlySelected();
     return entry ? entry->path : "";
   }
   const char *Path() const { return path.String(); }
+  const PaneModel &ExportModel() const { return entries; }
   bool CancelSelectionGesture();
   void FocusList();
   void ToggleTreeFocus();
@@ -76,7 +91,10 @@ public:
   bool IsScanning() const { return scanning; }
   void SendSelection(bool gesture = false);
   void ContextMenu(const std::string &entry, BPoint screen);
+  void SetHistoryHint(bool visible, bool enabled, int32 versions);
+  bool HasHistoryHint() const;
   void ShowStatus(const char *text) { SetStatus(text); }
+  void RequestVisibleIcon(PaneEntry &);
   PaneSort Sorting();
   void Sort(PaneSort);
   int32 CurrentView() const { return mode; }
@@ -85,6 +103,7 @@ public:
   }
   bool CanToggleTree() const;
   bool SidebarCanBeRestored() const;
+  Listi::VisitPosition::Identity FolderIdentity() const { return folderIdentity; }
   bool LocationValid() const { return locationValid; }
   void RefreshShelf();
   SidebarMode Sidebar() const { return prefs.Sidebar(id); }
@@ -102,6 +121,8 @@ private:
   std::vector<std::string> attributeColumns;
   bool attributeDetails = false;
   IconCache icons;
+  Listi::ReadWorker *iconReader = nullptr;
+  std::map<std::string, PaneEntry *> pendingIcons;
   FileDetails *list;
   FileGrid *grid;
   MillerColumns *columns;
@@ -115,15 +136,34 @@ private:
   float contentSplitterSize = 0;
   BMenuField *display;
   int32 mode = 0;
-  void SetDisplayMode(int32);
+  void SetDisplayMode(int32, bool appendedDetails = false);
   int32 LocationMode() const;
   void PublishDisplay(bool folder = false, bool forget = false);
   bool locationValid = false;
   BTextControl *edit;
-  BButton *back, *forward;
+  BButton *back, *forward, *historyButton;
+  bool historyEnabled = false;
+  int32 historyVersions = -1;
   Listi::NavigationHistory history;
+  std::map<std::string, Listi::SavedSearch> queries;
+  std::optional<Listi::PaneNavigationState> restoring;
+  int workingSetView = -1;
+  int restoredView = -1;
+  Listi::ReadWorker *queryWorker = nullptr;
+  std::shared_ptr<std::atomic<int64>> queryFailure = std::make_shared<std::atomic<int64>>(-1);
+  std::vector<std::unique_ptr<PaneEntry>> queryRows;
+  void OpenSearchList(const Listi::SavedSearch &);
+  bool HandleQueryReply(BMessage &);
+  BPoint ScrollPosition();
+  PaneEntry *ScrollRow(const std::string *, float &);
+  Listi::VisitPosition CaptureVisit();
+  void RestoreVisit();
+  std::optional<Listi::VisitPosition> pendingVisit;
+  Listi::VisitPosition::Identity folderIdentity{-1, -1};
+  void RestoreScroll(BPoint);
+
   void StartNavigation(const std::string &, int target = -1,
-                       bool trash = false);
+                       bool trash = false, bool restore = false);
   void UpdateNavigation();
   BTextControl *filter;
   BButton *clearFilter, *clearEmptyFilter;
@@ -148,10 +188,11 @@ private:
   };
   std::unique_ptr<BMessageRunner> progressTimer;
   std::map<std::string, Transfer> transfers;
-  BLooper *scanner = nullptr;
+  Listi::ReadWorker *scanner = nullptr;
   void StartDirectoryReader();
   void AfterInterruptedCopy(const char *folder);
   bool mediaReadSuspended = false;
+  std::shared_ptr<class DirectoryWatch> directoryWatch;
   std::shared_ptr<struct DirectoryScanDelivery> scanDelivery;
   std::unique_ptr<BMessageRunner> scanTimer;
   std::unique_ptr<BMessageRunner> directoryRefreshTimer;

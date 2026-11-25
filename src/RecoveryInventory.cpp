@@ -125,6 +125,9 @@ RecoveryRecord::RecoveryRecord(const std::string &kind, const std::string &folde
     stage += ".part";
     Field(message->AddString("backup", backup.c_str()));
   } else {
+    // Haiku FAT rejects a leading-dot filename without an extension.
+    if (kind == "copy")
+      stage += ".tmp";
     IdentifyParent(*message, stage);
   }
   Field(message->AddString("kind", kind.c_str()));
@@ -195,12 +198,16 @@ void RecoveryRecord::Retire() {
     throw std::runtime_error("Could not confirm removal of the Listi recovery record.");
 }
 
-std::string ReviewRecovery(const std::string &inventory) {
+std::string ReviewRecovery(const std::string &inventory, RecoveryReview mode,
+                           const std::atomic<bool> *closed) {
+  auto cancelled = [&] { return closed && closed->load(); };
   const auto directory = Directory(inventory, false);
   if (directory.empty())
     return "No pending recovery records.";
   std::vector<std::pair<fs::file_time_type, fs::path>> records;
   for (const auto &record : fs::directory_iterator(directory)) {
+    if (cancelled())
+      return {};
     const auto name = record.path().filename().string();
     if (name.size() != 13 || name.rfind("record-", 0) != 0 ||
         !fs::is_regular_file(record.symlink_status()))
@@ -212,6 +219,8 @@ std::string ReviewRecovery(const std::string &inventory) {
   std::sort(records.rbegin(), records.rend());
   std::string review;
   for (size_t i = 0; i < std::min(kReviewLimit, records.size()); ++i) {
+    if (cancelled())
+      return {};
     const auto &record = records[i].second;
     try {
       const auto message = LoadMessageStore(record, true);
@@ -222,14 +231,6 @@ std::string ReviewRecovery(const std::string &inventory) {
           (kind != "archive" && kind != "rename" && kind != "copy" && kind != "codec" && kind != "scratch" && !remote) ||
           path.empty() || (!remote && path[0] != '/'))
         throw std::runtime_error("Invalid record.");
-      struct stat st, parent;
-      const bool matched = !remote && !lstat(path.c_str(), &st) &&
-          !stat(fs::path(path).parent_path().c_str(), &parent) &&
-          st.st_dev == message.GetInt64("device", -1) &&
-          st.st_ino == message.GetInt64("node", -1) &&
-          st.st_crtime == message.GetInt64("created", -1) &&
-          parent.st_dev == message.GetInt64("parent_device", -1) &&
-          parent.st_ino == message.GetInt64("parent_node", -1);
       const int phase = message.GetInt32("phase", -1);
       review += kind == "archive" ? "Archive staging: " : kind == "rename" ?
           "Bulk rename journal: " : remote ? "Remote upload: " :
@@ -253,6 +254,18 @@ std::string ReviewRecovery(const std::string &inventory) {
         review += "\nRemote ownership cannot be proved; review only.\n";
         continue;
       }
+      if (mode == RecoveryReview::JournalOnly) {
+        review += "\nIdentity not checked. Do not assume this path is safe to reuse.\n";
+        continue;
+      }
+      struct stat st, parent;
+      const bool matched = !cancelled() && !lstat(path.c_str(), &st) && !cancelled() &&
+          !stat(fs::path(path).parent_path().c_str(), &parent) &&
+          st.st_dev == message.GetInt64("device", -1) &&
+          st.st_ino == message.GetInt64("node", -1) &&
+          st.st_crtime == message.GetInt64("created", -1) &&
+          parent.st_dev == message.GetInt64("parent_device", -1) &&
+          parent.st_ino == message.GetInt64("parent_node", -1);
       review += matched ? "\nRecorded identity matches. Review only.\n"
                         : "\nMissing or identity changed. Do not reuse this path.\n";
     } catch (const std::exception &) {

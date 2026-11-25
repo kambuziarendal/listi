@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "InlineAction.h"
 #include "NamedEntry.h"
+#include "AdaptiveScrollView.h"
 #include <StringView.h>
 #include "ConnectionView.h"
 #include "ExplicitSubmit.h"
@@ -42,12 +43,24 @@ void InlineAction::Close() {
     delete child;
   }
 }
+void InlineAction::FocusQuestion() {
+  if (!pending)
+    return;
+  if (auto *address = FindView("network address"))
+    address->MakeFocus(true);
+  else if (name)
+    name->MakeFocus(true);
+  else if (auto *cancel = FindView("Cancel"))
+    cancel->MakeFocus(true);
+}
 bool InlineAction::Ask(const char *text, const char *button,
                        const BMessage &accepted, const char *initial,
                        const char *alternative, const char *third,
                        const std::vector<std::string> &choices) {
-  if (pending)
+  if (pending) {
+    FocusQuestion();
     return false;
+  }
   if (beforeOpen)
     beforeOpen();
   ++serial;
@@ -63,7 +76,13 @@ bool InlineAction::Ask(const char *text, const char *button,
   explanation->SetHighUIColor(B_PANEL_TEXT_COLOR);
   explanation->SetExplicitMinSize(BSize(300, 35));
   explanation->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, 75));
-  AddChild(explanation);
+  if (accepted.HasString("preview") && accepted.HasMessage("restoreTarget")) {
+    auto *scroll = new Listi::AdaptiveScrollView("restore destinations", explanation, false);
+    scroll->SetExplicitMinSize(BSize(300, 58));
+    scroll->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, 100));
+    AddChild(scroll);
+  } else
+    AddChild(explanation);
   if (initial) {
     name = new BTextControl("Name:", initial, nullptr);
     AddChild(name);
@@ -86,7 +105,7 @@ bool InlineAction::Ask(const char *text, const char *button,
     options->ItemAt(0)->SetMarked(true);
     AddChild(new BMenuField("output format", "Format:", options));
   }
-  auto cancel = new BButton("Cancel", new BMessage(Event(kCancel)));
+  auto cancel = new BButton("Cancel", "Cancel", new BMessage(Event(kCancel)));
   auto accept = new BButton(button, new BMessage(Event(kAccept)));
   auto buttons = new BGroupView(B_HORIZONTAL, 8);
   BLayoutBuilder::Group<>(buttons, B_HORIZONTAL, 8)
@@ -111,14 +130,16 @@ bool InlineAction::Ask(const char *text, const char *button,
   if (name) {
     name->MakeFocus(true);
     name->TextView()->SelectAll();
-  } else if (alternative || third || options) {
+  } else {
     cancel->MakeFocus(true);
   }
   return true;
 }
 bool InlineAction::Connect(BMessenger pane) {
-  if (pending)
+  if (pending) {
+    FocusQuestion();
     return false;
+  }
   if (beforeOpen)
     beforeOpen();
   ++serial;

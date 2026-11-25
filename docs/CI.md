@@ -9,7 +9,7 @@ hardware passed. Keep the outcome for each separate lane.
 In a clean checkout with Git, Bash, Python 3, Make and a C++17 compiler with
 ASan/UBSan, run `bash ci/portable.sh BASE`, replacing BASE with the commit on
 which the change is based. This checks changed-line whitespace, Python syntax,
-the native test inventory, deliberate runner failures, the POSIX transfer
+the native test inventory, deliberate runner failures, the F12 history tests, the POSIX transfer
 fault suite and seeded parser/digest tests. On GitHub a PR tests the merge SHA
 against its base SHA. Logs record the checkout SHA, not just a branch name.
 For changed C++ lines also see the clang-format review in CONTRIBUTING.md.
@@ -30,7 +30,28 @@ GitHub-hosted throwaway runners only, never a persistent self-hosted runner,
 never pull_request_target. No deployment rights, write tokens, secrets,
 agent forwarding, caches or reusable host credentials are needed.
 
-Prepare a powered-off **test-only** standalone qcow2 image (no backing file)
+Hosted CI needs no repository variables: it fetches the public x86_64 beta6
+guest and its public guest-only SSH test identity from
+[anyvm-org/haiku-builder v2.0.3](https://github.com/anyvm-org/haiku-builder/releases/tag/v2.0.3).
+Both SHA-256 digests are pinned in `ci/fetch-public-fixtures.sh`. Never use
+this identity for other guests or services. The first boot of the disposable
+overlay has outbound NAT to install test dependencies; that script, like the
+rest of the PR, is not trusted host code. After a clean poweroff the same
+overlay boots with restricted networking for source export, build and tests.
+The workflow uploads an early preflight log even if fixture validation fails.
+Package versions resolved at provisioning time are recorded in the native audit.
+
+To run this same lane locally in a clean checkout on a disposable Linux host:
+
+```sh
+fixture=$(mktemp -d)
+bash ci/fetch-public-fixtures.sh "$fixture" &&
+python3 tests/run-ephemeral-audit.py --base "$fixture/haiku.qcow2" \
+  --key "$fixture/guest-identity" --output "$fixture/evidence" \
+  --provision-public-fixture --qualify-package
+```
+
+Alternatively prepare a powered-off **test-only** standalone qcow2 image (no backing file)
 with a fresh Haiku x86_64 installation, GUI app_server, OpenSSH, GCC, Python
 3, Make, Haiku build tools, development headers and required optional codecs.
 See [verification](VERIFICATION.md#native-regression-audit-and-smoke-test).
@@ -48,16 +69,18 @@ This exports committed source, compares the source-file SHA-256 manifest in
 the guest, builds and runs the full native audit with its built-in self-test,
 rejects explicit skipped cases, builds a new HPKG, installs it *in the overlay*,
 compares both installed package and executable byte-for-byte with the build,
-and reruns the installed self-test. Keep source.txt (host, QEMU, commit and source archive digest), source.sha256,
-verify.log, audit.log, installed.log and result.txt. The wrapper requires one
+reruns the installed self-test, and runs normal installed startup and relaunch
+through the multiwindow test (including detach and closing the last window).
+Keep source.txt (host, QEMU, commit and source archive digest), source.sha256,
+verify.log, audit.log, installed.log, installed-multiwindow.log, the tested HPKG
+and result.txt. The wrapper requires one
 completion per selected program, rejects failed/skipped receipts and checks the
 built and installed self-test counts against the PASS lines (at least 58 each).
 A missing, incomplete, failed, focused or preflight result is not an installed
 package pass. Preserve the process exit status as well as those logs. A timed-out GitHub job is not green. For local automation wrap
 the command in an appropriate process-group timeout (e.g. GNU timeout 150m).
 Focused or preflight-only runs are not accepted for package qualification.
-No release assets are uploaded by the workflow; only short-lived logs are
-requested. Power-loss and physical USB behavior are not tested here.
+Qualification artifacts are retained for 14 days and are not published as releases. Power-loss and physical USB behavior are not tested here.
 
 ## Extended (explicitly configured disposable environment only)
 
@@ -94,19 +117,36 @@ Data files, shares, configured keys and raw images are not Actions artifacts.
 Use a dedicated host; the legacy fixture has fixed ports. The extended lane
 is **not** a required hosted check and its absence does not qualify it.
 
+## Focused FTP/SFTP metadata regression
+
+Start `python3 tests/network-metadata-fixture.py /path/to/new-fixture-directory`
+on the host with pyftpdlib and Paramiko installed. From a disposable Haiku guest,
+use SSH reverse TCP forwards to host loopback on ports 2127, 2227 and 31270.
+Copy the generated fixture `known_hosts` into the guest, then run:
+
+```sh
+make
+LISTI_METADATA_KNOWN_HOSTS=/path/to/fixture-known-hosts \
+  python3 tests/run-native-audit.py network-metadata
+```
+
+Restart the fixture with a fresh directory for each test run: the FTP transfer
+test changes one fixture file while sending it. This optional case checks
+ordinary FTP transfers and SFTP file STAT, not a transactional snapshot
+guarantee or a full protocol qualification.
+
 ## Enabling public CI without paid services
 
 1. Use a **public** GitHub repository with free standard Linux-hosted runners
    and available Actions artifact allowance. Do not enable paid usage. The
    jobs are deliberately disabled in private repos; a skipped job there must
    not be required as proof of verification.
-2. Have the owner make the public, sanitized test image and its disposable
-   guest-only SSH identity available at stable HTTPS URLs on existing free
-   infrastructure. Both are **public fixtures**, not secrets; this identity
-   must authorize nothing outside that image. Compute SHA-256 independently
-   and add repository Actions **variables** LISTI_CI_IMAGE_URL,
-   LISTI_CI_IMAGE_SHA256, LISTI_CI_IDENTITY_URL and LISTI_CI_IDENTITY_SHA256.
-   Missing variables, failed downloads or checksum mismatches fail native CI.
+2. Use the pinned public fixture by default. To override it with an already
+   provisioned public test image, configure all four Actions variables:
+   LISTI_CI_IMAGE_URL, LISTI_CI_IMAGE_SHA256, LISTI_CI_IDENTITY_URL and
+   LISTI_CI_IDENTITY_SHA256. Partial overrides, failed downloads and checksum
+   mismatches fail native CI. Never publish a development image or a key
+   authorized outside the disposable fixture.
 3. After review and authorization, land the workflow on the default branch.
    Enable Actions and read-only token access. Run a manual dispatch and
    a test PR; check the exact commit, artifact logs and stable names
@@ -126,3 +166,7 @@ is **not** a required hosted check and its absence does not qualify it.
    Neither repository administration nor hosted execution is performed by a
    local test run. If infrastructure or permissions are missing, leave that
    gate explicitly unqualified.
+
+### Enforced on haiku-native
+
+Audit item **C3: complete**. On 2026-11-25 the effective [repository ruleset](https://github.com/kambuziarendal/listi/rules/28035107) required an up-to-date pull request and both GitHub Actions checks, **Portable** and **Haiku native**, with zero required approvals and no bypass actors. Both appeared in the required-check list on [the alpha pull request](https://github.com/kambuziarendal/listi/pull/1). An unavailable required check blocks merging; a local run is not a substitute.

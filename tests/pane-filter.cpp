@@ -90,6 +90,22 @@ int main() {
     std::cout << (shiftRange ? "PASS " : "FAIL ")
               << "queued Shift+Right selects a range in the icon grid\n";
     passed = passed && shiftRange;
+    const auto paths = pane->Selected();
+    BMessage mini(kGridMode);
+    mini.AddInt32("mode", MiniIconMode);
+    pane->MessageReceived(&mini);
+    for (int i = 0; i < 200 && pane->IsScanning(); ++i) {
+      window->Unlock();
+      snooze(25000);
+      window->Lock();
+    }
+    float miniRange;
+    bar->GetRange(&low, &miniRange);
+    const bool compact = !pane->IsScanning() && pane->CurrentView() == MiniIconMode && miniRange < restored &&
+                         pane->Selected() == paths && root == pane->Path();
+    std::cout << (compact ? "PASS " : "FAIL ")
+              << "mini icons fit more files and preserve the selection and folder\n";
+    passed = passed && compact;
     pane->Select(0);
     const auto revision = pane->SelectionRevision();
     const bool preview = pane->MatchPattern("7?", false) == 10 && pane->Selected().empty();

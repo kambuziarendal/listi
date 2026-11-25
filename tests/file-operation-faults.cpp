@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <cstdarg>
 #include <fs_attr.h>
+#include <fs_info.h>
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
@@ -26,7 +27,7 @@ bool denyTrashCleanup = false;
 bool failStageClose = false, failDirectorySync = false;
 int stageForClose = -1;
 ino_t directoryForSync = -1;
-bool deviceGone = false;
+bool deviceGone = false, reportFat = false, synthesizeStageMode = false;
 int failures = 0;
 
 void Check(bool ok, const char *label) {
@@ -98,6 +99,21 @@ extern "C" int __wrap_close(int fd) {
   }
   return status;
 }
+extern "C" int __real_lstat(const char *, struct stat *);
+extern "C" int __wrap_lstat(const char *path, struct stat *st) {
+  const int status = __real_lstat(path, st);
+  // FAT synthesizes execute bits for .tmp stages but not the final .png.
+  if (status == 0 && synthesizeStageMode && strstr(path, "/.listi-copy-") && S_ISREG(st->st_mode))
+    st->st_mode |= S_IXUSR | S_IXGRP | S_IXOTH;
+  return status;
+}
+extern "C" int __real_fs_stat_dev(dev_t, fs_info *);
+extern "C" int __wrap_fs_stat_dev(dev_t device, fs_info *info) {
+  const int status = __real_fs_stat_dev(device, info);
+  if (!status && reportFat)
+    strcpy(info->fsh_name, "fat");
+  return status;
+}
 extern "C" int __real_fsync(int);
 extern "C" int __wrap_fsync(int fd) {
   struct stat st;
@@ -143,6 +159,99 @@ int main() {
   const std::string payload(1000, 'x');
   std::ofstream(source) << payload;
   std::ofstream(target) << "original";
+  for (const std::string name : {"report.pdf", ".settings", "notes"}) {
+    const auto incoming = root / name, existing = out / name;
+    const std::string stem = name == "report.pdf" ? "report" : name;
+    const std::string extension = name == "report.pdf" ? ".pdf" : "";
+    const auto occupied = out / (stem + " (2)" + extension);
+    const auto candidate = out / (stem + " (3)" + extension);
+    std::ofstream(incoming) << "incoming";
+    std::ofstream(existing) << "existing";
+    std::ofstream(occupied) << "prior";
+    Job copy{Action::Copy, {incoming.string()}, out.string()};
+    bool race = true;
+    Hooks keep;
+    keep.copyConflict = [&](const CopyConflict &request) {
+      Check(request.source == incoming.string() && request.destination == existing.string() &&
+                request.sourceSize == 8 && request.destinationSize == 8 &&
+                request.proposed == candidate.string(),
+            "keep both describes both files and skips occupied names");
+      if (race)
+        std::ofstream(candidate) << "competitor";
+      return Decision::KeepBoth;
+    };
+    auto raced = Run(copy, keep);
+    Check(!raced.errors.empty() && !raced.completed && Read(candidate) == "competitor" &&
+              Read(existing) == "existing" && Read(incoming) == "incoming",
+          "keep both never overwrites a concurrently claimed name");
+    fs::remove(candidate);
+    race = false;
+    bool cancel = false;
+    keep.progress = [&](const auto &, uint64_t bytes) { cancel = bytes != 0; };
+    keep.proceed = [&] { return !cancel; };
+    auto interrupted = Run(copy, keep);
+    Check(interrupted.cancelled && !interrupted.completed &&
+              Has(interrupted, incoming, candidate, "unprocessed", "Cancelled before commit") &&
+              !fs::exists(candidate) && Read(existing) == "existing",
+          "cancelling staged keep both reports the proposed path without creating it");
+    keep.progress = {};
+    keep.proceed = {};
+    auto copied = Run(copy, keep);
+    Check(copied.errors.empty() && copied.completed == 1 &&
+              Has(copied, incoming, candidate, "copied") &&
+              copied.completedRoots.size() == 1 &&
+              copied.completedRoots.front().second == candidate.string() &&
+              Read(candidate) == "incoming" && Read(existing) == "existing" &&
+              Read(occupied) == "prior",
+          "keep both preserves contents and reports the actual published path");
+    for (const auto &path : {incoming, existing, occupied, candidate})
+      fs::remove(path);
+  }
+  // Substitute only the filesystem identification; exercise production staging,
+  // publication and typed attributes on an isolated disposable directory.
+  {
+    const auto image = root / "screen.png", output = out / "screen.png";
+    std::ofstream(image) << payload;
+    BNode node(image.c_str());
+    int32 width = 640;
+    Check(node.WriteAttr("Media:Width", B_INT32_TYPE, 0, &width, sizeof(width)) == sizeof(width),
+          "fixture has screenshot width metadata");
+    reportFat = synthesizeStageMode = true;
+    Job copy{Action::Copy, {image.string()}, out.string()};
+    Hooks consent;
+    bool allow = false;
+    int prompts = 0;
+    consent.confirmFatCopy = [&](const std::string &src, const std::string &dst) {
+      ++prompts;
+      Check(src == image.string() && dst == out.string(), "metadata choice identifies both endpoints");
+      return allow;
+    };
+    const auto refused = Run(copy, consent);
+    Check(refused.cancelled && prompts == 1 && !fs::exists(output) && Read(image) == payload,
+          "declining metadata loss leaves source intact and no destination file");
+    allow = true;
+    const auto copied = Run(copy, consent);
+    BNode destination(output.c_str());
+    attr_info attr{};
+    Check(copied.completed == 1 && copied.errors.empty() && copied.copyLimitations &&
+              prompts == 2 && Read(output) == payload && Read(image) == payload &&
+              node.GetAttrInfo("Media:Width", &attr) == B_OK &&
+              destination.GetAttrInfo("Media:Width", &attr) != B_OK,
+          "explicit FAT copy publishes PNG bytes despite extension-derived execute bits and reports omitted attributes");
+    std::ofstream(output) << "existing";
+    consent.conflict = [](const auto &) { return Decision::Replace; };
+    // This second scenario isolates the metadata policy: Move must copy the
+    // attribute rather than borrowing the ordinary Copy waiver.
+    synthesizeStageMode = false;
+    copy.action = Action::Move;
+    const auto moved = Run(copy, consent);
+    BNode movedNode(output.c_str());
+    Check(moved.errors.empty() && moved.completed == 1 && prompts == 2 &&
+              movedNode.GetAttrInfo("Media:Width", &attr) == B_OK,
+          "copy waiver never applies to Move");
+    reportFat = false;
+    fs::remove(output);
+  }
   Hooks replace;
   replace.conflict = [](const std::string &) { return Decision::Replace; };
   Job move{Action::Move, {source.string()}, out.string()};
@@ -210,7 +319,8 @@ int main() {
   };
   result = Run({Action::Copy, {source.string()}, out.string()}, disconnect);
   deviceGone = false;
-  Check(!result.completed && result.errors.size() == 1 &&
+  Check(!result.completed && result.errors.size() == 2 &&
+            result.errors.front().find("Staging recovery record retained") != std::string::npos &&
             Has(result, source, target, "failed", "device disconnected") &&
             Read(source) == payload && Read(target) == "original" &&
             std::distance(fs::directory_iterator(out), fs::directory_iterator()) == 1,
@@ -354,6 +464,14 @@ int main() {
     fs::remove(inTrash);
 
   const auto trashed = MoveToTrash(source.string());
+  Job guardedRestore{Action::Restore, {trashed}, {}};
+  FreezeLocalJob(guardedRestore);
+  const auto shown = OriginalTrashPath(trashed, guardedRestore.expectedSources.at(trashed));
+  Check(shown == source.string(), "restore preview identifies exact original path");
+  guardedRestore.restoreTargets[trashed] = shown + "-different";
+  result = Run(guardedRestore, {});
+  Check(!result.completed && !result.errors.empty() && fs::exists(trashed) && !fs::exists(source),
+        "restore refuses to repoint a user's destination after confirmation");
   denyTrashCleanup = true;
   result = Run({Action::Restore, {trashed}, {}}, {});
   denyTrashCleanup = false;

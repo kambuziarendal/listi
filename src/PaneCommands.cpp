@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: MIT
 #include "Pane.h"
+#include <Window.h>
+#include <Entry.h>
+#include <Roster.h>
 #include "ArchiveEditor.h"
 #include "ImagePreview.h"
 #include "InlineAction.h"
@@ -100,6 +103,9 @@ bool Pane::HandleOpenCommand(
     const std::function<ImagePreview *()> &openPreview) {
   const char *missingSelection;
   switch (action) {
+  case kFileTypeIcon:
+    missingSelection = "Select one local file or folder.";
+    break;
   case kOpenWith:
     missingSelection = "Select one local file for Open with.";
     break;
@@ -120,6 +126,20 @@ bool Pane::HandleOpenCommand(
   const auto path = SelectedPath();
   if (path.empty()) {
     PostMainWindowNotice(missingSelection);
+  } else if (action == kFileTypeIcon) {
+    BEntry entry(path.c_str(), false);
+    entry_ref ref;
+    BMessage refs(B_REFS_RECEIVED);
+    if (path.front() != '/' || Listi::IsVirtual(path) || !entry.Exists() ||
+        entry.IsSymLink() || entry.GetRef(&ref) != B_OK) {
+      PostMainWindowNotice("Choose a local file or folder, not a symbolic link.");
+    } else {
+      status_t status = refs.AddRef("refs", &ref);
+      if (status == B_OK)
+        status = be_roster->Launch("application/x-vnd.haiku-filetypes", &refs);
+      if (status != B_OK && status != B_ALREADY_RUNNING)
+        PostMainWindowNotice("Could not open Haiku FileTypes for this item.");
+    }
   } else if (action == kOpenWith) {
     OpenWithFile(path);
   } else if (action == kProperties) {
@@ -137,6 +157,7 @@ bool Pane::HandleOpenCommand(
       OpenArchiveEditor(path, editor.String());
     } else {
       BMessage open(kOpenPaths);
+      open.AddMessenger("origin", BMessenger(Window()));
       open.AddString("path", path.c_str());
       open.AddString("mode", externalEdit ? "edit" : "system");
       if (externalEdit)

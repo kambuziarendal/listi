@@ -1,261 +1,119 @@
-# What you can do with Listi
+# A tour of Listi
 
-Listi is a native Haiku file manager. Browse one folder at a time or set up a
-source and destination side by side, then use the same menus, clipboard and
-file actions in either layout.
+Listi can be a small folder window, a two-panel copying desk, or a workspace with a file list, preview and shell. Start with one task; you don't need to configure a workspace to use it.
 
-The screenshots show earlier alpha builds. The [public 0.38.0-13 test package][release]
-runs on Haiku x86_64. See [installation instructions](../README.md#install).
-Use disposable files when trying transfers; changing package versions does not undo operations.
+[Install the Haiku x86_64 alpha](../README.md#install) · [What's new in 0.38.0-23](../CHANGELOG.md) · [Workflow guide](GUIDE.md)
 
-## What changed since 0.38.0-12?
+[Browse](#browse-in-a-window-that-fits) · [Find and select](#find-and-select-the-right-files) · [Transfer](#copy-move-and-recover) · [Restore versions](#go-back-to-an-earlier-version) · [Preview and edit](#look-inside-a-file) · [Organise](#organise-files-across-folders) · [Archives and servers](#work-inside-archives-and-on-servers) · [Haiku tools](#use-haikus-tools-without-losing-your-place)
 
-**In the downloadable 0.38.0-13 candidate:**
+## Browse in a window that fits
 
-- **Windows and tabs.** Open independent file windows, name them and switch between them. Each pane can have its own folder tabs. Duplicate, rename, reorder, close and reopen tabs, or detach one into its own window. Back and Forward remember the selection and visible position when possible. Queued jobs do not follow the active tab.
-- **Search as a file list.** Open a local search in a pane, preview or copy the selected original, and use Back to return. A live BFS query updates the list as matches change. Search results are not paste destinations. In recursive Flat View, sort by name, subfolder, file type, date or size.
-- **Copy, drop and export.** Use **Copy as** for names, full paths or relative paths where available. Export a captured selection or visible list to a new CSV file. Drop on a highlighted local subfolder, or confirm creation of a missing destination folder. For a local regular-file copy conflict, **Keep both** assigns a numbered name instead of replacing the original.
-- **Haiku integration.** Add the current folder to Haiku's Open/Save panel favorites, or open FileTypes for an individual file or folder. Help includes offline build and workspace information.
-- **Recover and keep browsing.** Inspect interrupted-operation records without first probing an unavailable disk. Large job reports are paged. Further changes bound archive listing and staging work, handle uncertain remote upload outcomes conservatively, preserve supported remote file times and reduce SMB contention while browsing during a transfer.
+Choose **View > Workspace**. Switching layouts keeps your locations, selections and accepted jobs.
 
-**In the [public development branch](https://github.com/kambuziarendal/listi/tree/feature/listi-c-4515), after the downloadable candidate:**
-
-- **Save a working set** of selected file windows with their names, layouts, positions and folder tabs. Reopening it adds windows; it does not restart shells or replay file jobs.
-- **Copy to window…** sends a local selection to the active writable local folder in another file window. Its destination is checked rather than following later navigation.
-- **Layout introduction…** previews the four workspaces and lets you choose tools and how external folder requests open. Skip it to keep current preferences.
-
-**Implemented in 0.38.0-19, tested locally in Haiku, not in the public download:**
-
-- **Manual folder history.** Open a quiet local BFS folder and choose **Files > Folder history…**. Connect a separate, dedicated BFS folder outside the source tree. **Create point** records the tree; identical file bytes are reused, even after a rename. Browse a point read-only or **Restore as copy** into a new folder. Typed BFS attributes are preserved. An interrupted restore can leave an incomplete copy, not a replacement for the original. This is not an atomic snapshot, automatic backup or scheduled cleanup.
-- **Large folders.** Details view appends rows in batches and limits pending work so you can leave a folder while it is still loading. In one Haiku VM benchmark with 100,000 files, leaving during a scan took about 0.4 seconds (median); leaving after the entire list was built still took about 5.5 seconds.
-- **Removable media.** Ordinary FAT32 copies survived a clean detach and reattach in a VM. Copies between BFS and NTFS passed content checks in both directions. Writable NTFS still reported “device busy” on unmount; unplugging at that point is not qualified. These are virtual-media checks, not physical-device results.
-- **Search, network and windows.** An unchanged search result still reports if live updates have stopped. Restored searches stay out of Recent folders. Local and SMB file metadata retain available fractional timestamps. A second login cannot silently replace the account bound to a server route; using a different account on that route requires a new process. Checking another window's destination no longer stalls the source window, and thumbnails retry when reader capacity returns.
-
-## Set up the window for the task
-
-Choose a layout under **View > Workspace**:
-
-| Workspace | Try it when you want to… |
+| Choose | When you want to… |
 | --- | --- |
-| **Einn** | Browse in one panel, with no second location competing for space. |
-| **Askr** | See the folder hierarchy and the active file list together. |
-| **Tvískipt** | Keep a source and destination visible for transfers. Use **View > Show function buttons** to hide or show the function buttons. |
-| **Smiðja** | Keep two panels alongside tools such as the inspector, with independent sidebars for shortcuts, tree, Shelf or recent folders. |
+| **Einn** | Open one folder in a compact window. Switch back to a larger workspace to recover its previous size. |
+| **Askr** | Keep a folder tree or shortcuts beside one file list. |
+| **Tvískipt** | Keep a source and a destination side by side. Tab changes which pane is active. |
+| **Smiðja** | Browse two locations with independent sidebars and tools such as search, Inspector or a shell. |
 
-Switching workspaces does not clear the panels or restart queued jobs. In a
-two-panel layout, use **Tab** to switch the active panel. Each side has its own
-location and Back/Forward history. Enter a path directly, use **Go** for common
-locations, or save a named location in **Places**. **Listi > Same folder in other
-panel** gives both sides the same starting point; moving through one does not
-automatically navigate the other.
+![A compact Einn window listing the Lunar atlas folder with its History (3) button](screenshots/einn.png)
 
-Under **View > File view**, choose **Details**, icon views, **Thumbnails** or
-**Miller columns**. Miller columns expose the ancestor folders as you navigate.
-For a folder you always want to see in a particular view, use **Remember view
-for this folder**. That remembers the display mode, not a whole workspace.
-Sort by **Name**, **Size** or **Modified**; selecting the same file type is a
-different action, not a sort order.
+*One folder, one window: the status line gives access to three saved versions.*
 
-Open **View > Workspace > Customize workspace…** to reorder existing command
-buttons, position workspace modules in supported zones or stack the panels.
-Profiles save layouts, not open folders, selected files or jobs. The optional
-compact button layout helps on narrow windows. Menu commands and shortcuts
-remain available even if their buttons are hidden.
+**Choose what the folder shows.** Under **View > Active pane view**, use Details for sortable columns, Mini icons for names beside small icons, Icons or Large icons for a grid, Thumbnails for pictures, or Miller columns to keep ancestor folders visible. Remember a view for a particular folder without changing the workspace default. Details loads large folders in batches, so you can navigate before every row appears.
 
-![Two file panels in Haiku's dark appearance, with a file context menu open](screenshots/listi-tviskipt-context-dark-0.31.0.png)
+**Keep your place.** Each pane has its own Back and Forward history. Type a path, revisit Recent folders or choose a saved Place from Go. Duplicate, name or reorder folder tabs; reopen a closed tab at the tab strip. **Window > Detach tab to Einn window** moves the active tab to its own compact window. Open another browser with **Files > New window** or **Open in new window**. Name windows and switch among them in **Window > Open windows…**.
 
-*Haiku capture from 0.31.0, when Tvískipt was labelled Commander.*
+**Reuse a setup.** A *working set* reopens selected windows with their folders and tabs: preview its contents before adding those windows to your desktop. A *workspace profile* saves an arrangement of tools, not open folders. Customize buttons, panel orientation, filters and sidebars, or use **Help > Layout introduction…** to choose a starting layout. [Workspace controls](GUIDE.md#custom-workspaces) · [Window and tab behaviour](GUIDE.md#folder-tabs)
 
-## Select, copy and move files
+## Find and select the right files
 
-1. Open a disposable source folder and a separate destination folder in
-   **Tvískipt**. Click the source panel, then select a few files.
-2. Choose **Files > Copy to other panel** (Command+Shift+C). The active panel
-   is the source; the other panel is the destination. For **Copy** or **Cut**
-   followed by **Paste**, the destination is whichever folder is active when
-   you paste. This works in a single-panel layout as well.
-3. Open **Listi > Operations**, then **Details**, to review the job. An accepted
-   job retains its original selection and destination as you continue browsing.
-   For a conflict, read the paths before choosing Replace, Skip or Abort.
+| If you need… | Use | What you get |
+| --- | --- | --- |
+| A shorter list | **Filter this folder** | Visible names matching a literal fragment. Select All, None and Invert work on this list. |
+| A group of similar files | **Select > By pattern…** or **Same file type** | Preview the count for a wildcard such as `*.png`, or select visible ordinary files with the same extension. Checkmarks in Details distinguish selection from focus. |
+| One list of a local tree | **Flat View** | Sort by subfolder, name, type, size or date across nested folders. Stop a scan to keep partial results; this is not a live search. |
+| Matches across subfolders | **Listi > Find files…** | Combine name, extension, size and dates. Save criteria, or use a BFS formula with Live updates. Open results as a file panel, preview a hit or use **Show original**. |
 
-Right-click the list and choose **Selected files** or **This folder** to change
-what the menu acts on. **This folder** is the current folder, not a child
-folder under the pointer. Dragging local files into a local panel prompts
-for Copy, Move or Cancel; archive and network drops are copy-only.
+![Find files shows Observations.md and Observation log.txt with their different original folders](screenshots/recursive-search.png)
 
-When Move crosses local volumes, Listi copies the selection, then moves each
-completed original to Trash **on its source volume**. Restore it from Trash
-if needed; wait to empty Trash until you have checked the destination after
-remounting. A skipped conflict or failed copy does not remove the original.
-If the source has no supported writable Trash, use Copy instead.
+*Search reaches into Field notes without changing the folder open in the file pane.*
 
-For a shorter file list, use **Listi > Filter names**. This is a literal
-name filter: hidden rows are deselected. For a wildcard selection, use
-**Select > By pattern…** and enter, for example, `*.png`. Review the match
-count before replacing the selection. Patterns are case-sensitive and match
-only visible names; they do not change the filter or search recursively.
-**Select > Same file type** instead matches the selected file's extension
-among visible ordinary files, ignoring case and recognising compound TAR
-suffixes such as `.tar.gz`. It does not test MIME types or file contents.
+Type the start of a name to focus an entry; Space toggles selection. Filtered-out entries do not silently rejoin a selection. A search result refers to the original file, not a copy; the list is not a paste destination. [Filtering and search](GUIDE.md#filtering-and-search)
 
-- **Paste as a new file:** Copy text or an image, focus a writable local
-  file panel and use **Paste**. Enter a name or accept `Clipboard.txt` or
-  `Clipboard.png`. Existing files are never replaced by this prompt. Paste
-  in a text field still inserts text into the field.
-- **Convert an image:** Drop one local image into a local panel, choose
-  **Convert here**, then choose among formats offered by the installed Haiku
-  translators. Listi creates a new file without replacing the source or an
-  existing output.
-- **Use Trash for ordinary deletion:** **Move to Trash** uses Haiku's Trash,
-  with Tracker-compatible restore metadata for supported local entries.
-  **Restore from Trash** and **Delete permanently…** are separate commands.
-  An archive member removed from a container does not go to local Trash.
+## Copy, move and recover
 
-### Read the result before retrying a job
+1. In **Tvískipt**, open the destination on one side and select files on the other. **Copy to other panel** (Command+Shift+C) uses the target shown at the button. For another window, **Files > Copy to window…** lets you choose its writable local folder. Accepted jobs do not follow later navigation.
+2. On a name conflict, choose for **this file** unless you explicitly apply the choice to the rest. **Keep both** proposes a numbered name for a regular local copy. Dragging onto a highlighted local subfolder offers Copy or Move; clipboard Paste targets the active folder.
+3. Read the one-line receipt. **Listi > Operations > Details** shows paths, results and which job failed. Pause/resume, cancel a running or waiting job, or cancel the queue. Cancellation does not undo completed files.
 
-Operations can pause or resume a job, cancel the running job, remove a selected
-waiting job or cancel the queue. None of those actions undoes committed work.
-A local result marked **Copied; source retained** is not a completed move.
-For a partially completed folder, check its individual entries in the report.
-Remote and archive jobs may report only a job-level error or recovery path.
-Job reports last for the current session. After an interruption, compare source
-and destination before retrying; a hidden staging file is not a backup.
-See [Panels and jobs][jobs] for result labels and recovery details.
+![Lunar atlas in Details on the left; Issue 01 in Icons on the right, with Copy and Move buttons naming Issue 01](screenshots/two-panels.png)
 
-## Find, collect and rename
+*Same workspace, different views: the buttons identify Issue 01 as the transfer destination.*
 
-- **One recursive file list:** Choose **Flat View** alongside Details and Icons to show
-  the active panel’s local folder tree in that panel. The other panel stays
-  available. The **Relative folder** column distinguishes files with the
-  same name; `.` marks the starting folder. Filter by file name or relative
-  folder, or stop the scan and keep its partial results. Flat View is a
-  snapshot. Select a result to inspect its original. **Add to Shelf** collects references to the selected
-  originals after checking they have not been replaced.
-- **Find files by criteria:** Open **Listi > Find files…**. Combine a name
-  fragment with extension, size or date filters. Use **BFS formula** for a
-  native volume query, with optional **Live** updates, or **Save** to keep
-  criteria for later. **Show original in panel** takes you to the original
-  file. Search is on one persistent local volume, not across remote folders,
-  archive contents or file contents.
-- **Collect originals from several folders:** Use **Files > Add to Shelf** or
-  drop local entries onto **Listi > Show Shelf**. **Copy all…**, **Move all…**
-  and **Create archive…** act on the entire Shelf, not just highlighted rows.
-  **Collections > Save current Shelf…** saves named references, not copies.
-  BFS identity checks can recover some moves or renames; unavailable or
-  ambiguous entries may need **Relink…**. Removing references does not delete
-  files, and loading a collection does not run a job.
-- **Rename a batch:** Select at least two entries in one local folder and
-  open **Files > Bulk rename…**. Try a prefix, suffix, literal replacement
-  or numbering, then **Update preview**. The rules preserve extensions.
-  Use **Set name** to override a row with an exact name, including for a
-  swap. Listi rejects duplicate outputs and names occupied by unrelated
-  entries. With the queue idle, **Files > Undo last bulk rename** can undo
-  the last eligible batch in the session if the entries still pass verification.
+**Moving between disks:** Listi copies and checks a root before sending its original to the source volume's Trash. If no supported source Trash is available, use Copy. A normal copy to FAT can ask to omit unsupported Haiku attributes for that job and volume; Move never gets that exception. Verify important copies after remounting. An NTFS volume reporting “device busy” is not ready to unplug.
 
-![Find files with saved criteria and extension, size and date filters](screenshots/listi-search-filters-0.30.0.png)
+**Getting something back:** Trash Restore previews original destinations and does not replace existing files. Permanent deletion is separate. After a stopped job, **Review interrupted operations…** shows recorded paths without first probing a missing disk; it does not replay or delete anything. [Transfer results and recovery](GUIDE.md#panels-and-jobs)
 
-*Find files, captured in 0.30.0 with example files.*
+## Go back to an earlier version
 
-## Compare folders without changing them
+Open a local BFS folder and choose **Files > Folder history…**. Choose a dedicated BFS history folder outside the source and save a version. To save changed trees periodically instead, use **Automatic history settings…**: enable the helper for up to three source/store pairs. Its clock in Deskbar opens settings, even with Listi closed.
 
-Open **Listi > Compare folders…** and choose the two locations. Start with
-**Compare names and sizes** to spot missing entries and type or size differences.
-Choose **Compare with SHA-256** to detect different contents in equal-size
-files. **Show matching entries** includes matches in the results; select a row
-to inspect its paths, digests or errors. The comparison does not copy, merge
-or synchronise anything. It also does not compare permissions or BFS attributes.
-Keep the folders idle during comparisons, and expect remote hashing to read
-entire files over the network.
+In a configured folder the version count is clickable. Right-click the background to choose a separate history window or a read-only preview in the other pane. Drag the timeline, use the arrows or scroll between dates. Additions, removals and changes are relative to the preceding version; browsing never restores anything.
 
-![Folder comparison showing different SHA-256 digests for equal-size files](screenshots/listi-folder-compare-0.28.0.png)
+![Folder history timeline at version three, showing Contact sheet.txt as Added and separate file and folder restore buttons](screenshots/history-timeline.png)
 
-*Folder comparison, captured in 0.28.0.*
+*The selected date shows which entries changed. Nothing is restored until you choose a restore action.*
 
-## Inspect or edit what you are looking at
+Choose **Restore file…** for one regular file or **Restore folder…** for the whole saved version. Pick a containing folder and confirm the proposed unused name. There is no in-place rollback, merging or overwrite. The helper stops at its limits rather than deleting old versions; this is neither an atomic snapshot nor an independent backup. [Setup, limits and restore](GUIDE.md#automatic-folder-history-optional)
 
-Select a file and toggle **Listi > Quick view** (Command+Shift+P). The view
-follows the selection and temporarily hides the other panel in a two-panel
-layout. Toggle it off to return to the layout you were using. **Files > View**
-(Command+Shift+V) opens a separate viewer, while **Listi > Inspector panel**
-can keep a preview alongside two panels.
+## Look inside a file
 
-- **Images:** scroll to zoom, drag to pan, or use **Image…** to fit the image
-  or inspect it at 100%. **Camera details…** reads recognised JPEG EXIF fields
-  locally. If there are GPS tags, revealing coordinates requires a separate
-  choice; it does not contact a map service.
-- **PDF and media:** use **Previous** and **Next** for PDF pages. **Play
-  preview** samples supported audio or video for up to 15 seconds, depending on
-  installed codecs. Use **MediaPlayer** for full playback of a local file.
-  Selecting a file does not start playback.
-- **Text and source:** **Edit** inside the preview opens Listi's native editor
-  for complete, writable local UTF-8 files up to 256 KiB. **Try as text…**
-  validates an unrecognised file before editing. Use Find and replace, Go to
-  line, undo/redo and explicit Save. The editor preserves the original
-  UTF-8 marker, line-ending convention and BFS attributes. If the underlying
-  file changes, Listi refuses the save and keeps the edit open. **Files > Edit**
-  is a different command: it uses the configured external editor.
+**Quick view** (Command+Shift+P) uses the space of the opposite pane without navigating it. **View > Inspector panel** keeps a preview beside the panes, while **Files > View** opens a separate viewer.
 
-![Quick view displaying a sunset photograph beside the active file list](screenshots/listi-quick-view-0.35.0.png)
-![Native source editor with syntax colours and editing controls](screenshots/listi-source-editor-0.35.0.png)
+- **Images:** fit, zoom to actual pixels or pan. Read recognised JPEG EXIF data locally; showing GPS coordinates is a separate choice. Drop an image on a local panel and choose **Convert here** for a new file. JPEG turns transparency white; choose PNG to retain it.
+- **PDF, audio and video:** turn PDF pages or play a short media sample with installed Haiku codecs. Selecting the file does not start playback. Open a local file in MediaPlayer for full playback.
+- **Text and code:** Markdown and HTML are shown as source. Choose **Edit** for supported writable local UTF-8 files up to 256 KiB. Find and replace, jump to a line, wrap text, undo or detach the draft. Save checks for external changes; Discard leaves the original alone. **Edit in external editor** is a separate command.
 
-*Haiku captures from the 0.35.0 source build.
-[Capture details and photograph credit](screenshots/CREDITS.md).*
+![Listi editing palette.py beside the project files, with syntax colours, Detach and Done controls](screenshots/source-editor.png)
 
-## Use Haiku attributes, applications and the shell
+*Edit the selected source file without leaving the list. Detach keeps the draft open in its own window.*
 
-Open **Files > Properties…** on a local entry to inspect timestamps,
-ownership, permissions and typed BFS attributes. Supported permissions and
-attributes can be edited explicitly; system namespaces and unsupported binary
-data stay read-only. Select an attribute and use **Show in Details** to add its
-column to the originating panel. Use **Make searchable…** to check or create a
-supported BFS index on the volume. Creating an index does not backfill old
-values. For native lookup use Find files' BFS query mode.
+[Preview controls and editor limits](GUIDE.md#inspect-and-edit-a-file)
 
-For one local regular file, **Files > Open with… > Open once** picks an
-installed application without changing the system's associations. **Listi >
-Terminal here** opens an interactive shell in a local directory. **Left CLI**
-and **Right CLI** start separate shells from their respective file panels and
-can stay open together. **Dock position** moves the shared dock below, right,
-above or left of the file panels. Either CLI can detach without losing its
-running commands or scrollback. **External terminal window** launches the
-configured separate terminal instead.
+## Organise files across folders
 
-## Work with archives and network folders
+**Collect without copying.** Add local files from different folders to the **Shelf**, or drop them on its sidebar. Save a named collection, relink a missing original, or copy, move or archive the whole Shelf. Removing a reference does not delete its file.
 
-**Archives.** Open a supported archive to browse its members in a panel. Use
-**Files > Archives** to create or extract an archive. Formats, compression and
-password options depend on installed engines. Reading, creating and editing
-are separate capabilities: for example, selected single-volume RAR5 archives
-can be rebuilt in Store mode, but RAR4 writing, split and nested mutation are
-not supported. A supported writable local archive can accept clipboard
-additions, new folder creation, renames and removals through a rebuild.
-See the [archive format and recovery guide][archives] for exact limits.
+**Name and create.** Right-click a writable folder's background for **New file** or **New folder**. Duplicate creates a copy; a symbolic link points to the original. For a batch rename, preview numbering, prefixes, suffixes or replacements, adjust individual names, then apply. Undo is available for the last eligible batch if its files still match.
 
-For a regular member in a supported writable archive, **Files > Edit** opens
-a working copy in the configured editor. Listi can write stable saves back
-through a verified rebuild. **Files > Archives > Resume archive edits…**
-reopens retained edit sessions. Working copies, including decrypted ones,
-can remain on disk. Archive moves that verify a destination before removing
-a source are still not an atomic operation across both locations.
+**Compare and share a list.** **Listi > Compare folders…** compares names and sizes or reads contents for SHA-256. It shows differences rather than synchronising or deleting, and doesn't compare permissions or BFS attributes. **Copy as** puts names or paths on the clipboard; **Export file list…** writes selected or visible entries to a new CSV. Pasting clipboard text or an image into a writable folder can instead create a new text file or PNG. [Comparison](GUIDE.md#folder-comparison) · [CSV export](GUIDE.md#export-a-file-list)
 
-**Network.** Open **Listi > Connect to server…**, enter an SMB, SFTP, FTP or
-FTPS address, and supply credentials in the separate fields. **Advanced**
-offers an SMB domain and SSH key/known-hosts settings. Credentials stay in
-memory for the session. Plain FTP is unencrypted. Keep the connection in
-one panel and a local folder in the other to transfer through the ordinary
-job interface. Available operations and recovery guarantees depend on the
-protocol and server; check both sides after a failure before retrying.
+![Folder comparison with Observations.md marked Different content and two unequal SHA-256 digests](screenshots/folder-compare.png)
 
-## Where to go next
+*Both copies are 258 bytes. Comparing their contents reveals the edit that a size check would miss.*
 
-See the [workflow guide](GUIDE.md) for controls and recovery, the
-[changelog](../CHANGELOG.md) for version differences, and the
-[roadmap](ROADMAP.md) for ideas not yet implemented. Folder comparison does not
-synchronise, **Duplicate** makes a copy rather than finding duplicates, and
-layout profiles are not saved project sessions.
+## Work inside archives and on servers
 
-*Language-model assistance was used during development and documentation.*
+**Archives.** Open a supported archive like a folder. **Files > Archives** creates an archive from a selection or extracts to a new folder. Change format and compression for one job, or save preferences separately. Supported ZIP and 7z creation can use AES-256; 7z can also encrypt names.
 
-[release]: https://github.com/kambuziarendal/listi/releases/tag/test-4515
-[jobs]: GUIDE.md#panels-and-jobs
-[archives]: GUIDE.md#archives
+![Create archive dialog showing Observations.md.zip in the Issue 01 destination with ZIP selected](screenshots/create-archive.png)
+
+*For an ordinary ZIP, confirm the destination and filename. Format options stay one click away.*
+
+Writable local formats support selected additions, renames and removals through a rebuild. Edit a regular member in an external editor and resume its save-back session later. Decrypted working copies can remain on disk. Reading a format does not imply it is writable: examples include selected multipart archives (read only) and single-volume RAR5 (Store writer). [ZIP, 7z, TAR, RAR, ISO and other formats](GUIDE.md#archives) · [Archive editing](GUIDE.md#editing-an-archive-member)
+
+**Servers.** **Listi > Connect to server…** opens SMB, SFTP, FTP or FTPS in a pane. Browse, preview or transfer against a local folder using the usual queue. Supply passwords separately from the URL; Advanced includes the SMB domain and SSH keys/known hosts. A second login cannot silently change the account used by an existing route. Plain FTP is unencrypted. Network copies do not carry BFS attributes; available timestamps, operations and recovery depend on the server. [Connections and transfer limits](GUIDE.md#network-locations)
+
+## Use Haiku's tools without losing your place
+
+**Properties and file types.** Inspect a local entry's size, timestamps and permissions, edit supported typed BFS attributes, or add an attribute column to Details. **Make searchable…** checks or creates a supported volume index; it does not backfill old values. **Open with…** can launch an app once or explicitly change the type default. **File type and icon…** opens Haiku FileTypes for the item. Add a folder to Haiku's Open/Save panel favourites independently of Listi Places.
+
+**Terminals and preferences.** Start **Listi > Terminal here** in the active local folder. Keep separate left and right shells, move the dock or detach a running CLI without losing scrollback. Launch an external terminal or use the optional command field for a separate shell. Settings also control fonts, colours, columns, default views, action buttons and preferred applications.
+
+![A shell docked under the two file panels showing the Lunar atlas working directory and its files](screenshots/terminal.png)
+
+*The left pane’s shell keeps its working directory as you browse.*
+
+[Haiku attributes and queries](GUIDE.md#bfs-columns-and-searchable-attributes) · [Tools and preferences](GUIDE.md#tools-and-preferences) · [Verification and known limits](VERIFICATION.md)

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 #include "SearchResultsView.h"
-#include "Common.h"
+#include "CopyTextMenu.h"
+#include "FileClipboard.h"
+#include "MainWindow.h"
 #include "FileSearch.h"
 #include <ColumnTypes.h>
 #include <List.h>
@@ -44,9 +46,18 @@ public:
     const SearchHit hit = row->hit;
     BPopUpMenu menu("Search result actions", false, false);
     menu.AddItem(new BMenuItem("Show original in panel", nullptr));
-    if (menu.Go(results->ScrollView()->ConvertToScreen(point), false, true,
-                false))
-      results->ShowOriginal(hit);
+    AddCopyTextMenu(menu, true, true, false);
+    if (auto choice = menu.Go(results->ScrollView()->ConvertToScreen(point), false, true, false)) {
+      if (!choice->Message())
+        results->ShowOriginal(hit);
+      else {
+        try {
+          CopySelectionText(choice->Message()->what, {hit.path}, "");
+        } catch (const std::exception &error) {
+          PostMainWindowNotice(error.what());
+        }
+      }
+    }
     return B_SKIP_MESSAGE;
   }
 };

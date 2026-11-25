@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+#include "ReadWorker.h"
 #include "SearchWorker.h"
 #include "FileSearch.h"
 #include <MessageRunner.h>
@@ -9,7 +10,7 @@
 namespace Listi {
 namespace {
 constexpr uint32 kRefresh = 'sref', kReconcile = 'srec';
-class SearchWorker : public BLooper {
+class SearchWorker : public Listi::ReadWorker {
   BMessenger target;
   std::shared_ptr<std::atomic<int64>> generation;
   std::shared_ptr<std::atomic<int64>> failedSerial;
@@ -19,6 +20,7 @@ class SearchWorker : public BLooper {
   SearchHit root;
   int64 serial = -1, revision = 0, events = 0;
   bigtime_t lastScan = 0;
+  bool paneRows = false;
   bool Alive() const { return generation->load() == serial; }
   void Stop() {
     debounce.reset();
@@ -66,6 +68,20 @@ class SearchWorker : public BLooper {
           request, [&] { return Alive(); },
           [&](const SearchHit &hit) {
             BMessage item;
+            if (paneRows) {
+              struct stat st;
+              if (lstat(hit.path.c_str(), &st) || st.st_dev != hit.device || st.st_ino != hit.node)
+                return true;
+              item.AddInt64("size", st.st_size);
+              item.AddInt64("date", st.st_mtime);
+              item.AddInt32("kind", S_ISLNK(st.st_mode) ? 2 : S_ISDIR(st.st_mode) ? 1 : 0);
+              struct stat target;
+              item.AddBool("directory", S_ISDIR(st.st_mode) ||
+                  (S_ISLNK(st.st_mode) && stat(hit.path.c_str(), &target) == 0 && S_ISDIR(target.st_mode)));
+            } else if (request.flat) {
+              item.AddInt64("size", hit.size);
+              item.AddInt64("date", hit.modified);
+            }
             item.AddString("path", hit.path.c_str());
             item.AddInt64("device", hit.device);
             item.AddInt64("node", hit.node);
@@ -99,12 +115,13 @@ class SearchWorker : public BLooper {
 public:
   SearchWorker(BMessenger receiver, std::shared_ptr<std::atomic<int64>> token,
                std::shared_ptr<std::atomic<int64>> failure)
-      : BLooper("file search"), target(receiver), generation(token), failedSerial(failure) {}
+      : ReadWorker("file search"), target(receiver), generation(token), failedSerial(failure) {}
   void MessageReceived(BMessage *m) override {
     switch (m->what) {
     case kSearchStart: {
       Stop();
       serial = m->GetInt64("serial", -1);
+      paneRows = m->GetBool("paneRows", false);
       revision = 0;
       events = 0;
       if (!Alive())
@@ -187,7 +204,7 @@ public:
   }
 };
 }
-BLooper *NewSearchWorker(BMessenger target,
+ReadWorker *NewSearchWorker(BMessenger target,
                          std::shared_ptr<std::atomic<int64>> generation,
                          std::shared_ptr<std::atomic<int64>> failure) {
   return new SearchWorker(target, generation, failure);

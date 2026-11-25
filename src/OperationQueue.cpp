@@ -6,6 +6,7 @@
 #include "VirtualFile.h"
 #include "ViewVisibility.h"
 #include <Button.h>
+#include <CheckBox.h>
 #include <MessageRunner.h>
 #include <GroupView.h>
 #include <LayoutBuilder.h>
@@ -14,6 +15,7 @@
 #include <Window.h>
 #include <algorithm>
 #include <cstdio>
+#include <ctime>
 #include <cstring>
 #include <limits>
 #include <set>
@@ -35,6 +37,14 @@ uint64_t EstimateBytes(const std::vector<std::string> &sources,
   }
   return total;
 }
+std::string DescribeFile(const std::string &path, int64_t size, time_t modified) {
+  char date[64] = "unknown";
+  struct tm local;
+  if (localtime_r(&modified, &local))
+    strftime(date, sizeof(date), "%Y-%m-%d %H:%M:%S", &local);
+  return path + "  (" + std::to_string(size) + " bytes, modified " + date + ")";
+}
+
 const char *Verb(Listi::Action a) {
   switch (a) {
   case Listi::Action::CreateArchive:
@@ -61,6 +71,8 @@ const char *Verb(Listi::Action a) {
     return "Restore";
   case Listi::Action::Delete:
     return "Delete";
+  case Listi::Action::MakeFile:
+    return "Create file";
   case Listi::Action::Rename:
     return "Rename";
   case Listi::Action::BulkRename:
@@ -97,10 +109,22 @@ class ProgressView : public BView {
   void KeepError(const char *error) {
     if (!*error || (!unreadErrors.empty() && unreadErrors.back() == error))
       return;
+    // Full job errors remain available in their report.
+    if (unreadErrors.size() == 24)
+      unreadErrors.pop_back();
     unreadErrors.emplace_back(error);
     ShowNextError();
   }
   BGroupView *choices;
+  BCheckBox *repeat;
+  BButton *replaceChoice, *skipChoice, *keepChoice, *abortChoice;
+  void AddChoice(BButton *&button, const char *label, Listi::Decision decision) {
+    auto message = new BMessage(kAnswer);
+    message->AddInt32("decision", int(decision));
+    button = new BButton(label, label, message);
+    choices->AddChild(button);
+  }
+  BStringView *comparison[3];
   BView *details;
   BButton *detailsButton;
   bool expanded = false;
@@ -112,6 +136,9 @@ class ProgressView : public BView {
     if (show == choicesVisible)
       return;
     choicesVisible = show;
+    if (!show)
+      for (auto line : comparison)
+        Listi::SetViewVisible(line, false);
     if (show)
       choices->Show();
     else
@@ -150,20 +177,26 @@ public:
     file->Hide();
     bar->Hide();
     choices = new BGroupView(B_HORIZONTAL, 4);
-    const char *labels[] = {"Replace", "Replace all", "Skip", "Skip all",
-                            "Abort"};
-    for (int i = 0; i < 5; i++) {
-      auto m = new BMessage(kAnswer);
-      m->AddInt32("decision", i);
-      choices->AddChild(new BButton(labels[i], m));
-    }
+    AddChoice(keepChoice, "Keep both", Listi::Decision::KeepBoth);
+    AddChoice(skipChoice, "Skip", Listi::Decision::Skip);
+    AddChoice(replaceChoice, "Replace", Listi::Decision::Replace);
+    AddChoice(abortChoice, "Abort", Listi::Decision::Abort);
+    repeat = new BCheckBox("repeat-conflict", "Repeat Replace or Skip for remaining conflicts", nullptr);
+    choices->AddChild(repeat);
     choices->Hide();
     cancelButton->SetToolTip("Stops this job. Completed work is kept.");
     cancelAllButton->SetToolTip(
         "Stops the current and waiting jobs. Completed work is kept.");
     results = new JobResultsView(owner);
     details = new BGroupView(B_VERTICAL, 5);
+    for (auto &line : comparison) {
+      line = new BStringView("conflict-detail", "");
+      line->SetExplicitMinSize(BSize(0, B_SIZE_UNSET));
+      line->SetTruncation(B_TRUNCATE_MIDDLE);
+      line->Hide();
+    }
     BLayoutBuilder::Group<>(details, B_VERTICAL, 5)
+        .Add(comparison[0]).Add(comparison[1]).Add(comparison[2])
         .Add(choices)
         .Add(results)
         .AddGroup(B_HORIZONTAL)
@@ -224,7 +257,7 @@ public:
     UpdateVisibility();
   }
   void Expand(bool show) {
-    if (expanded == show) {
+    if ((!show && choicesVisible) || expanded == show) {
       UpdateVisibility();
       return;
     }
@@ -284,30 +317,51 @@ public:
       summary->SetText("Cancelling. Finishing the current safe step...");
       break;
     }
-    case kAnswer:
-      if (owner->Answer(
-              static_cast<Listi::Decision>(m->GetInt32("decision", 4)),
-              m->GetInt64("request", -1)))
+    case kAnswer: {
+      auto decision = static_cast<Listi::Decision>(m->GetInt32("decision", 4));
+      if (!repeat->IsHidden() && repeat->Value() == B_CONTROL_ON) {
+        if (decision == Listi::Decision::Replace)
+          decision = Listi::Decision::ReplaceAll;
+        else if (decision == Listi::Decision::Skip)
+          decision = Listi::Decision::SkipAll;
+      }
+      if (owner->Answer(decision, m->GetInt64("request", -1)))
         ShowChoices(false);
       break;
-    case kConflict:
+    }
+    case kConflict: {
       if (!activeOperation || cancelling ||
           m->GetInt64("operation", 0) != activeOperation)
         break;
       conflictRequest = m->GetInt64("request", -1);
-      for (int32 i = 0; i < choices->CountChildren(); ++i) {
-        if (auto button = dynamic_cast<BButton *>(choices->ChildAt(i))) {
-          auto answer = new BMessage(kAnswer);
-          answer->AddInt32("decision", i);
-          answer->AddInt64("request", conflictRequest);
-          button->SetMessage(answer);
+      for (int i = 0; i < 3; ++i) {
+        const char *line = nullptr;
+        bool present = m->FindString("detail", i, &line) == B_OK;
+        if (present) {
+          comparison[i]->SetText(line);
+          comparison[i]->SetToolTip(line);
         }
+        Listi::SetViewVisible(comparison[i], present);
+      }
+      const bool fat = m->GetBool("fat", false);
+      repeat->SetValue(B_CONTROL_OFF);
+      Listi::SetViewVisible(repeat, !fat);
+      Listi::SetViewVisible(keepChoice, !fat && m->HasString("detail"));
+      Listi::SetViewVisible(skipChoice, !fat);
+      replaceChoice->SetLabel(fat ? "Copy without attributes" : "Replace");
+      abortChoice->SetLabel(fat ? "Cancel copy" : "Abort");
+      for (auto *button : {replaceChoice, skipChoice, keepChoice, abortChoice}) {
+        BMessage *answer = new BMessage(*button->Message());
+        answer->SetInt64("request", conflictRequest);
+        button->SetMessage(answer);
       }
       Expand(true);
-      summary->SetText("Destination exists. Choose how to continue:");
+      summary->SetText(fat ? "FAT cannot store Haiku file attributes."
+                           : "Destination exists. Choose how to continue:");
       file->SetText(m->GetString("path", ""));
       ShowChoices(true);
       break;
+    }
     case kJobAccepted:
       results->Accepted(m->GetInt64("operation", 0), m->GetString("title", ""));
       break;
@@ -335,11 +389,15 @@ public:
         bar->Reset();
         bar->SetMaxValue(1);
         pause->SetLabel("Pause");
+        Listi::SetViewVisible(summary, true);
         summary->SetText("Working. You can keep browsing.");
       }
       if (!activeOperation || operation != activeOperation)
         break;
-      title->SetText(m->GetString("title", title->Text()));
+      if (const char *label = m->GetString("title", nullptr)) {
+        title->SetText(label);
+        title->SetToolTip(label);
+      }
       if (const char *path = m->GetString("path", nullptr)) {
         file->SetText(path);
         file->SetToolTip(path);
@@ -365,6 +423,7 @@ public:
       break;
     }
     case kJobDone: {
+      const char *compactResult = m->GetString("compactResult", nullptr);
       BString s = m->GetString("result", "");
       const bool activeDone =
           activeOperation && m->GetInt64("operation", 0) == activeOperation;
@@ -388,14 +447,21 @@ public:
           file->SetText(transfer);
           file->SetToolTip(transfer);
         }
-        Listi::SetViewVisible(file, hasCompletion);
+        Listi::SetViewVisible(file, hasCompletion && !compactResult);
         Listi::SetViewVisible(bar, false);
       }
-      if (!activeOperation && !owner->Busy())
-        title->SetText("Queue finished");
+      if (activeDone && compactResult) {
+        title->SetText(compactResult);
+        title->SetToolTip(m->GetString("transferResult", compactResult));
+        Listi::SetViewVisible(summary, false);
+      } else if (!activeOperation && !owner->Busy() && !compactResult)
+        title->SetText(m->HasString("issue") ? "Needs attention" : "Queue finished");
       const char *error;
-      for (int32 i = 0; m->FindString("error", i, &error) == B_OK; ++i)
-        KeepError(error);
+      if (const auto *issue = m->GetString("issue", nullptr))
+        KeepError(issue);
+      else
+        for (int32 i = 0; m->FindString("error", i, &error) == B_OK; ++i)
+          KeepError(error);
       if (m->HasString("retainedSource")) {
         BString retained("Complete copy retained at: ");
         retained << m->GetString("retainedDestination", "");
@@ -454,6 +520,20 @@ void OperationQueue::ErrorInfo(const char *text) {
   display.SendMessage(&error);
 }
 int64 OperationQueue::Enqueue(const Listi::Job &j) {
+  try {
+    for (const auto &source : j.sources)
+      if (Listi::IsVirtual(source))
+        Listi::RequireConnection(source);
+    if (Listi::IsVirtual(j.destination))
+      Listi::RequireConnection(j.destination);
+    if (Listi::IsVirtual(j.destinationFolder))
+      Listi::RequireConnection(j.destinationFolder);
+  } catch (const std::exception &error) {
+    if (j.archivePasswordToken)
+      Listi::DiscardArchiveCreationPassword(j.archivePasswordToken);
+    ErrorInfo(error.what());
+    return 0;
+  }
   std::lock_guard<std::mutex> lock(mutex);
   return EnqueueLocked(j);
 }
@@ -564,20 +644,29 @@ void OperationQueue::PublishCancelled(const QueuedJob &queued) {
   BString summary;
   summary << Verb(queued.job.action) << ": Cancelled before starting.";
   done.AddString("result", summary);
-  Listi::Result result;
-  result.cancelled = true;
+  auto details = std::make_shared<Listi::JobReportStore>();
   for (const auto &path : queued.job.sources)
-    result.outcomes.push_back({path, "", "unprocessed", ""});
+    details->WriteOutcome({path, "", "unprocessed", ""}, false);
   if (queued.job.sources.empty() && !queued.job.destination.empty())
-    result.outcomes.push_back({"", queued.job.destination, "unprocessed", ""});
-  Finish(done, std::move(result));
+    details->WriteOutcome({"", queued.job.destination, "unprocessed", ""}, false);
+  Finish(done, std::move(details));
 }
-void OperationQueue::Finish(BMessage &done, Listi::Result result) {
+void OperationQueue::Finish(
+    BMessage &done, std::shared_ptr<Listi::JobReportStore> details) {
+  details->Seal();
+  std::string reportSummary = done.GetString("result", "");
+  const char *source, *destination;
+  if (done.FindString("retainedSource", &source) == B_OK &&
+      done.FindString("retainedDestination", &destination) == B_OK)
+    reportSummary += std::string("\nComplete copy retained at: ") + destination +
+                     "\nSource left intact: " + source;
   auto report = std::make_shared<JobReport>(
-      JobReport{done.GetString("result", ""), std::move(result)});
+      JobReport{std::move(reportSummary), std::move(details)});
   {
     std::lock_guard<std::mutex> lock(mutex);
     reports.emplace(done.GetInt64("operation", 0), std::move(report));
+    while (reports.size() > kFinishedReportLimit)
+      reports.erase(reports.begin());
   }
   Publish(done);
 }
@@ -614,8 +703,9 @@ bool OperationQueue::Answer(Listi::Decision d, int64 request) {
   {
     std::lock_guard<std::mutex> l(mutex);
     if (cancel || stopping || !awaitingAnswer || request != conflictSerial ||
-        answer >= 0 || int(d) < int(Listi::Decision::Replace) ||
-        int(d) > int(Listi::Decision::Abort))
+        answer >= 0 || (askingFat && d != Listi::Decision::Replace && d != Listi::Decision::Abort) ||
+        int(d) < int(Listi::Decision::Replace) ||
+        int(d) > int(allowKeepBoth ? Listi::Decision::KeepBoth : Listi::Decision::Abort))
       return false;
     answer = int(d);
   }
@@ -627,7 +717,7 @@ bool OperationQueue::Proceed() {
   changed.wait(l, [this] { return !paused || cancel || stopping; });
   return !cancel && !stopping;
 }
-Listi::Decision OperationQueue::Ask(const std::string &path) {
+Listi::Decision OperationQueue::Ask(const std::string &path, const Listi::CopyConflict *copy, const std::string *fatDestination) {
   int64 request, operation;
   {
     std::lock_guard<std::mutex> l(mutex);
@@ -636,12 +726,26 @@ Listi::Decision OperationQueue::Ask(const std::string &path) {
     answer = -1;
     request = ++conflictSerial;
     operation = runningOperation;
+    allowKeepBoth = copy != nullptr;
+    askingFat = fatDestination != nullptr;
     awaitingAnswer = true;
   }
   BMessage m(kConflict);
   m.AddInt64("operation", operation);
   m.AddInt64("request", request);
   m.AddString("path", path.c_str());
+  if (fatDestination) {
+    m.AddBool("fat", true);
+    m.AddString("detail", ("Destination: " + *fatDestination).c_str());
+    m.AddString("detail", "Copy file contents without Haiku attributes for this job on this FAT volume? Originals stay unchanged.");
+  }
+  if (copy) {
+    m.AddString("detail", ("Incoming: " + DescribeFile(copy->source, copy->sourceSize,
+                                                       copy->sourceModified)).c_str());
+    m.AddString("detail", ("Existing: " + DescribeFile(path, copy->destinationSize,
+                                                       copy->destinationModified)).c_str());
+    m.AddString("detail", ("Keep both as: " + copy->proposed).c_str());
+  }
   Publish(m);
   std::unique_lock<std::mutex> l(mutex);
   changed.wait(l, [this] { return answer >= 0 || cancel || stopping; });
@@ -667,8 +771,11 @@ void OperationQueue::Loop() {
     const auto &job = queued.job;
     const int64 operation = queued.operation;
     BString title;
-    title << Verb(job.action) << ": " << int32(job.sources.size())
-          << " selected entries";
+    title << Verb(job.action) << ": ";
+    if (job.sources.size() > 1)
+      title << int32(job.sources.size()) << " selected items";
+    else
+      title << Listi::LocationLeaf(job.sources.empty() ? job.destination : job.sources.front()).c_str();
     BMessage start(kJobUpdate);
     start.AddInt64("operation", operation);
     start.AddString("title", title);
@@ -688,18 +795,34 @@ void OperationQueue::Loop() {
     size.AddInt64("operation", operation);
     size.AddInt64("total", total);
     Publish(size);
-    std::map<std::string, uint64_t> fileBytes, fileSizes;
+    std::string activePath;
+    uint64_t fileBytes = 0, fileSize = 0;
     uint64_t bytes = 0;
     bigtime_t last = 0;
     Listi::Hooks hooks;
+    hooks.report = std::make_shared<Listi::JobReportStore>();
     hooks.proceed = [this] { return Proceed(); };
+    if (job.action == Listi::Action::Copy && !Listi::IsVirtual(job.destination) &&
+        std::none_of(job.sources.begin(), job.sources.end(),
+                     [](const auto &path) { return Listi::IsVirtual(path); }))
+      hooks.copyConflict = [this](const auto &c) { return Ask(c.destination, &c); };
+    hooks.confirmFatCopy = [this](const auto &path, const auto &destination) {
+      return Ask(path, nullptr, &destination) == Listi::Decision::Replace;
+    };
     hooks.conflict = [this](auto &p) { return Ask(p); };
     hooks.fileSize = [&](const std::string &path, uint64_t size) {
-      fileSizes[path] = size;
+      activePath = path;
+      fileSize = size;
+      fileBytes = 0;
     };
     hooks.progress = [&](auto &p, uint64_t n) {
       bytes += n;
-      fileBytes[p] += n;
+      if (p != activePath) {
+        activePath = p;
+        fileBytes = 0;
+        fileSize = 0;
+      }
+      fileBytes += n;
       if (system_time() - last < 80000)
         return;
       last = system_time();
@@ -712,8 +835,8 @@ void OperationQueue::Loop() {
       file.AddString("path", p.c_str());
       file.AddInt32("state", 1);
       file.AddFloat("fraction",
-                    fileSizes[p]
-                        ? std::min(0.99f, float(fileBytes[p]) / fileSizes[p])
+                    fileSize
+                        ? std::min(0.99f, float(fileBytes) / fileSize)
                         : 0.f);
       main.SendMessage(&file, (BHandler *)nullptr, 500000);
     };
@@ -737,14 +860,26 @@ void OperationQueue::Loop() {
       file.AddFloat("fraction", 1.f);
       main.SendMessage(&file, (BHandler *)nullptr, 500000);
     };
+    std::string failedSource;
     hooks.fileFailed = [&](const std::string &path, const std::string &error) {
       BMessage file(kFileProgress);
       file.AddString("path", path.c_str());
-      file.AddString("error", error.c_str());
+      if (failedSource.empty())
+        failedSource = path;
+      const auto line = std::string(Verb(job.action)) + " #" + std::to_string(operation) +
+                        " on " + Listi::LocationLeaf(path) + ": " + error;
+      file.AddString("error", line.c_str());
       file.AddInt32("state", 3);
       main.SendMessage(&file, (BHandler *)nullptr, 500000);
     };
     auto result = Listi::Run(job, hooks);
+    auto &details = *hooks.report;
+    for (const auto &error : result.errors)
+      details.AddError(error);
+    for (const auto &row : result.outcomes)
+      details.WriteOutcome(row, false);
+    result.errors.clear();
+    result.outcomes.clear();
     const bool renameBatch = job.action == Listi::Action::BulkRename;
     const bool undoBatch = job.action == Listi::Action::UndoBulkRename;
     const bool undoAvailable = result.bulkRenameUndo.has_value();
@@ -772,7 +907,7 @@ void OperationQueue::Loop() {
         done.AddString("moved", root.first.c_str());
     BString summary;
     summary << Verb(job.action) << ": " << result.completed << " completed, "
-            << result.skipped << " skipped, " << int32(result.errors.size())
+            << result.skipped << " skipped, " << int32(details.ErrorCount())
             << " errors";
     if (result.bulkRenameRecoveryNeeded)
       summary << ". Check entry locations in the operation report.";
@@ -781,8 +916,12 @@ void OperationQueue::Loop() {
                                            : ". Cancelled; completed entries kept.");
     else if (renameBatch && result.completed && !undoAvailable)
       summary << ". Undo unavailable: contents could not be verified.";
+    if (result.copyLimitations)
+      summary << ". Metadata or filesystem limitations: see Details. Safely eject removable disks.";
     if (result.recoverableMoves)
       summary << ". Cross-volume originals kept in source Trash.";
+    if (details.Incomplete())
+      summary << ". Job report storage unavailable; some details may be missing.";
     done.AddString("result", summary);
     if (!result.interruptedCopyFolder.empty())
       done.AddString("interruptedCopyFolder", result.interruptedCopyFolder.c_str());
@@ -796,9 +935,18 @@ void OperationQueue::Loop() {
           transferResult << " (+" << result.completed - 1 << ")";
         transferResult << " → " << entry.second.c_str();
         done.AddString("transferResult", transferResult);
+        if (job.action == Listi::Action::Copy && !result.cancelled && !result.skipped &&
+            !details.ErrorCount() && !details.Incomplete() && !result.copyLimitations) {
+          std::string target = Listi::ParentLocation(entry.second);
+          std::string compact = "Copied " + (result.completed == 1
+              ? Listi::LocationLeaf(entry.first)
+              : std::to_string(result.completed) + " items");
+          done.AddString("compactResult", (compact + " to " + target).c_str());
+        }
       }
     }
-    done.AddBool("complete", !result.cancelled && result.errors.empty() &&
+    done.AddBool("complete", !result.cancelled && !details.ErrorCount() &&
+                                 !details.Incomplete() &&
                                  result.skipped == 0);
     done.AddBool("cancelled", result.cancelled);
     if (result.retainedMoveCopy) {
@@ -806,9 +954,22 @@ void OperationQueue::Loop() {
       done.AddString("retainedSource", source.c_str());
       done.AddString("retainedDestination", destination.c_str());
     }
-    for (auto &e : result.errors)
-      done.AddString("error", e.c_str());
+    if (details.ErrorCount() || details.Incomplete()) {
+      std::string issue = std::string(Verb(job.action)) + " #" + std::to_string(operation);
+      issue += result.completed ? " partially completed" : " not confirmed";
+      if (!failedSource.empty())
+        issue += ": " + Listi::LocationLeaf(failedSource);
+      if (!job.destination.empty() && transfer)
+        issue += " → " + job.destination;
+      issue += ". Check Details before retrying.";
+      done.AddString("issue", issue.c_str());
+    }
+    const auto sample = details.Page(0, 4);
+    for (const auto &error : sample.errors)
+      done.AddString("error", error.c_str());
+    if (details.ErrorCount() > sample.errors.size() || details.Incomplete())
+      done.AddString("error", "See the job report for available details.");
     done.AddBool("idle", count.load() == 0);
-    Finish(done, std::move(result));
+    Finish(done, std::move(hooks.report));
   }
 }

@@ -70,6 +70,34 @@ int main() {
   check(h.RecentFolders().front() == "Trash" &&
             other.RecentFolders() == std::vector<std::string>({"Other"}),
         "recent folders exclude the volume overview and remain pane-local");
+  visit("@query:1");
+  visit("@set-query:2");
+  visit("sftp://fixture/folder");
+  travel(h.Back());
+  check(h.At(h.Position()) == "@set-query:2" && h.At(h.Back()) == "@query:1" &&
+            h.At(h.Forward()) == "sftp://fixture/folder" &&
+            h.RecentFolders()[0] == "sftp://fixture/folder" &&
+            h.RecentFolders()[1] == "Trash",
+        "generated and restored search tokens are visits, not recent folders");
+  NavigationHistory repeated;
+  for (int i = 0; i < 3; ++i) {
+    const auto path = i == 1 ? "B" : "A";
+    repeated.Begin(i, path);
+    repeated.Complete(i, path, true);
+    Listi::VisitPosition position;
+    position.focus = std::to_string(i);
+    repeated.SavePosition(position);
+  }
+  auto copy = repeated;
+  copy.Begin(4, "B", 1);
+  Listi::VisitPosition partial;
+  partial.focus = "partial";
+  copy.SavePosition(partial);
+  check(copy.PositionAt(0)->focus == "0" && copy.PositionAt(2)->focus == "2",
+        "repeated visits have separate positions; partial scans cannot overwrite them");
+  copy.Complete(4, "B", true);
+  copy.SavePosition(partial);
+  check(repeated.PositionAt(1)->focus == "1", "tab snapshot owns its visit positions");
   NavigationHistory bounded;
   for (int i = 0; i < 65; ++i) {
     bounded.Begin(i + 1, std::to_string(i));

@@ -46,9 +46,16 @@ enum : uint32 {
   kDesktop = 'desk',
   kDisks = 'disk',
   kProperties = 'prop',
+  kFileTypeIcon = 'ftic',
+  kFilePanelFavorite = 'fpfa',
+  kFilePanelFavoriteNamed = 'fpfn',
   kOpenWith = 'opwi',
   kClipboardCopy = 'ccpy',
+  kExportFileList = 'exfl',
   kCopyPaths = 'cpat',
+  kAboutListi = 'abli',
+  kCopyNames = 'cpnm',
+  kCopyRelative = 'cpre',
   kClipboardCut = 'ccut',
   kClipboardPaste = 'cpst',
   kClipboardSaveText = 'ctsf',
@@ -59,6 +66,7 @@ enum : uint32 {
   kExtractArchive = 'arex',
   kAddArchive = 'arad',
   kRemoveArchive = 'arrm',
+  kCopyToWindow = 'cpwi',
   kCopy = 'copy',
   kMove = 'move',
   kDelete = 'dele',
@@ -66,6 +74,7 @@ enum : uint32 {
   kRestore = 'rest',
   kTrashFolder = 'trsh',
   kMkdir = 'mkdr',
+  kNewFile = 'nefl',
   kRename = 'rnam',
   kBulkRename = 'brnm',
   kBulkRenameAccepted = 'brac',
@@ -90,6 +99,7 @@ enum : uint32 {
   kFilterDone = 'fldn',
   kTerminal = 'term',
   kPreferences = 'pref',
+  kSharedPreferences = 'shpf',
   kApplyPreferences = 'aprf',
   kCommand = 'cmdl',
   kDrop = 'drop',
@@ -110,7 +120,12 @@ enum : uint32 {
 };
 struct Preferences : WorkspaceLayout {
   BFont font = *be_plain_font;
-  bool icons = true, size = true, date = true;
+  enum FolderOpening : int32 { NewWindow, NewTab, Ask };
+  inline static constexpr const char *FolderOpeningLabels[] = {
+      "Independent window", "Folder tab", "Ask each time"};
+  FolderOpening folderOpening = NewWindow;
+  bool separateWindows = true;
+  bool icons = true, size = true, date = true, alwaysFolderTabs = false;
   // Quick overrides are independent of saved layout profiles.
   int32 tviskiptButtons = -1, smidjaButtons = -1;
   bool ActionButtonsVisible() const {
@@ -129,7 +144,10 @@ struct Preferences : WorkspaceLayout {
   BString folders = "system", files = "system", links = "system";
   rgb_color Color(const BString &value) const;
   void Load(const BMessage &);
+  BMessage SharedChanges(const Preferences *before = nullptr) const;
+  void ApplyShared(const BMessage &);
   void ApplyDialog(const BMessage &);
   BMessage Save() const;
 };
+bool PreferencesOpenFor(BMessenger owner);
 void OpenPreferences(BMessenger target, const Preferences &);

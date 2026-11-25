@@ -2,7 +2,9 @@
 #include "ColumnRows.h"
 #include "AdaptiveColumnList.h"
 #include "FlatView.h"
-#include "Common.h"
+#include "PaneModel.h"
+#include "CopyTextMenu.h"
+#include "FileClipboard.h"
 #include "FileSearch.h"
 #include "FileDrop.h"
 #include "JobSnapshot.h"
@@ -10,6 +12,7 @@
 #include "MainWindowMenu.h"
 #include "NameFilter.h"
 #include "SearchWorker.h"
+#include "ReadWorker.h"
 #include "Shelf.h"
 #include "ShelfWindow.h"
 #include <Button.h>
@@ -41,13 +44,50 @@ namespace Listi {
 namespace {
 constexpr uint32 kFilterChanged = 'flfc', kCollect = 'flcl', kDeliveryCheck = 'fldc';
 
+// Let Haiku render and compare its native field types. Equal primary keys use
+// the original path rather than the order in which the worker found the files.
+template<class Field> struct FlatField : Field {
+  const std::string &path;
+  template<class Value> FlatField(const SearchHit &hit, Value value)
+      : Field(value), path(hit.path) {}
+};
+
+template<class Column, class Field> class FlatColumn : public Column {
+public:
+  using Column::Column;
+  int CompareFields(BField *left, BField *right) override {
+    const int result = Column::CompareFields(left, right);
+    if (result != 0)
+      return result;
+    const auto &a = static_cast<FlatField<Field> *>(left)->path;
+    const auto &b = static_cast<FlatField<Field> *>(right)->path;
+    return (a > b) - (a < b);
+  }
+};
+// BDateColumn narrows the subtraction of two time_t values to int.
+class ChronologicalColumn : public BDateColumn {
+public:
+  using BDateColumn::BDateColumn;
+  int CompareFields(BField *left, BField *right) override {
+    const auto a = static_cast<BDateField *>(left)->Seconds();
+    const auto b = static_cast<BDateField *>(right)->Seconds();
+    return (a > b) - (a < b);
+  }
+};
+using FlatTextColumn = FlatColumn<BStringColumn, BStringField>;
+
 class FlatRow : public BRow {
 public:
   const SearchHit &hit;
   FlatRow(const SearchHit &file, const std::string &name)
       : BRow(24), hit(file) {
-    SetField(new BStringField(name.c_str()), 0);
-    SetField(new BStringField(hit.relativeFolder.c_str()), 1);
+    SetField(new FlatField<BStringField>(hit, name.c_str()), 0);
+    SetField(new FlatField<BStringField>(hit, hit.relativeFolder.c_str()), 1);
+    const auto type = FileTypeKey(name);
+    SetField(new FlatField<BStringField>(hit, type.empty() ? "—" : type.c_str()), 2);
+    time_t modified = hit.modified;
+    SetField(new FlatField<BDateField>(hit, &modified), 3);
+    SetField(new FlatField<BSizeField>(hit, hit.size), 4);
   }
 };
 
@@ -90,10 +130,14 @@ public:
       : AdaptiveColumnList("flat results", B_WILL_DRAW | B_NAVIGABLE,
                         B_FANCY_BORDER),
         collect(action), pane(panel) {
-    AddColumn(new BStringColumn("Name", 230, 100, 1000, B_TRUNCATE_MIDDLE), 0);
+    AddColumn(new FlatTextColumn("Name", 230, 100, 1000, B_TRUNCATE_MIDDLE), 0);
     AddColumn(
-        new BStringColumn("Relative folder", 360, 120, 1600, B_TRUNCATE_MIDDLE),
+        new FlatTextColumn("Subfolder", 180, 120, 1600, B_TRUNCATE_MIDDLE),
         1);
+    AddColumn(new FlatTextColumn("File type", 95, 65, 300, B_TRUNCATE_END), 2);
+    AddColumn(new FlatColumn<ChronologicalColumn, BDateField>("Date modified", 160, 90, 320), 3);
+    AddColumn(new FlatColumn<BSizeColumn, BSizeField>("Size", 85, 50, 220), 4);
+    SetSortingEnabled(true);
     SetSelectionMode(B_MULTIPLE_SELECTION_LIST);
     SetInvocationMessage(new BMessage(kInvoke));
     ScrollView()->AddFilter(new FlatContextClick(*this, pane));
@@ -166,8 +210,8 @@ class FlatView : public BGroupView {
   std::shared_ptr<Shelf> shelf;
   std::shared_ptr<std::atomic<int64>> generation =
       std::make_shared<std::atomic<int64>>(1);
-  BLooper *worker = nullptr;
-  std::shared_ptr<std::atomic<int64>> failedSerial = std::make_shared<std::atomic<int64>>(-1);
+  Listi::ReadWorker *worker = nullptr;
+  std::shared_ptr<std::atomic<int64>> failedSerial;
   std::unique_ptr<BMessageRunner> deliveryTimer;
   // Rows refer to these immutable scan hits. Growth must not invalidate them.
   std::deque<File> files;
@@ -222,14 +266,10 @@ class FlatView : public BGroupView {
     shelfStatus->SetToolTip("");
     scanState = "Scanning…";
 
-    if (!worker) {
-      worker = NewSearchWorker(BMessenger(this), generation, failedSerial);
-      if (worker->Run() < 0) {
-        if (worker->Lock())
-          worker->Quit();
-        worker = nullptr;
-      }
-    }
+    RetireReadWorker(worker);
+    failedSerial = std::make_shared<std::atomic<int64>>(-1);
+    worker = NewSearchWorker(BMessenger(this), generation, failedSerial);
+    StartReadWorker(worker);
     BMessage check(kDeliveryCheck);
     deliveryTimer.reset(new BMessageRunner(BMessenger(this), &check, 250000));
     BMessage request(kSearchStart);
@@ -298,7 +338,7 @@ public:
     }
     auto *display = new BMenuField("flat display mode", "View:", modes);
     filter = new BTextControl("flat filter", "Filter:", "", nullptr);
-    filter->SetToolTip("Filter by file name or relative folder");
+    filter->SetToolTip("Filter by file name or subfolder");
     filter->SetModificationMessage(new BMessage(kFilterChanged));
     filter->TextView()->SetMaxBytes(B_PATH_NAME_LENGTH);
     status = Line("flat status", "");
@@ -348,8 +388,7 @@ public:
 
   ~FlatView() {
     generation->fetch_add(1);
-    if (worker && worker->Lock())
-      worker->Quit();
+    RetireReadWorker(worker);
     results->Clear();
   }
 
@@ -377,17 +416,28 @@ public:
       auto *first = results->CurrentSelection();
       if (!first)
         break;
+      const auto selection = results->SelectedEntries();
       BPopUpMenu menu("Flat View file actions", false, false);
       auto *open = new BMenuItem("Open", new BMessage(kOpenSystem));
       open->SetEnabled(results->CurrentSelection(first) == nullptr);
       menu.AddItem(open);
       menu.AddItem(new BMenuItem("Copy", new BMessage(kClipboardCopy)));
       menu.AddItem(new BMenuItem("Cut", new BMessage(kClipboardCut)));
-      menu.AddItem(new BMenuItem("Copy paths", new BMessage(kCopyPaths)));
+      AddCopyTextMenu(menu, true, true, true);
       menu.AddSeparatorItem();
       menu.AddItem(new BMenuItem("Add to Shelf", new BMessage(kAddToShelf)));
-      if (auto *choice = menu.Go(message->GetPoint("point", BPoint()), false, true, false))
-        Window()->MessageReceived(choice->Message());
+      if (auto *choice = menu.Go(message->GetPoint("point", BPoint()), false, true, false)) {
+        const uint32 action = choice->Message()->what;
+        if (action == kCopyNames || action == kCopyPaths || action == kCopyRelative) {
+          try {
+            CopySelectionText(action, selection.sources, rootPath);
+            shelfStatus->SetText("Selection copied as text.");
+          } catch (const std::exception &error) {
+            shelfStatus->SetText(error.what());
+          }
+        } else
+          Window()->MessageReceived(choice->Message());
+      }
       break;
     }
     case kInvoke: {
@@ -413,12 +463,13 @@ public:
           FreezeLocalJob(selected);
           Open(selected.sources.front());
         } else {
-          if (message->what == kCopyPaths)
-            PutPathsAsText(selected.sources);
+          const bool text = message->what == kCopyPaths;
+          if (text)
+            CopySelectionText(message->what, selected.sources, rootPath);
           else
             PutFileClipboard(selected.sources, message->what == kClipboardCut,
                              be_clipboard, selected.expectedSources);
-          const char *notice = message->what == kCopyPaths ? "Paths copied as text."
+          const char *notice = text ? "Selection copied as text."
                                : message->what == kClipboardCut ? "Files marked for moving."
                                                                : "Files copied to clipboard.";
           shelfStatus->SetText(notice);
@@ -458,7 +509,8 @@ public:
       BMessage item;
       for (int32 i = 0; message->FindMessage("hit", i, &item) == B_OK; ++i) {
         SearchHit hit{item.GetString("path", ""), item.GetInt64("device", -1),
-                      item.GetInt64("node", -1), item.GetString("folder", "")};
+                      item.GetInt64("node", -1), item.GetString("folder", ""),
+                      item.GetInt64("size", 0), item.GetInt64("date", 0)};
         std::string name = hit.path.substr(hit.path.find_last_of('/') + 1);
         auto &file = files.emplace_back(File{std::move(hit), std::move(name)});
         UpdateRow(file);

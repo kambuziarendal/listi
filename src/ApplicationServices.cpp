@@ -35,6 +35,11 @@ public:
       : BLooper("file viewer and launcher"), app(a),
         preferencesWritable(canSavePreferences) {}
   void MessageReceived(BMessage *m) override {
+    if (m->what == kDrainServices) {
+      BMessage reply(B_REPLY);
+      m->SendReply(&reply);
+      return;
+    }
     if (m->what == kImageDropProbe) {
       BMessenger target;
       if (m->FindMessenger("replyTo", &target) != B_OK)
@@ -65,9 +70,16 @@ public:
       BMessage reply(kSearchesSaved);
       reply.AddInt64("revision", m->GetInt64("revision", -1));
       reply.AddInt64("serial", m->GetInt64("serial", -1));
+      BMessenger origin;
+      if (m->FindMessenger("origin", &origin) == B_OK)
+        reply.AddMessenger("origin", origin);
       try {
-        Listi::SavedSearches::FromMessage(*m).Save(
-            SettingsPath("Lister_searches").String());
+        auto file = SettingsPath("Lister_searches");
+        auto current = Listi::SavedSearches::Load(file.String());
+        current.ApplyEdit(*m);
+        auto snapshot = current.Message();
+        current.Save(file.String());
+        reply.AddMessage("snapshot", &snapshot);
       } catch (const std::exception &e) {
         std::string error =
             "Could not save search criteria. The previous list is unchanged. ";
@@ -80,9 +92,16 @@ public:
     if (m->what == kSavePlaces) {
       BMessage reply(kPlacesSaved);
       reply.AddInt64("serial", m->GetInt64("serial", -1));
+      BMessenger origin;
+      if (m->FindMessenger("origin", &origin) == B_OK)
+        reply.AddMessenger("origin", origin);
       try {
-        Listi::SavedPlaces::FromMessage(*m).Save(
-            SettingsPath("Lister_places").String());
+        auto file = SettingsPath("Lister_places");
+        auto current = Listi::SavedPlaces::Load(file.String());
+        current.ApplyEdit(*m);
+        auto snapshot = current.Message();
+        current.Save(file.String());
+        reply.AddMessage("snapshot", &snapshot);
       } catch (const std::exception &e) {
         std::string error =
             "Could not save places. The previous list is unchanged. ";
@@ -96,9 +115,14 @@ public:
       if (!preferencesWritable)
         return;
       try {
-        Listi::SaveMessageStore(SettingsPath().String(), *m);
+        BMessage data(*m);
+        data.RemoveName("origin");
+        Listi::SaveMessageStore(SettingsPath().String(), data);
       } catch (const std::exception &e) {
         BMessage error(kServiceError);
+        BMessenger origin;
+        if (m->FindMessenger("origin", &origin) == B_OK)
+          error.AddMessenger("origin", origin);
         error.AddString(
             "error",
             (std::string("Could not save preferences: ") + e.what()).c_str());
@@ -168,6 +192,9 @@ public:
       }
       if (s != B_OK && s != B_ALREADY_RUNNING) {
         BMessage error(kServiceError);
+        BMessenger origin;
+        if (m->FindMessenger("origin", &origin) == B_OK)
+          error.AddMessenger("origin", origin);
         BString text("Could not open application: ");
         text << strerror(s);
         error.AddString("error", text);
@@ -177,6 +204,9 @@ public:
       return;
     } catch (const std::exception &e) {
       BMessage error(kServiceError);
+      BMessenger origin;
+      if (m->FindMessenger("origin", &origin) == B_OK)
+        error.AddMessenger("origin", origin);
       error.AddString("error", e.what());
       app.SendMessage(&error);
     }

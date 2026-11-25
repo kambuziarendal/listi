@@ -3,6 +3,7 @@
 #define WINAPI
 #define INITGUID
 #include "ArchiveBackend.h"
+#include "ArchiveMetadata.h"
 #include "ArchivePasswords.h"
 #include "ArchiveVolumes.h"
 #include "ArjWriter.h"
@@ -464,7 +465,7 @@ struct Archive {
     Property(index, property, v);
     return v.value.vt == VT_BOOL && v.value.boolVal;
   }
-  std::vector<FileEntry> Entries() {
+  std::vector<FileEntry> Entries(ArchiveMetadataBudget &budget) {
     UInt32 count = 0;
     Require(archive->GetNumberOfItems(&count) == S_OK && count <= 200000,
             "Archive has too many entries");
@@ -498,19 +499,25 @@ struct Archive {
               size.value.uhVal.QuadPart == input->length,
           "Split 7z parts are incomplete or contain unexpected trailing data.");
     }
+    budget.Charge(count * sizeof(FileEntry));
     std::vector<FileEntry> out;
     out.reserve(count);
-    std::set<std::string> names;
+    // Reserve above keeps the views into completed entries stable. Destroy
+    // the index before returning the owning vector.
+    std::set<std::string_view> names;
     for (UInt32 i = 0; i < count; ++i) {
       s.Check();
       FileEntry e;
       Variant path(*s.engine);
       Property(i, kpidPath, path);
       Require(path.value.vt == VT_BSTR, "Archive entry has no name");
-      e.name = SafeArchivePath(UTF8(path.value.bstrVal).c_str());
-      Require(!e.name.empty() && names.insert(e.name).second,
+      auto name = SafeArchivePath(UTF8(path.value.bstrVal).c_str());
+      Require(!name.empty() && !names.count(name),
               "Archive contains empty or duplicate entry paths");
-      e.path = e.name;
+      budget.Charge(sizeof(std::string_view) +
+                    ArchiveMetadataBudget::NodeOverhead +
+                    2 * (name.size() + 1));
+      e.name = std::move(name);
       if (ArchiveEditProtection::Watching(s.identity) && Bool(i, kpidEncrypted))
         ArchiveEditProtection::Observe(s.identity);
       e.directory = Bool(i, kpidIsDir);
@@ -583,7 +590,8 @@ struct Archive {
           e.modifiedKnown = true;
         }
       }
-      out.push_back(e);
+      out.push_back(std::move(e));
+      names.insert(out.back().name);
     }
     s.Verify();
     return out;
@@ -705,7 +713,8 @@ void Retry(State &s, unsigned attempt) {
   s.retry = true;
 }
 std::vector<FileEntry> Contents(const std::string &path,
-                                const TransferControl &c) {
+                                const TransferControl &c,
+                                ArchiveMetadataBudget &budget) {
   State state(path, c);
   for (unsigned attempt = 0;; ++attempt) {
     Archive archive(state);
@@ -713,7 +722,7 @@ std::vector<FileEntry> Contents(const std::string &path,
       Retry(state, attempt);
       continue;
     }
-    auto entries = archive.Entries();
+    auto entries = archive.Entries(budget);
     RememberArchivePassword(state.identity, state.secret, state.generation);
     return entries;
   }
@@ -1145,7 +1154,8 @@ std::string SevenZipFormat(const std::string &path) {
   return "";
 }
 std::string SevenZipOpen(const std::string &path, const TransferControl &c) {
-  Contents(path, c);
+  ArchiveMetadataBudget budget;
+  Contents(path, c, budget);
   Location loc;
   loc.scheme = "archive";
   loc.archive = FindArchiveVolumes(path).files.front().path;
@@ -1154,36 +1164,44 @@ std::string SevenZipOpen(const std::string &path, const TransferControl &c) {
 }
 std::vector<FileEntry> SevenZipList(const Location &location,
                                     const TransferControl &c) {
-  auto entries = Contents(location.archive, c);
-  std::map<std::string, FileEntry> children;
-  auto prefix = location.path == "/" ? "" : location.path.substr(1) + "/";
-  for (const auto &e : entries) {
-    if (e.name.compare(0, prefix.size(), prefix))
+  ArchiveMetadataBudget budget;
+  return SevenZipList(location, c, budget);
+}
+std::vector<FileEntry> SevenZipList(const Location &location,
+                                    const TransferControl &c,
+                                    ArchiveMetadataBudget &budget) {
+  auto entries = Contents(location.archive, c, budget);
+  ArchiveListingChildren children(location, budget);
+  const auto prefix = location.path == "/" ? "" : location.path.substr(1) + "/";
+  for (const auto &entry : entries) {
+    c.Check();
+    if (entry.name.compare(0, prefix.size(), prefix))
       continue;
-    auto rest = e.name.substr(prefix.size());
+    const auto rest = std::string_view(entry.name).substr(prefix.size());
     if (rest.empty())
       continue;
-    auto slash = rest.find('/');
-    auto leaf = rest.substr(0, slash);
-    auto &child = children[leaf];
-    if (slash == std::string::npos) {
-      Require(!child.directory || e.directory,
+    const auto slash = rest.find('/');
+    bool inserted;
+    auto &child = children.Get(rest.substr(0, slash), &inserted);
+    if (slash == std::string_view::npos) {
+      Require(!child.directory || entry.directory,
               "Archive has conflicting file and folder paths");
-      child = e;
+      child.directory = entry.directory;
+      child.link = entry.link;
+      child.size = entry.size;
+      child.sizeKnown = entry.sizeKnown;
+      child.permissions = entry.permissions;
+      child.modified = entry.modified;
+      child.modifiedKnown = entry.modifiedKnown;
     } else {
-      Require(child.name.empty() || child.directory,
+      Require(inserted || child.directory,
               "Archive has conflicting file and folder paths");
       if (!child.directory)
         child.permissions = 0755;
       child.directory = true;
     }
-    child.name = leaf;
-    child.path = ChildLocation(location.URL(), leaf);
   }
-  std::vector<FileEntry> out;
-  for (auto &item : children)
-    out.push_back(item.second);
-  return out;
+  return children.Finish();
 }
 void SevenZipRead(const Location &location, const DataSink &sink,
                   const TransferControl &c) {
@@ -1194,10 +1212,12 @@ void SevenZipRead(const Location &location, const DataSink &sink,
       Retry(state, attempt);
       continue;
     }
-    auto entries = archive.Entries();
+    ArchiveMetadataBudget budget;
+    auto entries = archive.Entries(budget);
+    const std::string wanted = location.path.substr(1);
     UInt32 index = 0;
     while (index < entries.size() &&
-           entries[index].name != location.path.substr(1))
+           entries[index].name != wanted)
       ++index;
     Require(index < entries.size(), "Archive entry no longer exists");
     const auto &entry = entries[index];

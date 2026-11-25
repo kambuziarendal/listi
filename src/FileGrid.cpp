@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: MIT
+#include "ReadWorker.h"
+#include "TerminalReplies.h"
 #include "FileDrop.h"
+#include "FolderDropTarget.h"
 #include "FileGrid.h"
 #include "PanelAppearance.h"
 #include "RubberBand.h"
@@ -17,15 +20,16 @@
 #include <set>
 namespace {
 constexpr uint32 kThumbnail = 'thum', kThumbnailReady = 'thrd';
-class ThumbnailLoader : public BLooper {
+class ThumbnailLoader : public Listi::ReadWorker {
   BMessenger target;
+  std::shared_ptr<TerminalReplies> terminal;
   std::shared_ptr<BitmapMailbox> replies;
   std::shared_ptr<std::atomic<int64>> generation;
 
 public:
   ThumbnailLoader(BMessenger t, std::shared_ptr<std::atomic<int64>> g,
-                  std::shared_ptr<BitmapMailbox> r)
-      : BLooper("thumbnail reader"), target(t), replies(r), generation(g) {}
+                  std::shared_ptr<BitmapMailbox> r, std::shared_ptr<TerminalReplies> queue)
+      : ReadWorker("thumbnail reader"), target(t), terminal(queue), replies(r), generation(g) {}
   void MessageReceived(BMessage *m) override {
     if (m->what != kThumbnail) {
       BLooper::MessageReceived(m);
@@ -47,21 +51,25 @@ public:
     done.AddInt64("serial", serial);
     auto reply = replies->Put(bitmap);
     done.AddInt64("bitmap", reply);
-    if (target.SendMessage(&done, (BHandler *)nullptr, 500000) != B_OK)
-      replies->Take(reply);
+    terminal->Deliver(done, *generation, [&] {
+      return target.SendMessage(&done, (BHandler *)nullptr, 50000);
+    });
   }
 };
 } // namespace
 class GridView : public FileGrid {
+  std::shared_ptr<TerminalReplies> terminal = std::make_shared<TerminalReplies>();
   Pane *pane;
   PaneModel *model;
   int mode = 1;
   float cellWidth = 112, cellHeight = 100;
-  BLooper *loader = nullptr;
+  Listi::ReadWorker *loader = nullptr;
   std::shared_ptr<BitmapMailbox> replies = std::make_shared<BitmapMailbox>(64);
   std::shared_ptr<std::atomic<int64>> generation;
   std::map<std::string, std::unique_ptr<BBitmap>> thumbnails;
   std::set<std::string> pending;
+  bool retrySubmission = false;
+  bigtime_t nextReaderAttempt = 0;
   RubberBand *band;
   Listi::TypeToSelect typeSelect;
   std::set<std::string> paintedSelection;
@@ -93,6 +101,15 @@ class GridView : public FileGrid {
   }
 
 public:
+  PaneEntry *ScrollRow(const std::string *path, float &top) override {
+    const auto &rows = model->Visible();
+    for (size_t i = 0; i < rows.size(); ++i) {
+      top = Cell(i).top;
+      if (path ? rows[i]->path == *path : top + cellHeight > Bounds().top)
+        return rows[i];
+    }
+    return nullptr;
+  }
   void SetActive(bool active) override {
     const auto background =
         Listi::PanelBackground(B_DOCUMENT_BACKGROUND_COLOR, active);
@@ -103,7 +120,7 @@ public:
     Invalidate();
   }
   GridView(Pane *p, PaneModel *state)
-      : FileGrid("file grid", B_WILL_DRAW | B_NAVIGABLE | B_FRAME_EVENTS |
+      : FileGrid("file grid", B_PULSE_NEEDED | B_WILL_DRAW | B_NAVIGABLE | B_FRAME_EVENTS |
                                   B_FULL_UPDATE_ON_RESIZE),
         pane(p), model(state),
         generation(std::make_shared<std::atomic<int64>>(0)) {
@@ -161,15 +178,20 @@ public:
   }
   ~GridView() {
     generation->store(-1);
-    // Join before the owning window/application can destroy the token space.
-    // Reader replies are bounded and never require this window's lock.
-    if (loader && loader->Lock())
-      loader->Quit();
+    Listi::RetireReadWorker(loader);
   }
   void AttachedToWindow() override {
-    loader = new ThumbnailLoader(BMessenger(this), generation, replies);
-    loader->Run();
+    loader = new ThumbnailLoader(BMessenger(this), generation, replies, terminal);
+    nextReaderAttempt = Listi::StartReadWorker(loader) ? 0 : system_time() + 250000;
     Update();
+  }
+  void DetachedFromWindow() override {
+    ++*generation;
+    Listi::RetireReadWorker(loader);
+    pending.clear();
+    terminal->Take();
+    replies->Clear();
+    BView::DetachedFromWindow();
   }
   bool CancelSelectionGesture() override { return band->Escape(); }
   void Reset() {
@@ -180,6 +202,7 @@ public:
     pressedIndex = -1;
     dragging = deferredPick = false;
     ++*generation;
+    terminal->Take();
     replies->Clear();
     pending.clear();
     thumbnails.clear();
@@ -191,8 +214,10 @@ public:
       mode = value;
       Reset();
     }
-    cellWidth = mode == 1 ? 112 : 156;
-    cellHeight = mode == 1 ? 100 : 154;
+    cellWidth = mode == MiniIconMode ? 172 : mode == 1 ? 112 : 156;
+    BFont font;
+    GetFont(&font);
+    cellHeight = mode == MiniIconMode ? std::max(28.f, font.Size() + 14) : mode == 1 ? 100 : 154;
     Update();
   }
   void SyncSelection() override {
@@ -284,7 +309,21 @@ public:
       pane->MessageReceived(&invoke);
     }
   }
-  void MouseMoved(BPoint point, uint32, const BMessage *) override {
+  std::string hoverPath;
+  std::string DropTarget(BPoint point) const {
+    if (!Bounds().Contains(point) || pane->IsSearchList())
+      return {};
+    const int index = int(point.y / cellHeight) * Columns() +
+        int(point.x / ((Bounds().Width() + 1) / Columns()));
+    const auto &rows = model->Visible();
+    return Listi::FolderDropTarget(pane->Path(),
+        index >= 0 && index < int(rows.size()) ? rows[index] : nullptr);
+  }
+  void MouseMoved(BPoint point, uint32 transit, const BMessage *payload) override {
+    Listi::SetFolderHover(this, hoverPath,
+        Listi::IsFileHover(transit, payload) ? DropTarget(point) : "");
+    if (payload)
+      return;
     if (dragging || pressedIndex < 0 ||
         pressedIndex >= int(model->Visible().size()) ||
         (std::abs(point.x - pressed.x) < 5 &&
@@ -378,6 +417,15 @@ public:
     }
     BView::KeyDown(bytes, length);
   }
+  void Pulse() override {
+    if (retrySubmission && pending.size() < 64 &&
+        (loader || system_time() >= nextReaderAttempt)) {
+      retrySubmission = false;
+      Invalidate();
+    }
+    for (auto &reply : terminal->Take())
+      MessageReceived(&reply);
+  }
   void MessageReceived(BMessage *m) override {
     if (m->what == kThumbnailReady) {
       auto owned = replies->Take(m->GetInt64("bitmap", -1));
@@ -398,7 +446,9 @@ public:
       BMessage dropped(*m);
       dropped.what = kDrop;
       dropped.RemoveName("destination");
-      dropped.AddString("destination", pane->Path());
+      const auto target = DropTarget(ConvertFromScreen(m->DropPoint()));
+      Listi::SetFolderHover(this, hoverPath, "");
+      dropped.AddString("destination", target.empty() ? pane->Path() : target.c_str());
       Window()->PostMessage(&dropped);
       return;
     }
@@ -418,13 +468,14 @@ public:
       else
         SetHighColor(ViewColor());
       FillRoundRect(cell, 4, 4);
+      pane->RequestVisibleIcon(*row);
       BBitmap *picture = row->icon.get();
       if (mode == 3 && !row->directory && !row->parent) {
         auto found = thumbnails.find(row->path);
         if (found != thumbnails.end()) {
           if (found->second)
             picture = found->second.get();
-        } else if (!pending.count(row->path) && loader && pending.size() < 64) {
+        } else if (!pending.count(row->path)) {
           std::string lower = row->name.c_str();
           std::transform(lower.begin(), lower.end(), lower.begin(),
                          [](unsigned char c) { return std::tolower(c); });
@@ -435,22 +486,39 @@ public:
               ext == ".tiff" || ext == ".tif" || ext == ".avif" ||
               ext == ".heif" || ext == ".svg" || ext == ".ico" ||
               ext == ".tga") {
-            pending.insert(row->path);
-            BMessage job(kThumbnail);
-            job.AddString("path", row->path.c_str());
-            job.AddInt64("serial", generation->load());
-            loader->PostMessage(&job);
+            if (pending.size() >= 64) {
+              // A completion may belong to a cell no longer on screen.
+              // Retry the current viewport when the queue has room again.
+              retrySubmission = true;
+            } else if (!loader && Window() && system_time() >= nextReaderAttempt) {
+              loader = new ThumbnailLoader(BMessenger(this), generation, replies, terminal);
+              if (!Listi::StartReadWorker(loader))
+                nextReaderAttempt = system_time() + 250000;
+            }
+            if (loader && pending.size() < 64) {
+              BMessage job(kThumbnail);
+              job.AddString("path", row->path.c_str());
+              job.AddInt64("serial", generation->load());
+              if (loader->PostMessage(&job) == B_OK)
+                pending.insert(row->path);
+              else
+                retrySubmission = true;
+            } else {
+              retrySubmission = true;
+            }
           }
         }
       }
       if (picture) {
-        float available = mode == 1 ? 48 : 104;
+        float available = mode == MiniIconMode ? 16 : mode == 1 ? 48 : 104;
         auto src = picture->Bounds();
         float scale = std::min(available / (src.Width() + 1),
                                available / (src.Height() + 1));
         float w = (src.Width() + 1) * scale, h = (src.Height() + 1) * scale;
         BRect dest(cell.left + (cell.Width() - w) / 2,
                    cell.top + 4 + (available - h) / 2, 0, 0);
+        if (mode == MiniIconMode)
+          dest.OffsetTo(cell.left + 3, cell.top + (cell.Height() + 1 - h) / 2);
         dest.right = dest.left + w - 1;
         dest.bottom = dest.top + h - 1;
         SetDrawingMode(B_OP_ALPHA);
@@ -459,11 +527,19 @@ public:
       }
       SetHighUIColor(selected ? B_LIST_SELECTED_ITEM_TEXT_COLOR
                               : B_DOCUMENT_TEXT_COLOR);
-      BString label(row->name.c_str());
-      TruncateString(&label, B_TRUNCATE_MIDDLE, cell.Width() - 8);
-      DrawString(label,
-                 BPoint(cell.left + (cell.Width() - StringWidth(label)) / 2,
-                        cell.bottom - 10));
+      BString label(row->transferState == 3 ? "Failed: " : "");
+      label << row->name.c_str();
+      if (mode == MiniIconMode) {
+        TruncateString(&label, B_TRUNCATE_MIDDLE, std::max(1.f, cell.Width() - 28));
+        font_height font;
+        GetFontHeight(&font);
+        DrawString(label, BPoint(cell.left + 23,
+            (cell.top + cell.bottom + font.ascent - font.descent) / 2));
+      } else {
+        TruncateString(&label, B_TRUNCATE_MIDDLE, cell.Width() - 8);
+        DrawString(label, BPoint(cell.left + (cell.Width() - StringWidth(label)) / 2,
+                                 cell.bottom - 10));
+      }
       if (row->transferState) {
         SetHighUIColor(row->transferState == 2   ? B_SUCCESS_COLOR
                        : row->transferState == 3 ? B_FAILURE_COLOR
@@ -474,6 +550,8 @@ public:
         FillRect(BRect(cell.left + 4, cell.bottom - 3, cell.left + 4 + width,
                        cell.bottom - 1));
       }
+      if (row->path == hoverPath)
+        Listi::DrawFolderHover(this, cell);
       if (IsFocus() && focused == row) {
         SetHighUIColor(B_KEYBOARD_NAVIGATION_COLOR);
         StrokeRoundRect(cell, 4, 4);

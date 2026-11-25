@@ -4,7 +4,11 @@ Listi is alpha software that works directly on files. Tests provide evidence for
 specific cases, not proof that every filesystem, server or archive variant is
 safe. Use disposable fixtures and independent backups.
 
-## Current development build
+## 0.38.0-23 alpha
+
+The [release notes](https://github.com/kambuziarendal/listi/releases/tag/v0.38.0-23) identify the source, package digest and checks for this revision. The package is the tested binary, not a rebuild of the documentation branch. Local native tests run inside Haiku; they are not physical USB tests or hosted CI results. In particular, a successful copy to NTFS does not establish safe removal if the mounted volume still reports “device busy.”
+
+## Folder refresh measurements (0.38.0 development)
 
 On Haiku R1/beta6 x86_64 in QEMU, we copied 120 files of 64 KiB into an open folder on a throttled virtual USB disk. The panel started 78 and 77 directory scans in two baseline runs, versus 30 and 31 with the [refresh change](https://github.com/kambuziarendal/listi/commit/a85d258040e8d4e185c03cdf85b4465fcffed0fb). Every copied file matched its source. This counts scans, not UI latency or elapsed copy time. Separate GUI checks covered navigation away during a copy, external folder changes, cancellation and the final listing. The built-in self-test passed 58 of 58 checks.
 
@@ -12,19 +16,11 @@ An earlier [qualification run](POST-HARDENING-FOLLOWUP.md) measured the median t
 
 ## Hands-on testing on physical hardware
 
-The developer tests Listi on a ThinkPad X1 Carbon (6th Gen) running Haiku R1/beta6 directly on the hardware, not in a VM. Add one row per hands-on test. No individual result has been supplied yet. Use **Passed**, **Failed** or **Not tested** once the status is known; an unreported test is not necessarily untested.
-
-| Listi version | Haiku version / hrev | What was done | Outcome |
-| --- | --- | --- | --- |
-| TODO: ask developer | R1/beta6 / TODO: ask developer | TODO: ask developer | TODO: ask developer |
+Pre-release hands-on testing on Haiku identified failures that scripted checks had missed: an attributed screenshot could not be copied to a FAT stick, Inspector could identify a PNG without drawing it after discarding a text edit, and Einn inherited an oversized window. These observations motivated the revision 22 changes; they are not physical revalidation of the new package.
 
 ### Physical USB disconnect during copy
 
 **Disconnecting a physical USB disk during a copy has not been tested.** The steps below are a plan, not a result.
-
-| Listi version | Haiku version / hrev | Planned action | Outcome |
-| --- | --- | --- | --- |
-| TODO: ask developer | R1/beta6 / TODO: ask developer | Unplug the destination USB disk during a copy on the ThinkPad. | Not tested |
 
 1. Use disposable files and a spare USB disk. Record checksums for the source, a file already on the USB disk and an earlier completed copy.
 2. Start **Copy** in Listi. Unplug the USB disk while it is still being written to, then click **Cancel**. Record whether the window responds, the job's exact status and how long it stays in that state.
@@ -36,14 +32,14 @@ Much of the automated stress testing is LLM-assisted and runs in Haiku VMs. In t
 
 ### 0.36.1-3 package results
 
-The [candidate HPKG](https://github.com/kambuziarendal/listi/releases/tag/v0.36.1-3) was installed on Haiku R1/beta6 x86_64 in a VM (hrev: TODO: ask developer). The installed executable matched the tested build. All 71 native test cases and 58 built-in checks passed. The VM record also mentions the cases below. The record does not give separate outcomes for them.
+The [candidate HPKG](https://github.com/kambuziarendal/listi/releases/tag/v0.36.1-3) was installed on Haiku R1/beta6 x86_64 in a VM (hrev not recorded). The installed executable matched the tested build. All 71 native test cases and 58 built-in checks passed. The VM record also mentions the cases below. The record does not give separate outcomes for them.
 
 | Additional check (same package and VM) | Individual outcome |
 | --- | --- |
-| Full destination disk | TODO: ask developer |
-| Change folder contents during a copy | TODO: ask developer |
-| Rename and undo | TODO: ask developer |
-| Restore files with colliding names from Trash | TODO: ask developer |
+| Full destination disk | Not individually recorded |
+| Change folder contents during a copy | Not individually recorded |
+| Rename and undo | Not individually recorded |
+| Restore files with colliding names from Trash | Not individually recorded |
 
 The installed app refused a move between disks. During an explicit copy, disconnecting the virtual USB device late in the write left the job pending for over 100 seconds, even after cancellation was requested. It did not report success. After cold restart, the original, an unrelated destination file and an earlier completed copy matched their expected bytes. This was a virtual USB disconnect, not the [physical USB test](#physical-usb-disconnect-during-copy).
 
@@ -176,6 +172,11 @@ filtering and frozen Shelf selection, and stops a deliberately paused scan.
 For a manual workspace check, select files in either panel, set a panel filter,
 and choose **View > File view > Flat View**. Confirm that results appear in
 that panel without opening a window, and the opposite panel remains usable.
+In the installed app, include duplicate names in two subfolders, an extensionless
+README, mixed-case extensions and files of different dates and sizes (e.g. 2
+and 10 bytes). Click each of the five headings twice. Check both directions,
+path-based ties and the extensionless group. Select one duplicate before
+sorting, then copy its full path to confirm the selection still targets it.
 Choose the original view in the panel selector and check that its selection and filter are restored.
 
 ### BFS attribute columns
@@ -258,8 +259,9 @@ ordinary working volume to exercise a failure path.
 
 A failed archive operation reports if Listi cannot remove its staging folder.
 On restart, **Listi → Review interrupted operations…** reads Listi's
-private stage and bulk rename inventory. It shows the recorded path and
-whether its entry and parent still match. It never resumes, relocates or
+private stage and bulk rename inventory without probing affected volumes.
+**Check local paths** optionally checks whether an entry and its parent still
+match. The review can be closed while a check is pending. It never resumes, relocates or
 deletes an entry. A missing or substituted name is not safe to reuse.
 A match is only advisory, especially after devices are remounted.
 In the destination you can also look for hidden `.Listi-archive-stage-*` directories
@@ -360,3 +362,14 @@ For the optional host-driven network interruption matrix, set
 `network-interruptions` test in the Haiku guest. Set
 `LISTI_NETWORK_KNOWN_HOSTS` to the guest's known-hosts file for the disposable
 SFTP fixture. This avoids testing a binary left by an older checkout.
+
+### Folder history through a store disconnect
+
+In a disposable Haiku guest, configure a test source, save at least two versions
+and confirm the source pane shows their count. With the history browser closed,
+temporarily take only the test store offline. Leave and revisit the source
+without restarting Listi: the badge must say unavailable, not zero versions.
+Open it to check the explanation. Return the same store, navigate to an
+unconfigured folder and back in the same window: its count must recover without
+switching applications. In the neighbouring preview, step to the older version
+and back; closing it must return the previous folder without writing either one.

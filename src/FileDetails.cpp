@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "FileDrop.h"
+#include "FolderDropTarget.h"
 #include "AdaptiveColumnList.h"
 // Only this renderer depends on Haiku's private ColumnListView API.
 #include "FileDetails.h"
@@ -94,20 +95,33 @@ public:
 class NameColumn : public BStringColumn {
 public:
   Preferences prefs;
+  std::string hoverPath;
   BView *batchTarget = nullptr;
-  NameColumn(const Preferences &p)
-      : BStringColumn("Name", 260, 80, 1200, B_TRUNCATE_MIDDLE), prefs(p) {}
+  Pane *pane;
+  PaneModel *model;
+  NameColumn(Pane *owner, PaneModel *state, const Preferences &p)
+      : BStringColumn("Name", 260, 80, 1200, B_TRUNCATE_MIDDLE), prefs(p), pane(owner), model(state) {}
   void DrawField(BField *f, BRect r, BView *v) override {
+    const BRect fieldRect = r;
     v->SetFont(&prefs.font);
     auto n = static_cast<NameField *>(f);
     rgb_color old = v->HighColor();
-    if (n->entry->parent)
+    if (model->IsSelected(n->entry->path)) {
+      // A checkmark remains distinguishable from focus or striped rows, even
+      // in a theme with subtle selection colours.
+      v->SetHighUIColor(B_LIST_SELECTED_ITEM_TEXT_COLOR);
+      float x = r.left + 4, y = (r.top + r.bottom) / 2;
+      v->StrokeLine(BPoint(x, y), BPoint(x + 3, y + 3));
+      v->StrokeLine(BPoint(x + 3, y + 3), BPoint(x + 9, y - 4));
+      r.left += 14;
+    } else if (n->entry->parent)
       v->SetHighColor(ui_color(B_PANEL_TEXT_COLOR));
     else
       v->SetHighColor(prefs.Color(n->entry->kind == 1   ? prefs.folders
                                   : n->entry->kind == 2 ? prefs.links
                                                         : prefs.files));
     if (prefs.icons) {
+      pane->RequestVisibleIcon(*n->entry);
       if (n->entry->icon) {
         v->SetDrawingMode(B_OP_ALPHA);
         float top = r.top + (r.Height() - 16) / 2;
@@ -122,7 +136,15 @@ public:
       }
       r.left += 23;
     }
+    if (n->entry->transferState == 3) {
+      const char *failed = "Failed";
+      const float width = v->StringWidth(failed) + 8;
+      v->DrawString(failed, BPoint(r.right - width, r.top + r.Height() / 2 + prefs.font.Size() / 3));
+      r.right -= width;
+    }
     BStringColumn::DrawField(f, r, v);
+    if (hoverPath == n->entry->path)
+      Listi::DrawFolderHover(v, fieldRect);
     if (n->entry->transferState) {
       rgb_color color =
           ui_color(n->entry->transferState == 2   ? B_SUCCESS_COLOR
@@ -147,32 +169,31 @@ public:
   }
 };
 struct DateField : BDateField {
-  BFont formattedFont;
-  bool formatted = false;
+  uint64 fontRevision = 0;
   explicit DateField(time_t *value) : BDateField(value) {}
 };
 class DateColumn : public BDateColumn {
 public:
   BFont font;
+  uint64 fontRevision = 1;
   explicit DateColumn(const BFont &value)
       : BDateColumn("Modified", 160, 80, 280), font(value) {}
   void DrawField(BField *field, BRect rect, BView *view) override {
     auto date = static_cast<DateField *>(field);
     view->SetFont(&font);
-    if (!date->formatted || date->formattedFont != font)
+    if (date->fontRevision != fontRevision)
       date->SetWidth(-1);
     BDateColumn::DrawField(field, rect, view);
     // Haiku's date column tests the full cell width, but caches the width
     // minus its text margins. Normalize the key so selection repainting does
     // not rerun locale formatting for every visible date on every frame.
     date->SetWidth(rect.Width());
-    date->formattedFont = font;
-    date->formatted = true;
+    date->fontRevision = fontRevision;
   }
 };
 struct SizeField : BSizeField {
   BString label, clipped;
-  BFont formattedFont;
+  uint64 fontRevision = 0;
   float width = -1;
   bool formatted = false;
   explicit SizeField(off_t size) : BSizeField(size) {}
@@ -180,6 +201,7 @@ struct SizeField : BSizeField {
 class SizeColumn : public BSizeColumn {
 public:
   BFont font;
+  uint64 fontRevision = 1;
   explicit SizeColumn(const BFont &value)
       : BSizeColumn("Size", 85, 50, 200), font(value) {}
   void DrawField(BField *field, BRect rect, BView *view) override {
@@ -192,12 +214,12 @@ public:
       size->formatted = true;
     }
     view->SetFont(&font);
-    if (size->width != rect.Width() || size->formattedFont != font) {
+    if (size->width != rect.Width() || size->fontRevision != fontRevision) {
       size->clipped = size->label;
       view->TruncateString(&size->clipped, B_TRUNCATE_END,
                            std::max(0.f, rect.Width() - 16));
       size->width = rect.Width();
-      size->formattedFont = font;
+      size->fontRevision = fontRevision;
     }
     DrawString(size->clipped.String(), view, rect);
   }
@@ -231,6 +253,36 @@ public:
     return B_SKIP_MESSAGE;
   }
 };
+std::string DetailsDropTarget(BColumnListView *list, Pane *pane, BPoint point) {
+  auto row = static_cast<FileRow *>(list->RowAt(point));
+  return pane->IsSearchList() || !list->ColumnAt(point) ? std::string()
+      : Listi::FolderDropTarget(pane->Path(), row ? row->entry : nullptr);
+}
+
+class FolderHoverFilter : public BMessageFilter {
+  BColumnListView *list;
+  Pane *pane;
+  NameColumn *name;
+
+public:
+  FolderHoverFilter(BColumnListView *list, Pane *pane, NameColumn *name)
+      : BMessageFilter(B_MOUSE_MOVED), list(list), pane(pane), name(name) {}
+  filter_result Filter(BMessage *message, BHandler **) override {
+    BMessage drag;
+    BPoint point;
+    bool located = message->FindPoint("be:view_where", &point) == B_OK;
+    if (!located && message->FindPoint("screen_where", &point) == B_OK) {
+      point = list->ScrollView()->ConvertFromScreen(point);
+      located = true;
+    }
+    const bool hover = located && list->ScrollView()->Bounds().Contains(point) &&
+        message->FindMessage("be:drag_message", &drag) == B_OK &&
+        Listi::IsFileHover(message->GetInt32("be:transit", B_INSIDE_VIEW), &drag);
+    Listi::SetFolderHover(list->ScrollView(), name->hoverPath,
+                          hover ? DetailsDropTarget(list, pane, point) : "");
+    return B_DISPATCH_MESSAGE;
+  }
+};
 class DetailsList : public Listi::AdaptiveColumnList {
   Listi::TypeToSelect typeSelect;
 
@@ -241,12 +293,16 @@ public:
   SizeColumn *size;
   DateColumn *date;
   bool syncing = false, showModified = true;
+  // Row heights may differ after a font change. Maintain their sum instead
+  // of walking the growing native list on every incoming scan batch.
+  double rowsHeight = 0;
+  float ContentHeight() override { return static_cast<float>(rowsHeight); }
   RubberBand *band;
   DetailsList(Pane *p, PaneModel *state, const Preferences &prefs)
       : AdaptiveColumnList("files", B_WILL_DRAW | B_NAVIGABLE | B_DRAW_ON_CHILDREN,
                         B_FANCY_BORDER),
         pane(p), model(state) {
-    name = new NameColumn(prefs);
+    name = new NameColumn(p, state, prefs);
     name->batchTarget = ScrollView();
     AddColumn(name, 0);
     size = new SizeColumn(prefs.font);
@@ -257,6 +313,7 @@ public:
     SetSortColumn(name, false, true);
     SetInvocationMessage(new BMessage(kInvoke));
     ScrollView()->AddFilter(new ContextClick(this, pane, typeSelect));
+    ScrollView()->AddFilter(new FolderHoverFilter(this, pane, name));
     band = new RubberBand(ScrollView());
     band->ready = [this] { return !pane->IsScanning(); };
     band->path = [this] { return std::string(pane->Path()); };
@@ -413,11 +470,17 @@ public:
     DragMessage(&drag, BRect(point.x, point.y, point.x + 90, point.y + 22));
     return true;
   }
-  void MessageDropped(BMessage *message, BPoint) override {
+  void MessageDropped(BMessage *message, BPoint point) override {
+    Listi::SetFolderHover(ScrollView(), name->hoverPath, "");
+    if (pane->IsSearchList()) {
+      pane->ShowStatus("A search list is not a destination folder.");
+      return;
+    }
     BMessage drop(*message);
     drop.what = kDrop;
     drop.RemoveName("destination");
-    drop.AddString("destination", pane->Path());
+    const auto target = DetailsDropTarget(this, pane, point);
+    drop.AddString("destination", target.empty() ? pane->Path() : target.c_str());
     Window()->PostMessage(&drop);
   }
 };
@@ -452,7 +515,23 @@ public:
   }
   bool CancelSelectionGesture() override { return list->band->Escape(); }
   void MakeFocus(bool focus = true) override { list->MakeFocus(focus); }
-  void Redraw() override { list->Invalidate(); }
+  PaneEntry *ScrollRow(const std::string *path, float &top) override {
+    top = 0;
+    for (int32 i = 0; i < list->CountRows(); ++i) {
+      auto row = static_cast<FileRow *>(list->RowAt(i));
+      const float next = top + row->Height() + 1;
+      if (path ? row->entry->path == *path : next > ScrollPosition().y)
+        return row->entry;
+      top = next;
+    }
+    return nullptr;
+  }
+  BPoint ScrollPosition() override { return list->ScrollView()->Bounds().LeftTop(); }
+  void RestoreScroll(BPoint p) override {
+    static_cast<BScrollBar *>(list->FindView("horizontal_scroll_bar"))->SetValue(p.x);
+    static_cast<BScrollBar *>(list->FindView("vertical_scroll_bar"))->SetValue(p.y);
+  }
+  void Redraw() override { list->ScrollView()->Invalidate(); }
   void RedrawEntry(const std::string &path) override {
     auto found = rows.find(path);
     if (found != rows.end())
@@ -467,8 +546,12 @@ public:
   void Apply(const Preferences &p) override {
     prefs = p;
     list->name->prefs = p;
-    list->size->font = p.font;
-    list->date->font = p.font;
+    if (list->size->font != p.font) {
+      list->size->font = p.font;
+      list->date->font = p.font;
+      ++list->size->fontRevision;
+      ++list->date->fontRevision;
+    }
     list->SetFont(&p.font);
     list->size->SetVisible(p.size);
     list->showModified = p.date;
@@ -476,10 +559,10 @@ public:
                    Listi::PanelBackground(B_PANEL_BACKGROUND_COLOR, active));
     list->SetColor(B_COLOR_TEXT, ui_color(B_PANEL_TEXT_COLOR));
     list->SetColor(B_COLOR_SELECTION,
-                   tint_color(ui_color(B_PANEL_BACKGROUND_COLOR), 0.80));
-    list->SetColor(B_COLOR_SELECTION_TEXT, ui_color(B_PANEL_TEXT_COLOR));
+                   ui_color(B_LIST_SELECTED_BACKGROUND_COLOR));
+    list->SetColor(B_COLOR_SELECTION_TEXT, ui_color(B_LIST_SELECTED_ITEM_TEXT_COLOR));
     list->SetColor(B_COLOR_NON_FOCUS_SELECTION,
-                   tint_color(ui_color(B_PANEL_BACKGROUND_COLOR), 0.80));
+                   ui_color(B_LIST_SELECTED_BACKGROUND_COLOR));
     list->UpdateScrollBars();
     Redraw();
   }
@@ -503,18 +586,43 @@ public:
   }
   void Refresh() override {
     list->syncing = true;
+    if (model->Visible().empty() && !rows.empty()) {
+      // Remove one row through the normal API to release the native focus
+      // and hover bookkeeping; Clear owns and destroys the remaining rows.
+      auto *first = list->FocusRow();
+      if (!first)
+        first = list->RowAt(0);
+      list->rowsHeight = 0;
+      list->RemoveRow(first);
+      delete first;
+      list->Clear();
+      rows.clear();
+      list->syncing = false;
+      list->UpdateScrollBars();
+      return;
+    }
     std::set<std::string> visible;
     for (auto entry : model->Visible())
       visible.insert(entry->path);
     for (auto it = rows.begin(); it != rows.end();) {
       if (!visible.count(it->first)) {
+        list->rowsHeight -= it->second->Height() + 1;
         list->RemoveRow(it->second);
         delete it->second;
         it = rows.erase(it);
       } else
         ++it;
     }
-    for (auto entry : model->Visible()) {
+    Append(0);
+    SyncSelection();
+  }
+  void Append(size_t first) override {
+    list->syncing = true;
+    const auto &visible = model->Visible();
+    BList added;
+    std::vector<BRow *> selected;
+    for (size_t i = first; i < visible.size(); ++i) {
+      auto entry = visible[i];
       if (rows.count(entry->path))
         continue;
       auto row = new FileRow(entry, std::max(22.f, prefs.font.Size() + 9));
@@ -531,11 +639,16 @@ public:
                                             : AttributeCellPreview{}),
                       3 + i);
       rows.emplace(entry->path, row);
-      list->AddRow(row);
+      added.AddItem(row);
+      list->rowsHeight += row->Height() + 1;
+      if (model->IsSelected(entry->path))
+        selected.push_back(row);
     }
+    list->AddRows(&added, -1);
+    for (auto *row : selected)
+      list->AddToSelection(row);
     list->syncing = false;
     list->UpdateScrollBars();
-    SyncSelection();
   }
   void SyncSelection() override {
     if (list->syncing)

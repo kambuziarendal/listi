@@ -128,7 +128,10 @@ int main() {
   const auto stored = SavedSearches::FromMessage(committed->message);
   assert(stored.Find("Retry") && !stored.Find("Notes"));
   assert(!state.FinishSearchSave(searchReply));
-  rejected = state.EditSearch(search, author); // editor still has revision 0
+  BMessage staleReplace(search);
+  staleReplace.AddBool("replace", true);
+  staleReplace.ReplaceString("name", "Retry");
+  rejected = state.EditSearch(staleReplace, author); // no expected entry from revision 0
   assert(rejected && rejected->message.HasString("error") && !state.Saving());
 
   // Only the requesting editor gets the rejection. The other search windows
@@ -138,8 +141,8 @@ int main() {
   auto *right = new SaveRequests;
   for (auto *editor : {standalone, left, right})
     editor->Run();
-  search.AddMessenger("searchEditor", BMessenger(right));
-  state.HandleSearchMessage(search, BMessenger(standalone),
+  staleReplace.AddMessenger("searchEditor", BMessenger(right));
+  state.HandleSearchMessage(staleReplace, BMessenger(standalone),
                             {BMessenger(left), BMessenger(right)});
   for (auto *editor : {right, standalone, left}) {
     auto update = editor->Next();
@@ -150,6 +153,64 @@ int main() {
     assert(editor->Lock());
     editor->Quit();
   }
+
+  // Identical serials in two windows must not acknowledge each other's edits.
+  SavedNavigationController other(service, {}, true, {}, true, author);
+  other.EditPlace(place);
+  const auto ownPlace = requests->Next();
+  BMessage foreign(kPlacesSaved);
+  foreign.AddMessenger("origin", service);
+  foreign.AddInt64("serial", ownPlace.GetInt64("serial", -1));
+  SavedPlaces merged;
+  merged.Add("Other", "/other");
+  auto snapshot = merged.Message();
+  foreign.AddMessage("snapshot", &snapshot);
+  assert(other.FinishPlaceSave(foreign) && other.Saving());
+  assert(other.Places().Find("/other") && !other.Places().Find("/boot/home/work"));
+  BMessage own(kPlacesSaved);
+  own.AddMessenger("origin", author);
+  own.AddInt64("serial", ownPlace.GetInt64("serial", -1));
+  merged.ApplyEdit(ownPlace);
+  try {
+    merged.ApplyEdit(ownPlace);
+    assert(false); // Same path, unlike unrelated additions, conflicts.
+  } catch (const std::runtime_error &) {}
+  snapshot = merged.Message();
+  own.AddMessage("snapshot", &snapshot);
+  assert(other.FinishPlaceSave(own) && !other.Saving());
+  assert(other.Places().Items().size() == 2);
+
+  assert(!other.EditSearch(search, author));
+  const auto ownSearch = requests->Next();
+  SavedSearches both;
+  auto item = SavedSearch::FromMessage(search);
+  item.name = "Elsewhere";
+  both.Put(item, false);
+  foreign.what = kSearchesSaved;
+  foreign.AddInt64("revision", 0);
+  snapshot = both.Message();
+  foreign.ReplaceMessage("snapshot", &snapshot);
+  auto refresh = other.FinishSearchSave(foreign);
+  assert(refresh && !refresh->author.IsValid() && other.Saving());
+  assert(!refresh->message.HasString("chosen"));
+  own.what = kSearchesSaved;
+  own.AddInt64("revision", ownSearch.GetInt64("revision", -1));
+  own.ReplaceInt64("serial", ownSearch.GetInt64("serial", -1));
+  both.ApplyEdit(ownSearch);
+  try {
+    both.ApplyEdit(ownSearch);
+    assert(false);
+  } catch (const std::runtime_error &) {}
+  snapshot = both.Message();
+  own.ReplaceMessage("snapshot", &snapshot);
+  auto accepted = other.FinishSearchSave(own);
+  assert(accepted && accepted->author == author && !other.Saving());
+  assert(SavedSearches::FromMessage(accepted->message).Items().size() == 2);
+
+  BMessage unrelated(search);
+  unrelated.ReplaceString("name", "Independent");
+  assert(!other.EditSearch(unrelated, author)); // revision 0 predates both commits
+  assert(requests->Next().what == kSaveSearches);
 
   // A failure to enqueue must not keep quit blocked or publish an unsaved edit.
   SavedNavigationController disconnected(BMessenger{}, {}, true, {}, true);

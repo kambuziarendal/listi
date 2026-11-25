@@ -13,7 +13,7 @@ class BWindow;
 constexpr uint32 kInspectorEmbeddedClose = 'ieEc';
 
 void OpenInspectorEditor(const std::string &path, BWindow *owner);
-bool InspectorEditorsAllowQuit();
+bool InspectorEditorsAllowQuit(BWindow *owner = nullptr);
 
 // The owning window must be locked. A non-null result is mounted in parent;
 // requests to close the editor are posted to closeTarget.

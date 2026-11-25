@@ -13,6 +13,9 @@
 #include <algorithm>
 #include <atomic>
 #include <fstream>
+#include <dirent.h>
+#include <limits.h>
+#include <cstring>
 #include <iostream>
 #include <set>
 #include <sys/stat.h>
@@ -24,8 +27,28 @@ std::atomic<int> rowAttempts{0}, doneAttempts{0};
 std::atomic<int64> lastDoneSerial{-1};
 std::shared_ptr<std::atomic<int64>> generation;
 bool cancelOnFailure=false;
-std::atomic<bool> holdNextRows{false};
+std::atomic<bool> holdNextRows{false}, holdNextDone{false};
 sem_id held, resume, released;
+std::string blockedPath;
+std::atomic<bool> blockOpen{false};
+std::atomic<thread_id> blockedReader{-1};
+sem_id openEntered, allowOpen;
+}
+
+extern "C" DIR *__real_opendir(const char *);
+extern "C" DIR *__wrap_opendir(const char *path) {
+  if (blockOpen.load() && blockedPath == path) {
+    thread_info info;
+    if (get_thread_info(find_thread(nullptr), &info) == B_OK &&
+        strcmp(info.name, "directory reader") == 0 && blockOpen.exchange(false)) {
+      blockedReader = info.thread;
+      release_sem(openEntered);
+      // The timeout releases a broken candidate, so a regression fails
+      // rather than wedging the native suite on the window lock.
+      acquire_sem_etc(allowOpen, 1, B_RELATIVE_TIMEOUT, 6000000);
+    }
+  }
+  return __real_opendir(path);
 }
 extern "C" status_t __real__ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl(const BMessenger*,BMessage*,BHandler*,bigtime_t);
 extern "C" status_t __wrap__ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl(const BMessenger* self,BMessage* message,BHandler* reply,bigtime_t timeout) {
@@ -37,6 +60,10 @@ extern "C" status_t __wrap__ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl(c
   auto fail=[&](std::atomic<int>& n) { int old=n.load(); if(old>0) {n.fetch_sub(1);return true;} return false; };
   if(message->what==kRows) { ++rowAttempts; if(fail(rowFailures)) {if(cancelOnFailure)generation->fetch_add(1);return B_TIMED_OUT;} }
   if (message->what == kScanDone) {
+    if (holdNextDone.exchange(false)) {
+      release_sem(held);
+      acquire_sem_etc(resume, 1, B_RELATIVE_TIMEOUT, 5000000);
+    }
     ++doneAttempts;
     lastDoneSerial = message->GetInt64("serial", -1);
     if (fail(doneFailures))
@@ -54,6 +81,16 @@ public:
     if(m->what==kRows) { BMessage row;for(int32 i=0;m->FindMessage("entry",i,&row)==B_OK;++i)if(!row.GetBool("parent",false)){++count;names.insert(row.GetString("name",""));} }
     else if(m->what==kScanDone){error=m->GetString("error","");release_sem(done);}
     else BLooper::MessageReceived(m);
+  }
+};
+class PacedReceiver : public Receiver {
+public:
+  sem_id batch = create_sem(0, "pane handled a row batch");
+  ~PacedReceiver() { delete_sem(batch); }
+  void MessageReceived(BMessage *message) override {
+    Receiver::MessageReceived(message);
+    if (message->what == kRows)
+      release_sem(batch);
   }
 };
 void clean(const std::string &p){BDirectory d(p.c_str());BEntry e;while(d.GetNextEntry(&e,false)==B_OK){struct stat s;e.GetStat(&s);if(S_ISDIR(s.st_mode)){BPath path;e.GetPath(&path);clean(path.Path());}e.Remove();}rmdir(p.c_str());}
@@ -86,6 +123,51 @@ int main() {
   status=acquire_sem_etc(receiver->done,1,B_RELATIVE_TIMEOUT,10000000);
   receiver->Lock();check(status==B_OK&&receiver->error.empty()&&receiver->count==160&&receiver->names.size()==160,label+" next scan recovers");receiver->Unlock();
   generation->store(4);if(scan->Lock())scan->Quit();if(receiver->Lock())receiver->Quit();
+ }
+ // A successful port send is not a UI receipt. Keep only one batch in flight
+ // for this fixture; retiring an unacknowledged scan must not join the pane.
+ {
+   auto *receiver = new PacedReceiver;
+   receiver->Run();
+   auto epoch = std::make_shared<std::atomic<int64>>(1);
+   auto delivery = std::make_shared<DirectoryScanDelivery>(1);
+   auto *reader = CreateDirectoryScanner(BMessenger(receiver), epoch, delivery);
+   reader->Run();
+   BMessage request(kScan);
+   request.AddString("path", folder.c_str());
+   request.AddBool("icons", false);
+   request.AddInt64("serial", 1);
+   reader->PostMessage(&request);
+   auto receive = [&] {
+     return acquire_sem_etc(receiver->batch, 1, B_RELATIVE_TIMEOUT, 2000000) == B_OK;
+   };
+   check(receive(), "paced scan delivers its first batch immediately");
+   check(acquire_sem_etc(receiver->batch, 1, B_RELATIVE_TIMEOUT, 150000) == B_TIMED_OUT,
+         "next batch waits for a pane receipt");
+   delivery->ReleaseBatch(1);
+   check(receive(), "pane receipt releases the next batch");
+   delivery->ReleaseBatch(1);
+   check(receive(), "final partial batch is delivered");
+   delivery->ReleaseBatch(1);
+   check(acquire_sem_etc(receiver->done, 1, B_RELATIVE_TIMEOUT, 2000000) == B_OK &&
+         receiver->count == 160 && receiver->names.size() == 160,
+         "paced scan retains every row and completion");
+   request.ReplaceInt64("serial", 2);
+   epoch->store(2);
+   reader->PostMessage(&request);
+   check(receive(), "second paced scan starts");
+   epoch->store(3);
+   const bool cancelled = reader->LockWithTimeout(2000000) == B_OK;
+   check(cancelled, "obsolete paced scan exits without a UI receipt");
+   if (cancelled) {
+     reader->Unlock();
+     request.ReplaceInt64("serial", 3);
+     reader->PostMessage(&request);
+     check(receive(), "fresh scan is not charged for an obsolete queued batch");
+     epoch->store(4);
+     if (reader->Lock()) reader->Quit();
+   }
+   if (receiver->Lock()) receiver->Quit();
  }
  // Exercise the actual pane's out-of-band completion recovery, not just the
  // producer. All view changes are made under the owning window lock.
@@ -186,6 +268,75 @@ int main() {
  held = create_sem(0, "held directory reader");
  resume = create_sem(0, "resume directory reader");
  released = create_sem(0, "released directory reader");
+ // A reader enumerates one opened directory. Replacing the pathname during
+ // enumeration must not publish a valid mixed listing from the replacement.
+ {
+   auto *receiver = new Receiver;
+   receiver->Run();
+   auto epoch = std::make_shared<std::atomic<int64>>(1);
+   auto *reader = CreateDirectoryScanner(BMessenger(receiver), epoch);
+   reader->Run();
+   BMessage request(kScan);
+   request.AddInt64("serial", 1);
+   request.AddString("path", folder.c_str());
+   request.AddBool("icons", false);
+   holdNextRows = true;
+   reader->PostMessage(&request);
+   const bool paused = acquire_sem_etc(held, 1, B_RELATIVE_TIMEOUT, 5000000) == B_OK;
+   const auto moved = folder + "-moved";
+   const bool renamed = paused && rename(folder.c_str(), moved.c_str()) == 0;
+   const bool replaced = renamed && mkdir(folder.c_str(), 0700) == 0;
+   if (replaced)
+     std::ofstream(folder + "/replacement") << "different folder";
+   release_sem(resume);
+   if (paused)
+     acquire_sem_etc(released, 1, B_RELATIVE_TIMEOUT, 5000000);
+   const bool completed = acquire_sem_etc(receiver->done, 1, B_RELATIVE_TIMEOUT, 5000000) == B_OK;
+   receiver->Lock();
+   check(replaced && completed &&
+       receiver->error == "Folder changed while reading. Reload to try again." &&
+       receiver->count == 160 && receiver->names.count("replacement") == 0,
+       "directory replacement does not authorize a mixed listing");
+   receiver->Quit();
+   if (reader->Lock())
+     reader->Quit();
+   if (replaced) {
+     unlink((folder + "/replacement").c_str());
+     rmdir(folder.c_str());
+   }
+   if (renamed && rename(moved.c_str(), folder.c_str()) != 0)
+     return 4;
+ }
+ // Mutate the directory after enumeration and before the terminal message.
+ holdNextDone = true;
+ pane->Navigate(folder.c_str());
+ window->Unlock();
+ bool pausedDone = acquire_sem_etc(held, 1, B_RELATIVE_TIMEOUT, 5000000) == B_OK;
+ // Pane rows carry canonical paths: on Haiku /tmp is /boot/system/cache/tmp.
+ char watchedPath[PATH_MAX];
+ if (!realpath(folder.c_str(), watchedPath))
+   return 4;
+ auto removed = std::string(watchedPath) + "/file-159";
+ auto added = std::string(watchedPath) + "/new-entry";
+ bool mutated = pausedDone && unlink(removed.c_str()) == 0 &&
+                bool(std::ofstream(added) << "new");
+ release_sem(resume);
+ bool converged = false;
+ auto deadline = system_time() + 5000000;
+ while (mutated && !converged && system_time() < deadline) {
+   window->Lock();
+   if (!pane->IsScanning()) {
+     pane->Select(1);
+     auto rows = pane->Selected();
+     converged = rows.size() == 160 &&
+         std::find(rows.begin(), rows.end(), added) != rows.end() &&
+         std::find(rows.begin(), rows.end(), removed) == rows.end();
+   }
+   window->Unlock();
+   snooze(20000);
+ }
+ check(converged, "pre-completion creation and removal converge without manual reload");
+ window->Lock();
  holdNextRows = true;
  pane->Navigate(folder.c_str());
  window->Unlock();
@@ -209,7 +360,61 @@ int main() {
  pane->Select(1);
  check(pane->LocationValid() && !pane->Selected().empty() && pane->Selected().size() < 160,
        "late old rows do not replace the new directory");
+ window->Unlock();
+
+ // No operation or interrupted-copy notification participates in these
+ // two cases: the held call is an ordinary native directory scan.
+ char canonicalFolder[PATH_MAX], canonicalRoot[PATH_MAX];
+ if (!realpath(folder.c_str(), canonicalFolder) || !realpath(root.c_str(), canonicalRoot))
+   return 4;
+ blockedPath = canonicalFolder;
+ openEntered = create_sem(0, "opendir entered");
+ allowOpen = create_sem(0, "release opendir");
+ auto holdScan = [&] {
+   blockedReader = -1;
+   blockOpen = true;
+   window->Lock();
+   pane->Navigate(folder.c_str());
+   window->Unlock();
+   return acquire_sem_etc(openEntered, 1, B_RELATIVE_TIMEOUT, 2000000) == B_OK;
+ };
+ auto drainScan = [&] {
+   release_sem(allowOpen);
+   const auto id = blockedReader.load();
+   if (id < 0)
+     return false;
+   thread_info info;
+   auto deadline = system_time() + 2000000;
+   while (get_thread_info(id, &info) == B_OK && system_time() < deadline)
+     snooze(10000);
+   return get_thread_info(id, &info) == B_BAD_THREAD_ID;
+ };
+ check(holdScan(), "ordinary navigation held inside opendir without a copy job");
+ auto start = system_time();
+ window->Lock();
+ pane->Navigate(root.c_str());
+ window->Unlock();
+ check(ready() && system_time() - start < 2000000,
+       "healthy navigation completes within two seconds of replacing a blocked read");
+ check(drainScan(), "obsolete ordinary reader exits after opendir returns");
+ window->Lock();
+ pane->Select(1);
+ check(pane->LocationValid() && std::string(pane->Path()) == canonicalRoot &&
+           !pane->Selected().empty() && pane->Selected().size() < 160,
+       "late scan cannot replace the current path, validity or rows");
+ window->Unlock();
+
+ check(holdScan(), "ordinary navigation blocked again before closing its window");
+ start = system_time();
+ window->Lock();
  window->Quit();
+ thread_info info;
+ check(system_time() - start < 2000000 &&
+           get_thread_info(blockedReader.load(), &info) == B_OK,
+       "window closes within two seconds while its old read is still blocked");
+ check(drainScan(), "reader safely exits after the window has been destroyed");
+ delete_sem(openEntered);
+ delete_sem(allowOpen);
  delete_sem(held);
  delete_sem(resume);
  delete_sem(released);

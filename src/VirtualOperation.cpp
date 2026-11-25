@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: MIT
 #include "FileOperation.h"
+#include "JobReportStore.h"
+#include "DirectoryFinalization.h"
+#include "RemovableCopy.h"
 #include "StagingSpace.h"
 #include "Sha256.h"
 #include "RecoveryInventory.h"
@@ -51,10 +54,18 @@ struct TempFile {
     if (!fstatat(parent, leaf.c_str(), &current, AT_SYMLINK_NOFOLLOW) &&
         current.st_dev == file.st_dev && current.st_ino == file.st_ino)
       unlinkat(parent, leaf.c_str(), 0);
-    if (!lstat(folder.c_str(), &current) && current.st_dev == directory.st_dev &&
-        current.st_ino == directory.st_ino && !rmdir(folder.c_str())) {
-      try { record.Retire(); } catch (...) { /* Read-only review still available. */ }
-    }
+    try {
+      const auto base = ParentLocation(folder);
+      if (!stat(base.c_str(), &current)) {
+        PinnedDirectory namespaceParent(base, current.st_dev, current.st_ino);
+        if (!lstat(folder.c_str(), &current) && current.st_dev == directory.st_dev &&
+            current.st_ino == directory.st_ino &&
+            !unlinkat(namespaceParent.Descriptor(), LocationLeaf(folder).c_str(), AT_REMOVEDIR)) {
+          namespaceParent.FlushAfterCleanup();
+          record.Retire();
+        }
+      }
+    } catch (...) { /* Read-only review still available. */ }
     close(parent);
   }
   void Write(const char *p, size_t n) {
@@ -75,7 +86,8 @@ struct TempFile {
     if (fchmod(fd, source.permissions & 0777))
       throw std::runtime_error(strerror(errno));
     if (source.modifiedKnown || source.modified > 0) {
-      struct timespec times[2] = {{0, UTIME_OMIT}, {source.modified, 0}};
+      struct timespec times[2] = {
+          {0, UTIME_OMIT}, {source.modified, source.ModifiedNanoseconds()}};
       if (futimens(fd, times))
         throw std::runtime_error(strerror(errno));
     }
@@ -90,12 +102,18 @@ struct TempFile {
 };
 std::string RemoteDigest(const std::string &path, const TransferControl &control) {
   Sha256 hash;
-  ReadFile(path, [&](const char *data, size_t count) { hash.Update(data, count); }, control);
+  ReadFile(path, [&](const char *data, size_t count) {
+    if (control.cleanup) {
+      control.Check();
+      control.cleanup->Consume(count);
+    }
+    hash.Update(data, count);
+  }, control);
   return hash.Finish();
 }
 bool Same(const FileEntry &a, const FileEntry &b) {
   return a.directory == b.directory && a.link == b.link && a.size == b.size &&
-         a.sizeKnown == b.sizeKnown && a.modified == b.modified;
+         a.sizeKnown == b.sizeKnown && a.SameModification(b);
 }
 std::string TransferIdentity(const std::string &path) {
   auto location = ParseLocation(path);
@@ -149,6 +167,12 @@ struct Runner {
     Guard();
   }
   Result result;
+  void AddError(const std::string &error) {
+    if (hooks.report)
+      hooks.report->AddError(error);
+    else
+      result.errors.push_back(error);
+  }
   bool replaceAll = false, skipAll = false;
   size_t visited = 0;
   TransferControl Control(const std::string &p, bool bytes = true) {
@@ -212,7 +236,8 @@ struct Runner {
     }
     return true;
   }
-  void Copy(const std::string &src, const std::string &dst, int depth = 0) {
+  void Copy(const std::string &src, const std::string &dst, int depth = 0,
+            const FileEntry *discovered = nullptr) {
     if (depth > 128 || ++visited > 200000)
       throw std::runtime_error("Folder tree exceeds the transfer limit");
     const auto parent = ParentLocation(dst);
@@ -230,9 +255,9 @@ struct Runner {
             directories.count(dst) != 0};
     auto control = Control(src);
     control.Check();
-    RememberDirectory(ParentLocation(dst));
+    RememberDirectory(parent);
     FileEntry source, target;
-    if (!StatFile(src, source, control))
+    if (!StatFile(src, source, control, discovered))
       throw std::runtime_error("Source no longer exists");
     if (hooks.fileSize && !source.directory && !source.link &&
         source.sizeKnown && source.size >= 0)
@@ -249,23 +274,42 @@ struct Runner {
     if (source.directory) {
       if (exists && !target.directory)
         throw std::runtime_error("Destination is not a folder");
-      if (!exists)
+      std::optional<PinnedDirectory> localParent, directory;
+      if (!IsVirtual(dst)) {
+        const auto &identity = directories.at(parent);
+        localParent.emplace(parent, identity.device, identity.inode, true);
+      }
+      if (localParent) {
+        localParent->Verify();
+        const auto leaf = LocationLeaf(dst);
+        if (!exists && mkdirat(localParent->Descriptor(), leaf.c_str(), 0755))
+          throw std::runtime_error(dst + ": " + strerror(errno));
+        struct stat named;
+        if (fstatat(localParent->Descriptor(), leaf.c_str(), &named,
+                    AT_SYMLINK_NOFOLLOW) || !S_ISDIR(named.st_mode))
+          throw std::runtime_error(dst + ": destination directory changed.");
+        directories.emplace(dst, NodeIdentity{int32_t(named.st_dev), int64_t(named.st_ino)});
+        Guard();
+        directory.emplace(dst, named.st_dev, named.st_ino);
+      } else if (!exists) {
         MakeFolder(dst, control);
-      if (!IsVirtual(dst))
-        RememberDirectory(dst);
+      }
       int skippedBefore = result.skipped;
-      for (auto &e : ListFiles(src, control))
-        Copy(e.path, ChildLocation(dst, e.name), depth + 1);
+      for (const auto &e : ListFiles(src, control))
+        Copy(e.path, ChildLocation(dst, e.name), depth + 1, &e);
       control.Check();
       if (!exists && !IsVirtual(dst)) {
-        if (chmod(dst.c_str(), source.permissions & 0777))
+        if (fchmod(directory->Descriptor(), source.permissions & 0777))
           throw std::runtime_error(strerror(errno));
         if (source.modifiedKnown || source.modified > 0) {
-          struct timespec times[2] = {{0, UTIME_OMIT}, {source.modified, 0}};
-          if (utimensat(AT_FDCWD, dst.c_str(), times, AT_SYMLINK_NOFOLLOW))
+          struct timespec times[2] = {
+              {0, UTIME_OMIT}, {source.modified, source.ModifiedNanoseconds()}};
+          if (futimens(directory->Descriptor(), times))
             throw std::runtime_error(strerror(errno));
         }
       }
+      if (directory)
+        FinalizeDirectory(*directory, *localParent, [&] { control.Check(); });
       if (result.skipped == skippedBefore && hooks.fileDone)
         hooks.fileDone(src, dst);
       return;
@@ -286,6 +330,7 @@ struct Runner {
         throw std::runtime_error(
             "Destination changed during transfer; it was left untouched");
       Hooks local = hooks;
+      local.report.reset(); // This internal result drives publication error handling.
       local.proceed = control.proceed;
       local.fileDone = {};
       local.fileFailed = {};
@@ -304,6 +349,10 @@ struct Runner {
       Job publish{Action::Copy, {temp.path}, ParentLocation(dst)};
       publish.expectedDestination = directories.at(publish.destination);
       auto done = Run(publish, local);
+      if (!done.interruptedCopyFolder.empty())
+        throw RemovableCopyInterrupted(done.errors.empty() ?
+            "Removable destination flush interrupted." : done.errors.front(),
+            done.interruptedCopyFolder);
       if (done.cancelled)
         throw Cancelled();
       if (!done.errors.empty())
@@ -321,8 +370,26 @@ struct Runner {
     TempFile temp(LocationLeaf(dst), src, dst);
     Sha256 expected;
     const auto stagedBytes = Stage(src, source, temp, Control(src, false), &expected);
-    result.outcomes.push_back({src, dst, "unprocessed", "", UploadVerification{}});
-    auto &entry = result.outcomes.back();
+    EntryOutcome entry{src, dst, "unprocessed", "", UploadVerification{}};
+    auto record = [&] {
+      if (hooks.report)
+        hooks.report->WriteOutcome(entry, false);
+      else
+        result.outcomes.push_back(std::move(entry));
+    };
+    try {
+      PublishUpload(src, dst, target, exists, temp, expected, stagedBytes,
+                    control, entry);
+    } catch (...) {
+      record();
+      throw;
+    }
+    record();
+  }
+  void PublishUpload(const std::string &src, const std::string &dst,
+                     const FileEntry &target, bool exists, const TempFile &temp,
+                     Sha256 &expected, uint64_t stagedBytes,
+                     const TransferControl &control, EntryOutcome &entry) {
     auto &receipt = *entry.upload;
     RecoveryRecord recovery("upload", ParentLocation(dst), ".listi-", src, dst);
     const auto &staged = recovery.Stage();
@@ -387,7 +454,7 @@ struct Runner {
       if (backupExists) {
         if (RemoteDigest(backup, control) != originalDigest)
           throw std::runtime_error("Original backup changed; retained for manual inspection.");
-        RemoveFile(backup, false, {});
+        RemoveFile(backup, false, control);
         backupExists = false;
       }
       recovery.Retire();
@@ -395,27 +462,53 @@ struct Runner {
         hooks.fileDone(src, dst);
     } catch (...) {
       auto failure = std::current_exception();
-      if (stagedExists)
+      try {
+        std::rethrow_exception(failure);
+      } catch (const Cancelled &) {
+        result.cancelled = true;
+      } catch (...) {
+      }
+      NetworkCleanupBudget budget;
+      TransferControl cleanup{[&] {
+        if (hooks.proceed && !hooks.proceed())
+          result.cancelled = true;
+        return !result.cancelled;
+      }, {}, &budget};
+      // No network work after explicit cancellation. SMB's synchronous library
+      // and session lock have no total deadline; defer its recovery on error.
+      const bool reconcile = !result.cancelled && ParseLocation(dst).scheme != "smb";
+      auto matches = [&](const std::string &path, const FileEntry &file,
+                         const std::string &digest) {
+        return !file.directory && !file.link && file.sizeKnown && file.size >= 0 &&
+               uint64_t(file.size) <= budget.remaining &&
+               RemoteDigest(path, cleanup) == digest;
+      };
+      // Prefer restoring the original if either check would consume the budget.
+      if (reconcile && backupExists)
         try {
-          FileEntry remote;
-          if (!StatFile(staged, remote, {}))
-            stagedExists = false;
-          else if (receipt.contentVerified && RemoteDigest(staged, {}) == expectedDigest) {
-            RemoveFile(staged, false, {});
-            stagedExists = false;
+          FileEntry current, saved;
+          if (!StatFile(backup, saved, cleanup)) {
+            backupExists = false;
+          } else if (Same(target, saved) && matches(backup, saved, originalDigest) &&
+                     !StatFile(dst, current, cleanup)) {
+            RenameFile(backup, dst, cleanup);
+            backupExists = false;
           }
+        } catch (const Cancelled &) {
+          result.cancelled = true;
         } catch (...) {
         }
-      if (backupExists)
+      if (reconcile && stagedExists)
         try {
-          FileEntry check, saved;
-          if (!StatFile(backup, saved, {})) {
-            backupExists = false;
-          } else if (Same(target, saved) && RemoteDigest(backup, {}) == originalDigest &&
-                     !StatFile(dst, check, {})) {
-            RenameFile(backup, dst, {});
-            backupExists = false;
+          FileEntry remote;
+          if (!StatFile(staged, remote, cleanup))
+            stagedExists = false;
+          else if (receipt.contentVerified && matches(staged, remote, expectedDigest)) {
+            RemoveFile(staged, false, cleanup);
+            stagedExists = false;
           }
+        } catch (const Cancelled &) {
+          result.cancelled = true;
         } catch (...) {
         }
       entry.status = committed ? "partial" : commitAttempted ? "outcome unknown" : "source-retained";
@@ -437,7 +530,6 @@ struct Runner {
         try {
           std::rethrow_exception(failure);
         } catch (const Cancelled &) {
-          result.cancelled = true;
           message += "Operation was cancelled.";
         } catch (const std::exception &e) {
           message += e.what();
@@ -535,18 +627,26 @@ Result RunVirtual(const Job &job, const Hooks &hooks) {
         }
         if (runner.result.skipped == skippedBefore)
           ++runner.result.completed;
+      } catch (const RemovableCopyInterrupted &e) {
+        runner.result.interruptedCopyFolder = e.folder.empty() ? job.destination : e.folder;
+        runner.AddError(source + ": " + e.what());
+        if (hooks.fileFailed)
+          hooks.fileFailed(source, e.what());
+        break;
       } catch (const Cancelled &) {
         throw;
       } catch (const std::exception &e) {
-        runner.result.errors.push_back(source + ": " + e.what());
+        runner.AddError(source + ": " + e.what());
         if (hooks.fileFailed)
           hooks.fileFailed(source, e.what());
+        if (runner.result.cancelled)
+          break;
       }
     }
   } catch (const Cancelled &) {
     runner.result.cancelled = true;
   } catch (const std::exception &e) {
-    runner.result.errors.push_back(e.what());
+    runner.AddError(e.what());
   }
   return runner.result;
 }

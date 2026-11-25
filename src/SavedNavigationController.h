@@ -14,7 +14,7 @@ class SavedNavigationController {
 public:
   SavedNavigationController(BMessenger service, const SavedPlaces &places,
                             bool placesWritable, const SavedSearches &searches,
-                            bool searchesWritable);
+                            bool searchesWritable, BMessenger owner = {});
 
   bool Saving() const { return pendingPlaces || pendingSearch; }
   bool CanEditPlaces() const { return placesWritable && !pendingPlaces; }
@@ -41,7 +41,7 @@ public:
                            const std::array<BMessenger, 2> &embedded);
 
 private:
-  BMessenger service;
+  BMessenger service, owner;
   SavedPlaces places;
   bool placesWritable;
   int64 placesSerial = 0;
@@ -53,6 +53,7 @@ private:
   // Failed saves keep the revision, but every attempt needs a distinct reply.
   int64 searchesSerial = 0;
   struct PendingSearch {
+    int64 revision;
     SavedSearches next;
     std::string chosen;
     BMessenger author;

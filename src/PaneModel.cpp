@@ -60,6 +60,17 @@ size_t PaneModel::MatchPattern(const char *pattern, bool apply) {
   }
   return matches;
 }
+bool PaneModel::MatchesSnapshot(const std::vector<std::unique_ptr<PaneEntry>> &rows) const {
+  if (entries.size() != rows.size()) return false;
+  for (size_t i = 0; i < rows.size(); ++i) {
+    const auto &a = *entries[i], &b = *rows[i];
+    if (a.path != b.path || a.device != b.device || a.node != b.node ||
+        a.kind != b.kind || a.directory != b.directory || a.size != b.size ||
+        a.modified != b.modified)
+      return false;
+  }
+  return true;
+}
 void PaneModel::Clear() {
   visible.clear();
   entries.clear();
@@ -68,6 +79,15 @@ void PaneModel::Clear() {
   anchor.clear();
 }
 void PaneModel::Add(std::unique_ptr<PaneEntry> entry) {
+  entries.push_back(std::move(entry));
+}
+void PaneModel::AddScanned(std::unique_ptr<PaneEntry> entry, const char *query,
+                           bool restoreSelection) {
+  if (Listi::MatchesNameFilter(entry->name.c_str(), query, entry->parent)) {
+    visible.push_back(entry.get());
+    if (restoreSelection && !entry->parent)
+      selection.insert(entry->path);
+  }
   entries.push_back(std::move(entry));
 }
 void PaneModel::Filter(const std::string &query) {
@@ -237,6 +257,8 @@ void PaneModel::SetSelection(const std::vector<std::string> &paths,
   anchor = focus;
 }
 PaneEntry *PaneModel::Focused() const {
+  if (focused.empty() && selection.empty())
+    return nullptr;
   for (auto entry : visible)
     if (entry->path == focused)
       return entry;

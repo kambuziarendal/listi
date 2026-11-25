@@ -10,7 +10,7 @@ struct ContextAction {
   bool ascending = true;
 };
 struct ContextMenuOptions {
-  bool folder = false;
+  bool folder = false, history = false;
   size_t selected = 0;
   bool directory = false, local = false, dual = false, folderLocal = false;
   bool archiveAdd = false, archiveRemove = false, folderArchive = false;

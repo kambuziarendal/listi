@@ -56,6 +56,9 @@ void WorkspaceToolbar::SetTransferTarget(int source, bool available, const char 
     fTransferTarget->SetText(label);
     fTransferTarget->SetToolTip(label.IsEmpty() ? nullptr : label.String());
   }
+  const char *arrow = fPrefs.panelsStacked ? (source == 0 ? "↓" : "↑")
+                                          : (source == 0 ? "→" : "←");
+  fBank->SetDestination(available ? arrow : "", available && destination ? destination : "");
   SetViewVisible(fTransferTarget, available);
   SetBankVisible(!fBank->IsHidden(fBank));
   fMenu.SetTransferDirection(available ? direction : nullptr);

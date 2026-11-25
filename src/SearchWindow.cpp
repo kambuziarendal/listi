@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: MIT
+#include "ReadWorker.h"
+#include "PaneNavigationState.h"
 #include "SearchWindow.h"
 #include "Common.h"
 #include "ExplicitSubmit.h"
@@ -30,6 +32,7 @@ constexpr uint32 kStart = 'ssrt', kStop = 'sstp', kHit = 'shit',
                  kClearFilters = 'sclr', kDeliveryCheck = 'sdck',
                  kSection = 'ssec', kOrder = 'sord';
 class SearchView : public BGroupView {
+  bool embedded;
   BPopUpMenu *sectionMenu = nullptr, *orderMenu;
   BGroupView *sections[3]{};
   int32 section = 0;
@@ -51,14 +54,13 @@ class SearchView : public BGroupView {
   std::vector<SearchHit> pending;
   BCheckBox *predicate, *trash, *live;
   BStringView *status, *selected, *scope, *hint;
-  BButton *start, *stop, *show;
+  BButton *start, *stop, *show, *openList;
   SearchResultsView *results;
-  BLooper *worker = nullptr;
+  Listi::ReadWorker *worker = nullptr;
   std::shared_ptr<std::atomic<int64>> generation;
   std::shared_ptr<std::atomic<int64>> failedSerial =
       std::make_shared<std::atomic<int64>>(-1);
   std::unique_ptr<BMessageRunner> deliveryTimer;
-  bool workerReady = false;
   int64 serial = 0;
   bool busy = false;
   static BStringView *Line(const char *name, const char *text) {
@@ -187,7 +189,8 @@ class SearchView : public BGroupView {
     request.AddInt64("serial", serial);
     ++serial;
     generation->store(serial);
-    worker->PostMessage(&request);
+    if (worker)
+      worker->PostMessage(&request);
     pending.clear();
     Busy(false);
     Status("Stopped: " + std::to_string(results->CountRows()) +
@@ -198,9 +201,9 @@ public:
   SearchView(BMessenger target, int32 which, const char *path,
              const BMessage &store, bool compact)
       : BGroupView("file search", B_VERTICAL, compact ? 4 : 8),
-        owner(target), pane(which),
+        embedded(compact), owner(target), pane(which),
         generation(std::make_shared<std::atomic<int64>>(0)) {
-    root = new BTextControl("search scope", "Folder:", path, nullptr);
+    root = new BTextControl("search scope", "Folder (including subfolders):", path, nullptr);
     expression =
         new BTextControl("search expression", "Name contains:", "", nullptr);
     root->TextView()->SetMaxBytes(B_PATH_NAME_LENGTH - 1);
@@ -244,6 +247,7 @@ public:
     selected = Line("search selected",
                     "Select a result to see its full original path.");
     start = new BButton("start search", "Search", new BMessage(kStart));
+    openList = new BButton("open search list", "Open as file list", new BMessage(kOpenSearchList));
     stop = new BButton("stop search", "Stop", new BMessage(kStop));
     show = new BButton("show original",
                        compact ? "Show original" : "Show original in panel",
@@ -267,58 +271,14 @@ public:
     name->SetModificationMessage(new BMessage(kName));
     save = new BButton("save search", "Save", new BMessage(kSave));
     forget = new BButton("forget search", "Forget", new BMessage(kForget));
-    if (compact)
-      BuildCompactLayout(orderField);
-    else {
-      BLayoutBuilder::Group<>(this, B_VERTICAL, 8)
-          .SetInsets(10)
-          .AddGroup(B_HORIZONTAL, 8)
-          .Add(savedField)
-          .Add(name)
-          .Add(save)
-          .Add(forget)
-          .End()
-          .Add(root)
-          .Add(expression)
-          .Add(Line(
-              "file filters hint",
-              "Optional file filters (regular files only): sizes in B / KiB / MiB / GiB; dates YYYY-MM-DD, local time."))
-          .AddGroup(B_HORIZONTAL, 8)
-          .Add(extension)
-          .Add(minimum)
-          .Add(maximum)
-          .End()
-          .AddGroup(B_HORIZONTAL, 8)
-          .Add(fromDate)
-          .Add(throughDate)
-          .Add(createdDate)
-          .Add(clearFilters)
-          .End()
-          .AddGroup(B_HORIZONTAL, 8)
-          .Add(predicate)
-          .Add(trash)
-          .Add(live)
-          .Add(orderField)
-          .AddGlue()
-          .Add(start)
-          .Add(stop)
-          .End()
-          .Add(hint)
-          .Add(scope)
-          .Add(results)
-          .Add(selected)
-          .AddGroup(B_HORIZONTAL, 8)
-          .Add(status)
-          .Add(show)
-          .End();
-    }
+    BuildSections(orderField);
     Store(store);
     Busy(false);
     show->SetEnabled(false);
     results->UpdateColors();
   }
 
-  void BuildCompactLayout(BMenuField *orderField) {
+  void BuildSections(BMenuField *orderField) {
     // Keep the everyday name search short. Criteria and saved searches use
     // the same controls and worker as the standalone form, on demand.
     sectionMenu = new BPopUpMenu("search section");
@@ -339,6 +299,7 @@ public:
         .Add(start)
         .Add(stop)
         .AddGlue()
+        .Add(openList)
         .Add(show)
         .End()
         .Add(results)
@@ -395,7 +356,7 @@ public:
     // Controls and asynchronous updates belong to this search, not the host
     // window (which may contain a second independent search).
     for (BControl *control : std::initializer_list<BControl *>{
-             root, expression, name, predicate, start, stop, show, save, forget,
+             root, expression, name, predicate, start, stop, show, openList, save, forget,
              clearFilters})
       control->SetTarget(this);
     savedMenu->SetTargetForItems(this);
@@ -409,17 +370,14 @@ public:
         field->TextView()->AddFilter(
             new Listi::ExplicitSubmit(BMessenger(this), BMessage(kStart)));
       worker = NewSearchWorker(BMessenger(this), generation, failedSerial);
-      workerReady = worker->Run() >= 0;
+      Listi::StartReadWorker(worker);
       initialized = true;
     }
   }
 
   ~SearchView() {
     generation->fetch_add(1);
-    // Invalidate in-flight work before joining. A merely posted quit could
-    // destroy the worker's BHandler after BApplication's token space is gone.
-    if (worker && worker->Lock())
-      worker->Quit();
+    Listi::RetireReadWorker(worker);
   }
   void MessageReceived(BMessage *m) override {
     switch (m->what) {
@@ -478,11 +436,18 @@ public:
         break;
       BMessage edit(kSearchEdit);
       // The owner addresses embedded searches by view, standalone by window.
-      edit.AddMessenger("searchEditor", sectionMenu ? BMessenger(this)
+      edit.AddMessenger("searchEditor", embedded ? BMessenger(this)
                                                   : BMessenger(Window()));
       edit.AddInt64("revision", storeRevision);
       edit.AddBool("remove", m->what == kForget);
       edit.AddBool("replace", !chosen.empty() && chosen == name->Text());
+      if (!chosen.empty() && chosen == name->Text()) {
+        if (const auto *previous = saved.Find(chosen)) {
+          BMessage expected;
+          previous->WriteTo(expected);
+          edit.AddMessage("expectedSearch", &expected);
+        }
+      }
       if (m->what == kForget)
         edit.AddString("name", name->Text());
       else {
@@ -576,7 +541,11 @@ public:
       Status("Searching... Stop keeps only the results received so far.");
       BMessage check(kDeliveryCheck);
       deliveryTimer = std::make_unique<BMessageRunner>(BMessenger(this), &check, 250000);
-      if (!workerReady || deliveryTimer->InitCheck() != B_OK ||
+      if (!worker) {
+        worker = NewSearchWorker(BMessenger(this), generation, failedSerial);
+        Listi::StartReadWorker(worker);
+      }
+      if (!worker || deliveryTimer->InitCheck() != B_OK ||
           worker->PostMessage(&request) != B_OK) {
         Busy(false);
         Status("Could not start search.");
@@ -659,6 +628,18 @@ public:
       selected->SetText(hit ? hit->path.c_str() : "");
       selected->SetToolTip(hit ? hit->path.c_str() : "");
       show->SetEnabled(hit != nullptr);
+      break;
+    }
+    case kOpenSearchList: {
+      auto criteria = Criteria();
+      if (!ValidateFilters(criteria))
+        break;
+      SavedSearch query{name->Text(), criteria,
+                        criteria.predicate && live->Value() == B_CONTROL_ON};
+      BMessage request(kOpenSearchList);
+      query.WriteTo(request);
+      request.AddInt32("pane", pane);
+      owner.SendMessage(&request);
       break;
     }
     case kShowSearchResult: {

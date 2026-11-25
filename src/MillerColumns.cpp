@@ -2,7 +2,9 @@
 #include "MillerColumns.h"
 #include "AdaptiveScrollView.h"
 #include "DirectoryScanner.h"
+#include "ReadWorker.h"
 #include "FileDrop.h"
+#include "FolderDropTarget.h"
 #include "Pane.h"
 #include "PanelAppearance.h"
 #include "TypeToSelect.h"
@@ -71,6 +73,15 @@ public:
     Invalidate();
   }
 
+  PaneEntry *ScrollRow(const std::string *path, float &top) {
+    const auto &rows = Visible();
+    for (size_t i = 0; i < rows.size(); ++i) {
+      top = float(i) * height;
+      if (path ? rows[i]->path == *path : top + height > Bounds().top)
+        return rows[i];
+    }
+    return nullptr;
+  }
   float ContentHeight() const { return float(Visible().size()) * height; }
   void Refresh(bool reveal = false) {
     font_height font;
@@ -146,6 +157,8 @@ public:
       const float baseline =
           top + std::floor((height + font.ascent - font.descent) / 2);
       float left = 8;
+      if (Current())
+        pane->RequestVisibleIcon(*row);
       if (row->icon) {
         const float y = top + (height - 16) / 2;
         SetDrawingMode(B_OP_ALPHA);
@@ -155,7 +168,8 @@ public:
         left = 25;
       }
       const bool arrow = row->directory && !row->parent;
-      BString label(row->name.c_str());
+      BString label(row->transferState == 3 ? "Failed: " : "");
+      label << row->name.c_str();
       textFont.TruncateString(
           &label, B_TRUNCATE_MIDDLE,
           std::max(0.f, rect.right - left - (arrow ? 20 : 8)));
@@ -165,6 +179,8 @@ public:
         StrokeLine(BPoint(x, y - 4), BPoint(x + 4, y));
         StrokeLine(BPoint(x + 4, y), BPoint(x, y + 4));
       }
+      if (row->path == hoverPath)
+        Listi::DrawFolderHover(this, rect);
       if (focused == row && IsFocus()) {
         SetHighUIColor(B_KEYBOARD_NAVIGATION_COLOR);
         StrokeRoundRect(rect, 3, 3);
@@ -224,7 +240,17 @@ public:
       Invoke();
   }
 
-  void MouseMoved(BPoint point, uint32, const BMessage *) override {
+  std::string hoverPath;
+  std::string DropTarget(BPoint point) const {
+    if (!Bounds().Contains(point) || (Current() && pane->IsSearchList()))
+      return {};
+    return Listi::FolderDropTarget(location, At(int(point.y / height)));
+  }
+  void MouseMoved(BPoint point, uint32 transit, const BMessage *payload) override {
+    Listi::SetFolderHover(this, hoverPath,
+        Listi::IsFileHover(transit, payload) ? DropTarget(point) : "");
+    if (payload)
+      return;
     if (pressedPath.empty() || dragging ||
         (std::abs(point.x - pressed.x) < 5 &&
          std::abs(point.y - pressed.y) < 5) ||
@@ -330,7 +356,9 @@ public:
       BMessage dropped(*message);
       dropped.what = kDrop;
       dropped.RemoveName("destination");
-      dropped.AddString("destination", location.c_str());
+      const auto target = DropTarget(ConvertFromScreen(message->DropPoint()));
+      Listi::SetFolderHover(this, hoverPath, "");
+      dropped.AddString("destination", target.empty() ? location.c_str() : target.c_str());
       Window()->PostMessage(&dropped);
       return;
     }
@@ -386,7 +414,7 @@ struct MillerColumns::State {
   bool active = false, enabled = false, attached = false;
   std::string location, reading;
   PaneModel incoming;
-  BLooper *scanner = nullptr;
+  Listi::ReadWorker *scanner = nullptr;
   std::shared_ptr<std::atomic<int64>> generation =
       std::make_shared<std::atomic<int64>>(0);
   std::shared_ptr<DirectoryScanDelivery> delivery =
@@ -422,6 +450,8 @@ struct MillerColumns::State {
 
   void CancelRead() {
     ++*generation;
+    if (!reading.empty())
+      Listi::RetireReadWorker(scanner);
     timer.reset();
     reading.clear();
     incoming.Clear();
@@ -438,7 +468,7 @@ struct MillerColumns::State {
       if (!scanner) {
         scanner =
             CreateDirectoryScanner(BMessenger(owner), generation, delivery);
-        scanner->Run();
+        Listi::StartReadWorker(scanner);
       }
       reading = rows->location;
       const auto serial = ++*generation;
@@ -449,7 +479,8 @@ struct MillerColumns::State {
       BMessage check(kCheckColumnRead);
       check.AddInt64("serial", serial);
       timer.reset(new BMessageRunner(BMessenger(owner), &check, 250000));
-      if (timer->InitCheck() == B_OK && scanner->PostMessage(&scan) == B_OK)
+      if (timer->InitCheck() == B_OK && scanner &&
+          scanner->PostMessage(&scan) == B_OK)
         return;
       Finish(rows, true);
     }
@@ -481,8 +512,7 @@ MillerColumns::MillerColumns(Pane *pane, PaneModel *model)
 MillerColumns::~MillerColumns() {
   state->CancelRead();
   state->generation->store(-1);
-  if (state->scanner && state->scanner->Lock())
-    state->scanner->Quit();
+  Listi::RetireReadWorker(state->scanner);
 }
 
 void MillerColumns::AttachedToWindow() {
@@ -622,6 +652,20 @@ float MillerColumns::ContentWidth(float viewport) const {
   return ColumnWidth(viewport) * state->columns.size();
 }
 
+PaneEntry *MillerColumns::ScrollRow(const std::string *path, float &top) {
+  return state->current < state->columns.size()
+      ? state->columns[state->current].rows->ScrollRow(path, top) : nullptr;
+}
+BPoint MillerColumns::ScrollPosition() const {
+  return {Bounds().left, state->current < state->columns.size()
+                            ? state->columns[state->current].rows->Bounds().top : 0};
+}
+void MillerColumns::RestoreScroll(BPoint position) {
+  if (auto *bar = ScrollBar(B_HORIZONTAL)) bar->SetValue(position.x);
+  if (state->current < state->columns.size())
+    if (auto *bar = state->columns[state->current].rows->ScrollBar(B_VERTICAL))
+      bar->SetValue(position.y);
+}
 void MillerColumns::LayoutColumns() {
   if (Parent())
     Parent()->InvalidateLayout();

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "TerminalDock.h"
+#include "WindowOverview.h"
 #include "Common.h"
 #include "MainWindow.h"
 #include "VirtualFile.h"
@@ -16,11 +17,11 @@ namespace {
 
 constexpr uint32 kFocusFloating = 'tlfc';
 
-class FloatingTerminal : public BWindow {
+class FloatingTerminal : public WorkingWindow {
 public:
   FloatingTerminal(BRect frame, BMessenger receiver, int lister,
                    int64 placement)
-      : BWindow(frame, TerminalName(lister), B_TITLED_WINDOW,
+      : WorkingWindow(frame, TerminalName(lister), "CLI",
                 B_AUTO_UPDATE_SIZE_LIMITS),
         owner(receiver), placement(placement) {
     SetLayout(new BGroupLayout(B_VERTICAL, 0));
@@ -44,6 +45,8 @@ public:
   }
 
   void MessageReceived(BMessage *message) override {
+    if (HandleWindowAction(message))
+      return;
     if (message->what == kFocusFloating) {
       if (IsMinimized())
         Minimize(false);
@@ -304,6 +307,7 @@ bool TerminalDock::Float(int64 requested) {
   session.panel = nullptr;
   session.visible = false;
   UpdateVisibility();
+  window->Describe(TerminalName(lister), std::string("Started in: ") + panel->StartFolder());
   window->Show();
   return true;
 }

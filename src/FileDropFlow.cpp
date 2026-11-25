@@ -29,8 +29,19 @@ bool FileDropFlow::Handle(const BMessage &message) {
     }
     try {
       ++serial;
+      missingParent.reset();
       auto job =
-          PrepareFileDrop(message, message.GetString("destination", ""), true);
+          PrepareFileDrop(message, message.GetString("destination", ""), true, &missingLeaf);
+      if (!missingLeaf.empty()) {
+        BMessage accepted(kDropAccepted);
+        accepted.AddInt64("request", serial);
+        const auto path = job.destination + (job.destination == "/" ? "" : "/") + missingLeaf;
+        const auto text = "Create this folder and copy " + std::to_string(job.sources.size()) +
+                          " item(s) into it? Originals are kept.\n" + path;
+        if (actionArea.Ask(text.c_str(), "Create and copy", accepted))
+          missingParent = std::move(job);
+        break;
+      }
       if (job.action == Action::EditArchive) {
         auto prompt = ArchiveActions::ConfirmAddition(job, {});
         actionArea.Ask(prompt.text.String(), prompt.button, prompt.accepted);
@@ -70,6 +81,18 @@ bool FileDropFlow::Handle(const BMessage &message) {
     if (message.GetInt64("request", -1) != serial)
       break;
     const auto which = message.GetInt32("which", 0);
+    if (missingParent) {
+      auto parent = std::move(*missingParent);
+      missingParent.reset();
+      if (which == 1) {
+        try {
+          queue.Enqueue(CreateFileDropDestination(std::move(parent), missingLeaf));
+        } catch (const std::exception &e) {
+          PostMainWindowNotice(e.what());
+        }
+      }
+      break;
+    }
     if (which == 3 || message.GetBool("convertOnly", false)) {
       BMessage probe(message);
       probe.what = kImageDropProbe;
@@ -106,8 +129,11 @@ bool FileDropFlow::Handle(const BMessage &message) {
     std::vector<std::string> labels;
     BMessage output;
     for (int32 i = 0; message.FindMessage("output", i, &output) == B_OK; ++i) {
-      labels.push_back(std::string(output.GetString("name", "")) + " (." +
-                       output.GetString("extension", "") + ")");
+      std::string label = std::string(output.GetString("name", "")) + " (." +
+                          output.GetString("extension", "") + ")";
+      if (std::string(output.GetString("mime", "")) == "image/jpeg")
+        label += " · transparency becomes white";
+      labels.push_back(std::move(label));
     }
     if (labels.empty())
       break;
@@ -118,13 +144,20 @@ bool FileDropFlow::Handle(const BMessage &message) {
     std::string text = "Convert " + Leaf(job.sources.front()) +
                        " into:\n" + job.destination +
                        "\nThe original and existing files are kept.";
-    actionArea.Ask(text.c_str(), "Convert", accepted, nullptr, nullptr,
-                    nullptr, labels);
+    actionArea.Ask(text.c_str(), "Convert", accepted, nullptr,
+                   InTransferSourceFolder(job) ? nullptr : "Copy original instead",
+                   nullptr, labels);
     break;
   }
   case kImageDropConvert: {
     if (message.GetInt64("request", -1) != serial)
       break;
+    if (message.GetInt32("which", 1) == 2) {
+      auto job = DecodeSubmittedJob(message, {Action::Copy});
+      if (job && !InTransferSourceFolder(*job))
+        queue.Enqueue(*job);
+      break;
+    }
     BMessage output;
     const auto option = message.GetInt32("option", -1);
     if (option < 0 || message.FindMessage("output", option, &output) != B_OK)

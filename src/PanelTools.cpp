@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "PanelTools.h"
+#include "FolderTabs.h"
+#include "FolderHistory.h"
 #include "FlatView.h"
 #include "ViewVisibility.h"
 
@@ -32,6 +34,8 @@ PanelTools::PanelTools(int32 index, Pane &list)
   closeButton->SetToolTip("Close this tool and return to files");
   BLayoutBuilder::Group<>(tabs).AddGlue().Add(closeButton);
   GroupLayout()->AddView(tabs, 0.0f);
+  folderBar = new FolderTabs(index, files);
+  GroupLayout()->AddView(folderBar, 0.0f);
   AddChild(&files);
   tabs->Hide();
   UpdateTabs();
@@ -73,7 +77,7 @@ bool PanelTools::CloseEditor() {
 
 void PanelTools::EnableTools(bool enabled) {
   toolsEnabled = enabled;
-  if (!enabled && current != PanelPage::Flat)
+  if (!enabled && current != PanelPage::Flat && current != PanelPage::History)
     ShowPage(PanelPage::Files);
   else
     UpdateTabs();
@@ -90,6 +94,7 @@ void PanelTools::FocusCurrent() {
     Page(current)->MessageReceived(&focus);
     break;
   }
+  case PanelPage::History:
   case PanelPage::Preview:
     Page(current)->MakeFocus();
     break;
@@ -102,13 +107,19 @@ void PanelTools::OpenFlat(const std::shared_ptr<Shelf> &shelf) {
          CreateFlatView(BMessenger(Window()), shelf, files.Path(), pane));
 }
 
+bool PanelTools::OpenHistory(const char *source) {
+  if (current != PanelPage::Files) return false;
+  Open(PanelPage::History, CreateHistoryPreview(source, pane));
+  return true;
+}
+
 bool PanelTools::OpenSearch(const BMessage &store) {
   if (Page(PanelPage::Search))
     return Select(PanelPage::Search);
   if (!CanLeaveCurrent())
     return false;
   Open(PanelPage::Search,
-       CreatePanelSearch(BMessenger(Window()), pane, files.Path(), store));
+       CreatePanelSearch(BMessenger(Window()), pane, files.SearchRoot(), store));
   return true;
 }
 
@@ -156,7 +167,7 @@ void PanelTools::RemovePage(PanelPage page) {
 
 void PanelTools::ShowPage(PanelPage page) {
   if (current != page) {
-    if (current == PanelPage::Flat)
+    if (current == PanelPage::Flat || current == PanelPage::History)
       RemovePage(current);
     else
       Page(current)->Hide();
@@ -166,7 +177,13 @@ void PanelTools::ShowPage(PanelPage page) {
   UpdateTabs();
 }
 
+void PanelTools::ShowFolderTabs(bool always) {
+  alwaysFolderTabs = always;
+  folderBar->SetShown(current == PanelPage::Files, always);
+}
+
 void PanelTools::UpdateTabs() {
+  ShowFolderTabs(alwaysFolderTabs);
   const bool otherTools = Page(PanelPage::Search) || Page(PanelPage::Preview);
   SetViewVisible(tabs, toolsEnabled && otherTools);
   for (size_t i = 0; i < buttons.size(); ++i) {

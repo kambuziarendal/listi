@@ -100,6 +100,23 @@ void SavedPlaces::Remove(const std::string &path) {
     throw std::runtime_error("That saved place no longer exists.");
   items.erase(found);
 }
+void SavedPlaces::ApplyEdit(const BMessage &request) {
+  BMessage edit;
+  if (request.FindMessage("edit", &edit) != B_OK)
+    throw std::runtime_error("Missing saved-place edit.");
+  const char *path = edit.GetString("path", "");
+  const char *name = edit.GetString("name", "");
+  const int32 action = edit.GetInt32("action", -1);
+  const auto *old = Find(path);
+  if (action != 0 && (!old || old->name != request.GetString("previousName", "")))
+    throw std::runtime_error("This saved place changed in another window.");
+  switch (action) {
+  case 0: Add(name, path); break;
+  case 1: Rename(path, name); break;
+  case 2: Remove(path); break;
+  default: throw std::runtime_error("Unknown saved-place edit.");
+  }
+}
 BMessage SavedPlaces::Message() const {
   BMessage result;
   result.AddInt32("version", 1);

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "WindowKeyFilter.h"
+#include "FolderTabs.h"
 #include "Common.h"
 #include "InspectorEditor.h"
 #include "Pane.h"
@@ -92,6 +93,21 @@ filter_result WindowKeyFilter::Filter(BMessage *m, BHandler **target) {
   // own editing keys. Resolve the actual focused pane, not a queued role.
   int32 modifiers = m->GetInt32("modifiers", 0);
   int32 raw = m->GetInt32("raw_char", bytes[0]);
+  if (!text && window && OwningPane(window->CurrentFocus()) &&
+      (modifiers & (B_COMMAND_KEY | B_CONTROL_KEY | B_OPTION_KEY | B_SHIFT_KEY)) ==
+          (B_COMMAND_KEY | B_OPTION_KEY)) {
+    uint32 tab = 0;
+    switch (raw) {
+    case 't': case 'T': tab = kTabNew; break;
+    case 'w': case 'W': tab = kTabClose; break;
+    case '[': tab = kTabPrevious; break;
+    case ']': tab = kTabNext; break;
+    }
+    if (tab) {
+      Looper()->PostMessage(tab);
+      return B_SKIP_MESSAGE;
+    }
+  }
   if (!text &&
       (modifiers & (B_COMMAND_KEY | B_CONTROL_KEY | B_OPTION_KEY |
                     B_SHIFT_KEY)) == B_COMMAND_KEY &&

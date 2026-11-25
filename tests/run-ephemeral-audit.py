@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 """Run Listi's Haiku audit in a local throwaway overlay; never modify the base."""
 import argparse
+from contextlib import contextmanager
 import hashlib
 import platform
 import re
@@ -29,6 +30,8 @@ def main():
     parser.add_argument("--bios-dir", type=Path)
     parser.add_argument("--accel", choices=("kvm", "tcg", "hvf"), default="tcg")
     parser.add_argument("--jobs", type=int, default=2)
+    parser.add_argument("--provision-public-fixture", action="store_true",
+                        help="install CI dependencies in the disposable public guest before auditing offline")
     parser.add_argument("--preflight", action="store_true", help="boot and verify an exported tree only")
     parser.add_argument("--qualify-package", action="store_true",
                         help="require the complete suite and test the exact newly installed HPKG")
@@ -80,26 +83,45 @@ def run(args, base, key, output, scratch):
     )
     subprocess.run([args.qemu_img, "create", "-f", "qcow2", "-F", args.base_format,
                     "-b", base, overlay], check=True)
+    if args.provision_public_fixture:
+        with boot(args, key, overlay, output, scratch, provision=True) as (guest, ssh):
+            script = Path(__file__).resolve().parents[1] / "ci/provision-haiku.sh"
+            with script.open("rb") as source, (output / "provision.log").open("wb") as log:
+                subprocess.run([*ssh, "bash -se"], stdin=source, stdout=log,
+                               stderr=subprocess.STDOUT, check=True)
+            # The SSH connection can drop during poweroff. Only continue once
+            # QEMU itself exits cleanly, so the provisioned disk is quiescent.
+            status = subprocess.run([*ssh, "sync && shutdown -q"], timeout=90)
+            if status.returncode not in (0, 255) or guest.wait(timeout=90) != 0:
+                raise RuntimeError("Provisioned guest did not power off cleanly.")
+    with boot(args, key, overlay, output, scratch) as (_, ssh):
+        audit(args, output, ssh, archive)
+
+
+@contextmanager
+def boot(args, key, overlay, output, scratch, provision=False):
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
+    network = "user,id=n0" if provision else "user,id=n0,restrict=on"
+    prefix = "provision-" if provision else ""
     command = [args.qemu, "-machine", f"pc,accel={args.accel}", "-m", "2048",
                "-smp", str(args.jobs), "-display", "none", "-monitor", "none",
                "-drive", f"file={overlay},format=qcow2,if=ide",
-               "-netdev", f"user,id=n0,restrict=on,hostfwd=tcp:127.0.0.1:{port}-:22",
+               "-netdev", f"{network},hostfwd=tcp:127.0.0.1:{port}-:22",
                "-device", "e1000,netdev=n0,romfile=",
-               "-serial", f"file:{output / 'serial.log'}"]
+               "-serial", f"file:{output / (prefix + 'serial.log')}"]
     if args.bios_dir:
         command.extend(["-L", str(args.bios_dir.resolve(strict=True))])
     ssh = ["ssh", "-F", "/dev/null", "-o", "ForwardAgent=no", "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
            "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=3",
            "-o", f"UserKnownHostsFile={scratch / 'known-hosts'}",
            "-i", str(key), "-p", str(port), f"{args.user}@127.0.0.1"]
-    with (output / "qemu.log").open("wb") as qemu_log:
+    with (output / (prefix + "qemu.log")).open("wb") as qemu_log:
         guest = subprocess.Popen(command, stdout=qemu_log, stderr=qemu_log)
         try:
             ready(guest, ssh)
-            audit(args, output, ssh, archive)
+            yield guest, ssh
         finally:
             if guest.poll() is None:
                 guest.terminate()
@@ -182,6 +204,20 @@ echo "TEST installed Listi --self-test"
         if installed.count(marker) != 1:
             raise RuntimeError("Missing installed self-test start")
         receipts["validate_checks"](installed[installed.index(marker) + 1:])
+        version = next(line.split()[1] for line in Path("PackageInfo").read_text().splitlines()
+                       if line.startswith("version "))
+        name = f"listi-{version}-x86_64.hpkg"
+        guest_path = f"/boot/system/packages/{name}"
+        with (output / name).open("wb") as package_file:
+            subprocess.run([*ssh, "cat " + shlex.quote(guest_path)], stdout=package_file, check=True)
+        digest = hashlib.sha256((output / name).read_bytes()).hexdigest()
+        if f"{digest}  {guest_path}" not in installed:
+            raise RuntimeError("Exported package differs from the installed artifact")
+        with (output / "installed-multiwindow.log").open("wb") as log:
+            subprocess.run([*ssh, "cd ~/listi-ephemeral && python3 -u tests/multiwindow-installed.py"],
+                           stdout=log, stderr=subprocess.STDOUT, check=True, timeout=240)
+        multiwindow = (output / "installed-multiwindow.log").read_text().splitlines()
+        receipts["validate_installed_multiwindow"](multiwindow)
     if args.extended_fixture:
         # Host dependencies are opt-in. Nothing here uses a production service.
         helper = Path(__file__).resolve().parents[1] / "ci/run-extended.py"

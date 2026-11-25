@@ -14,6 +14,7 @@ public:
   ArchiveListingScope &operator=(const ArchiveListingScope &) = delete;
 };
 bool ArchiveListingScopeActive();
+class ArchiveMetadataBudget;
 void ClearLibarchiveReadCache();
 struct ArchiveBackend {
   const char *package;
@@ -27,6 +28,8 @@ bool SevenZipAvailable();
 std::string SevenZipFormat(const std::string &);
 std::string SevenZipOpen(const std::string &, const TransferControl &);
 std::vector<FileEntry> SevenZipList(const Location &, const TransferControl &);
+std::vector<FileEntry> SevenZipList(const Location &, const TransferControl &,
+                                    ArchiveMetadataBudget &);
 void SevenZipRead(const Location &, const DataSink &, const TransferControl &);
 bool SevenZipCanCreate();
 void SevenZipCreate(int outputFd, const std::vector<std::string> &sources,
@@ -37,6 +40,8 @@ bool LibarchiveAvailable();
 std::string LibarchiveOpen(const std::string &, const TransferControl &);
 std::vector<FileEntry> LibarchiveList(const Location &,
                                       const TransferControl &);
+std::vector<FileEntry> LibarchiveList(const Location &, const TransferControl &,
+                                    ArchiveMetadataBudget &);
 void LibarchiveRead(const Location &, const DataSink &,
                     const TransferControl &);
 } // namespace Listi

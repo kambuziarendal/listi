@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "Common.h"
+#include "ScrollableForm.h"
 #include "WrappedLabel.h"
 #include "WorkspaceEditor.h"
 #include <Alert.h>
@@ -22,6 +23,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <mutex>
 rgb_color Preferences::Color(const BString &text) const {
   unsigned int r, g, b;
   if (text.Length() == 7 &&
@@ -31,6 +34,8 @@ rgb_color Preferences::Color(const BString &text) const {
 }
 void Preferences::Load(const BMessage &m) {
   WorkspaceLayout::Load(m);
+  int32 opening = m.GetInt32("folderOpening", NewWindow);
+  folderOpening = opening >= NewWindow && opening <= Ask ? FolderOpening(opening) : NewWindow;
   tviskiptButtons = m.GetInt32("tviskiptButtons", -1);
   if (tviskiptButtons < -1 || tviskiptButtons > 1)
     tviskiptButtons = -1;
@@ -47,6 +52,8 @@ void Preferences::Load(const BMessage &m) {
     if (*path && mode >= 0 && mode < ViewModeCount)
       folderModes[path] = mode;
   }
+  alwaysFolderTabs = m.GetBool("alwaysFolderTabs", false);
+  separateWindows = m.GetBool("separateWindows", true);
   icons = m.GetBool("icons", true);
   size = m.GetBool("size", true);
   date = m.GetBool("date", true);
@@ -71,6 +78,7 @@ void Preferences::ApplyDialog(const BMessage &message) {
   auto layout = CaptureLayout();
   BMessage changes;
   const bool hasChanges = message.FindMessage("layoutChanges", &changes) == B_OK;
+  updated.alwaysFolderTabs = alwaysFolderTabs;
   updated.tviskiptButtons = tviskiptButtons;
   updated.smidjaButtons = smidjaButtons;
   for (auto w : {Workspace::tviskipt, Workspace::einn, Workspace::askr,
@@ -88,10 +96,16 @@ void Preferences::ApplyDialog(const BMessage &message) {
   updated.ApplyLayout(layout);
   updated.profiles = profiles;
   updated.folderModes = folderModes;
+  BMessage delta;
+  if (message.FindMessage("sharedChanges", &delta) == B_OK) {
+    updated.ApplyShared(SharedChanges());
+    updated.ApplyShared(delta);
+  }
   *this = updated;
 }
 BMessage Preferences::Save() const {
-  BMessage m;
+  BMessage m = SharedChanges();
+  m.what = 0;
   WorkspaceLayout::Archive(m);
   m.AddInt32("tviskiptButtons", tviskiptButtons);
   m.AddInt32("smidjaButtons", smidjaButtons);
@@ -102,20 +116,64 @@ BMessage Preferences::Save() const {
     folder.AddInt32("mode", entry.second);
     m.AddMessage("folderView", &folder);
   }
-  m.AddBool("icons", icons);
-  m.AddBool("size", size);
-  m.AddBool("date", date);
-  font_family family;
+  return m;
+}
+BMessage Preferences::SharedChanges(const Preferences *before) const {
+  BMessage m(kSharedPreferences);
+  if (!before || folderOpening != before->folderOpening)
+    m.AddInt32("folderOpening", folderOpening);
+  if (!before || separateWindows != before->separateWindows)
+    m.AddBool("separateWindows", separateWindows);
+  if (!before || alwaysFolderTabs != before->alwaysFolderTabs)
+    m.AddBool("alwaysFolderTabs", alwaysFolderTabs);
+  if (!before || icons != before->icons)
+    m.AddBool("icons", icons);
+  if (!before || size != before->size)
+    m.AddBool("size", size);
+  if (!before || date != before->date)
+    m.AddBool("date", date);
+  if (!before || editor != before->editor)
+    m.AddString("editor", editor);
+  if (!before || terminal != before->terminal)
+    m.AddString("terminal", terminal);
+  if (!before || folders != before->folders)
+    m.AddString("folders", folders);
+  if (!before || files != before->files)
+    m.AddString("files", files);
+  if (!before || links != before->links)
+    m.AddString("links", links);
+  font_family family, previousFamily = {};
   font_style style;
   font.GetFamilyAndStyle(&family, &style);
-  m.AddString("fontFamily", family);
-  m.AddFloat("fontSize", font.Size());
-  m.AddString("editor", editor);
-  m.AddString("terminal", terminal);
-  m.AddString("folders", folders);
-  m.AddString("files", files);
-  m.AddString("links", links);
+  if (before)
+    before->font.GetFamilyAndStyle(&previousFamily, &style);
+  if (!before || strcmp(family, previousFamily) != 0)
+    m.AddString("fontFamily", family);
+  if (!before || font.Size() != before->font.Size())
+    m.AddFloat("fontSize", font.Size());
   return m;
+}
+void Preferences::ApplyShared(const BMessage &m) {
+  int32 opening = m.GetInt32("folderOpening", folderOpening);
+  if (opening >= NewWindow && opening <= Ask)
+    folderOpening = FolderOpening(opening);
+  separateWindows = m.GetBool("separateWindows", separateWindows);
+  alwaysFolderTabs = m.GetBool("alwaysFolderTabs", alwaysFolderTabs);
+  icons = m.GetBool("icons", icons);
+  size = m.GetBool("size", size);
+  date = m.GetBool("date", date);
+  editor = m.GetString("editor", editor);
+  terminal = m.GetString("terminal", terminal);
+  folders = m.GetString("folders", folders);
+  files = m.GetString("files", files);
+  links = m.GetString("links", links);
+  const char *family = nullptr;
+  if (m.FindString("fontFamily", &family) == B_OK)
+    font.SetFamilyAndStyle(family, nullptr);
+  float points;
+  if (m.FindFloat("fontSize", &points) == B_OK && std::isfinite(points) &&
+      points >= 8 && points <= 40)
+    font.SetSize(points);
 }
 namespace {
 constexpr Workspace kSettingsWorkspaces[] = {
@@ -125,58 +183,6 @@ constexpr int32 kAppearancePage = 1;
 
 // Clip to a fixed viewport, but give the page enough height for every
 // control. The scroll bar moves the viewport rather than shrinking the page.
-class SettingsPage : public BScrollView {
-  BView *content;
-
-public:
-  explicit SettingsPage(BView *page)
-      : BScrollView("settings page scroll",
-                    new BView("settings viewport", B_SCROLL_VIEW_AWARE),
-                    0, false, true, B_NO_BORDER),
-        content(page) {
-    Target()->AddChild(content);
-  }
-
-  BSize MinSize() override {
-    const auto bar = ScrollBar(B_VERTICAL);
-    return {content->MinSize().width + bar->PreferredSize().width + 1,
-            std::max(64.f, bar->MinSize().height)};
-  }
-
-  void DoLayout() override {
-    BScrollView::DoLayout();
-    const BRect bounds = Target()->Bounds();
-    if (!bounds.IsValid())
-      return;
-    float minimum = content->MinSize().height;
-    if (content->HasHeightForWidth())
-      content->GetHeightForWidth(bounds.Width(), &minimum, nullptr, nullptr);
-    const float height = std::max(bounds.Height(), minimum);
-    content->ResizeTo(bounds.Width(), height);
-
-    auto bar = ScrollBar(B_VERTICAL);
-    bar->SetRange(0, height - bounds.Height());
-    bar->SetProportion((bounds.Height() + 1) / (height + 1));
-    bar->SetSteps(be_plain_font->Size() * 1.33f, bounds.Height());
-  }
-
-  void Reveal(BView *view) {
-    BView *ancestor = view;
-    while (ancestor && ancestor != content)
-      ancestor = ancestor->Parent();
-    if (!ancestor)
-      return;
-    const BRect bounds = Target()->Bounds();
-    const BRect field =
-        Target()->ConvertFromScreen(view->ConvertToScreen(view->Bounds()));
-    const float top = bounds.top;
-    if (field.top < top)
-      ScrollBar(B_VERTICAL)->SetValue(field.top);
-    else if (field.bottom > bounds.bottom)
-      ScrollBar(B_VERTICAL)->SetValue(top + field.bottom - bounds.bottom);
-  }
-};
-
 class PreferencesWindow : public BWindow {
   BMessenger target;
   Preferences prefs;
@@ -184,14 +190,15 @@ class PreferencesWindow : public BWindow {
   BPopUpMenu *categories;
   BPopUpMenu *defaultModes[sizeof(kSettingsWorkspaces) /
                            sizeof(kSettingsWorkspaces[0])];
-  BCheckBox *icons, *size, *date, *buttons, *command;
+  BPopUpMenu *folderOpening;
+  BCheckBox *icons, *size, *date, *buttons, *command, *separateWindows;
   BTextControl *family, *fontSize, *folders, *files, *links, *editor, *terminal;
 
   void AddPage(BView *page) {
     auto choose = new BMessage(kSettingsCategory);
     choose->AddInt32("page", categories->CountItems());
     categories->AddItem(new BMenuItem(page->Name(), choose));
-    pages->AddChild(new SettingsPage(page));
+    pages->AddChild(new Listi::ScrollableForm(page));
   }
 
   void SelectPage(int32 index) {
@@ -205,7 +212,7 @@ class PreferencesWindow : public BWindow {
   void Reveal(BView *view) {
     auto item = pages->CardLayout()->VisibleItem();
     if (item)
-      static_cast<SettingsPage *>(item->View())->Reveal(view);
+      static_cast<Listi::ScrollableForm *>(item->View())->Reveal(view);
   }
 
   void ShowInputError(BTextControl *control, const char *error) {
@@ -250,7 +257,15 @@ public:
     auto customize = new BButton("workspace layout",
                                  "Customize current workspace layout…", openLayout);
     customize->SetTarget(target);
+    separateWindows = new BCheckBox("Open a new window when launching Listi again", nullptr);
+    separateWindows->SetValue(p.separateWindows);
+    folderOpening = new BPopUpMenu("folder opening");
+    for (const char *label : Preferences::FolderOpeningLabels)
+      folderOpening->AddItem(new BMenuItem(label, nullptr));
+    folderOpening->ItemAt(p.folderOpening)->SetMarked(true);
     views.End()
+        .Add(new BMenuField("external folders", "Open external folders in:", folderOpening))
+        .Add(separateWindows)
         .Add(new WrappedLabel(
             "view precedence",
             "An explicit view saved for a folder takes priority."), 0)
@@ -383,6 +398,9 @@ public:
         return;
       }
     }
+    const Preferences before = prefs;
+    prefs.folderOpening = Preferences::FolderOpening(folderOpening->IndexOf(folderOpening->FindMarked()));
+    prefs.separateWindows = separateWindows->Value();
     prefs.font.SetFamilyAndStyle(family->Text(), nullptr);
     prefs.font.SetSize(n);
     prefs.icons = icons->Value();
@@ -407,25 +425,43 @@ public:
       prefs.SetDefaultMode(workspace, mode);
     }
     BMessage result = prefs.Save();
+    BMessage delta = prefs.SharedChanges(&before);
+    result.AddMessage("sharedChanges", &delta);
     result.AddMessage("layoutChanges", &changes);
     result.what = kApplyPreferences;
     target.SendMessage(&result);
     Quit();
   }
 };
+std::mutex preferencesLock;
+std::vector<std::pair<BMessenger, BMessenger>> preferencesWindows;
 } // namespace
+
+bool PreferencesOpenFor(BMessenger owner) {
+  std::lock_guard<std::mutex> lock(preferencesLock);
+  for (const auto &entry : preferencesWindows)
+    if (entry.first == owner && entry.second.IsValid())
+      return true;
+  return false;
+}
+
 void OpenPreferences(BMessenger target, const Preferences &prefs) {
-  // The main window is the only caller. A messenger remains safe if the
-  // settings window has already closed.
-  static BMessenger openWindow;
-  if (openWindow.LockTarget()) {
-    BLooper *looper = nullptr;
-    openWindow.Target(&looper);
-    static_cast<BWindow *>(looper)->Activate();
-    looper->Unlock();
-    return;
+  std::lock_guard<std::mutex> lock(preferencesLock);
+  for (auto it = preferencesWindows.begin(); it != preferencesWindows.end();) {
+    if (!it->second.IsValid()) {
+      it = preferencesWindows.erase(it);
+      continue;
+    }
+    if (it->first == target && it->second.LockTarget()) {
+      BLooper *looper = nullptr;
+      it->second.Target(&looper);
+      static_cast<BWindow *>(looper)->Activate();
+      looper->Unlock();
+      return;
+    }
+    ++it;
   }
   auto window = new PreferencesWindow(target, prefs);
-  openWindow = BMessenger(window);
+  preferencesWindows.emplace_back(target, BMessenger(window));
   window->Show();
 }

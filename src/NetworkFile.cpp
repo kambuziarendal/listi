@@ -4,6 +4,7 @@
 #include "VirtualFile.h"
 #include <algorithm>
 #include <cerrno>
+#include <condition_variable>
 #include <cstdio>
 #include <cstring>
 #include <curl/curl.h>
@@ -26,7 +27,68 @@ DynamicLibrary &Curl() {
   static DynamicLibrary lib({"libcurl.so", "libcurl.so.4"});
   return lib;
 }
-std::mutex smbMutex;
+// Contexts own their handles, but Samba also has process-wide state. Serialize
+// API calls in arrival order so a streaming reader cannot starve browsing.
+class SMBPermit {
+public:
+  explicit SMBPermit(const TransferControl *control = nullptr) {
+    if (control)
+      control->Check();
+    std::unique_lock<std::mutex> lock(mutex);
+    previous = last;
+    if (last)
+      last->next = this;
+    else
+      first = this;
+    last = this;
+    try {
+      while (active || first != this) {
+        if (control) {
+          ready.wait_for(lock, std::chrono::milliseconds(10));
+          lock.unlock();
+          control->Check();
+          lock.lock();
+        } else {
+          ready.wait(lock);
+        }
+      }
+    } catch (...) {
+      if (!lock.owns_lock())
+        lock.lock();
+      Unlink();
+      ready.notify_all();
+      throw;
+    }
+    Unlink();
+    active = true;
+  }
+  SMBPermit(const SMBPermit &) = delete;
+  SMBPermit &operator=(const SMBPermit &) = delete;
+  ~SMBPermit() {
+    std::lock_guard<std::mutex> lock(mutex);
+    active = false;
+    ready.notify_all();
+  }
+
+private:
+  // The waiters own their queue nodes, so closing a native handle does not
+  // allocate even when it needs to wait for another context.
+  void Unlink() {
+    if (previous)
+      previous->next = next;
+    else
+      first = next;
+    if (next)
+      next->previous = previous;
+    else
+      last = previous;
+  }
+  SMBPermit *previous = nullptr, *next = nullptr;
+  static inline SMBPermit *first = nullptr, *last = nullptr;
+  static inline std::mutex mutex;
+  static inline std::condition_variable ready;
+  static inline bool active = false;
+};
 [[noreturn]] void Error(const std::string &s) {
   throw std::runtime_error(s + ": " + strerror(errno));
 }
@@ -36,19 +98,20 @@ void Fill(FileEntry &e, const Location &l, const struct stat &st) {
   e.directory = S_ISDIR(st.st_mode);
   e.link = S_ISLNK(st.st_mode);
   e.size = st.st_size;
-  e.modified = st.st_mtime;
-  e.modifiedKnown = true;
+  e.SetModification(st.st_mtim.tv_sec, st.st_mtim.tv_nsec);
   e.permissions = st.st_mode & 0777;
 }
 struct SMBSession {
-  std::unique_lock<std::mutex> lock{smbMutex};
   DynamicLibrary &lib = SMB();
   SMBCCTX *ctx = nullptr;
   Connection auth;
-  explicit SMBSession(const Location &l) : auth(GetConnection(l.URL())) {
+  const TransferControl &control;
+  explicit SMBSession(const Location &l, const TransferControl &c)
+      : auth(GetConnection(l.URL())), control(c) {
     if (!lib.Available())
       throw std::runtime_error(
           "Install samba4 from HaikuDepot to connect to SMB shares");
+    SMBPermit permit(&control);
     ctx = LIBCALL(lib, smbc_new_context)();
     if (!ctx)
       Error("SMB context");
@@ -72,9 +135,13 @@ struct SMBSession {
       throw;
     }
   }
+  SMBSession(const SMBSession &) = delete;
+  SMBSession &operator=(const SMBSession &) = delete;
   ~SMBSession() {
-    if (ctx)
+    if (ctx) {
+      SMBPermit permit;
       LIBCALL(lib, smbc_free_context)(ctx, 1);
+    }
   }
   static void Authenticate(SMBCCTX *c, const char *, const char *, char *domain,
                            int nd, char *user, int nu, char *pass, int np) {
@@ -93,6 +160,7 @@ struct SMBSession {
   }
   bool Stat(const Location &l, FileEntry &e) {
     struct stat st;
+    SMBPermit permit(&control);
     if (LIBCALL(lib, smbc_getFunctionStat)(ctx)(ctx, URL(l).c_str(), &st)) {
       if (errno == ENOENT)
         return false;
@@ -104,24 +172,40 @@ struct SMBSession {
 };
 struct SMBHandle {
   SMBSession &session;
-  SMBCFILE *file;
+  SMBCFILE *file = nullptr;
   bool directory;
+  SMBHandle(SMBSession &s, const Location &l, bool dir, int flags = 0)
+      : session(s), directory(dir) {
+    SMBPermit permit(&s.control);
+    auto url = s.URL(l);
+    if (dir)
+      file = LIBCALL(s.lib, smbc_getFunctionOpendir)(s.ctx)(s.ctx, url.c_str());
+    else
+      file = LIBCALL(s.lib, smbc_getFunctionOpen)(s.ctx)(s.ctx, url.c_str(),
+                                                       flags, 0600);
+    if (!file)
+      Error(dir ? "SMB open folder" : flags == O_RDONLY ? "SMB open file"
+                                                       : "SMB create staged file");
+  }
+  SMBHandle(const SMBHandle &) = delete;
+  SMBHandle &operator=(const SMBHandle &) = delete;
   ~SMBHandle() {
     if (file) {
-      auto &s = session;
-      if (directory)
-        LIBCALL(s.lib, smbc_getFunctionClosedir)(s.ctx)(s.ctx, file);
-      else
-        LIBCALL(s.lib, smbc_getFunctionClose)(s.ctx)(s.ctx, file);
+      SMBPermit permit;
+      CloseLocked();
     }
   }
-  void Close() {
+  int CloseLocked() {
     auto &s = session;
     int r = directory
                 ? LIBCALL(s.lib, smbc_getFunctionClosedir)(s.ctx)(s.ctx, file)
                 : LIBCALL(s.lib, smbc_getFunctionClose)(s.ctx)(s.ctx, file);
     file = nullptr;
-    if (r)
+    return r;
+  }
+  void Close() {
+    SMBPermit permit(&session.control);
+    if (CloseLocked())
       Error("SMB close");
   }
 };
@@ -237,8 +321,15 @@ struct CurlSession {
       return 1;
     }
   }
-  CURLcode Perform(bool missingOK = false) {
+  CURLcode Perform(bool missingOK = false, bool accessDeniedOK = false) {
     control.Check();
+    if (control.cleanup) {
+      // NOSIGNAL with a synchronous DNS resolver cannot bound a lookup.
+      const auto *info = LIBCALL(lib, curl_version_info)(CURLVERSION_NOW);
+      if (!info || !(info->features & CURL_VERSION_ASYNCHDNS))
+        throw std::runtime_error("Remote cleanup deferred: resolver has no deadline.");
+      Set(CURLOPT_TIMEOUT_MS, control.cleanup->TimeoutMs());
+    }
     auto r = LIBCALL(lib, curl_easy_perform)(curl);
     if (failure)
       std::rethrow_exception(failure);
@@ -247,7 +338,8 @@ struct CurlSession {
           "SSH host key is unknown or changed. Verify this server with ssh in "
           "Terminal, or select a trusted known_hosts file in Connect / "
           "Advanced.");
-    if (r != CURLE_OK && !(missingOK && r == CURLE_REMOTE_FILE_NOT_FOUND))
+    if (r != CURLE_OK && !(missingOK && r == CURLE_REMOTE_FILE_NOT_FOUND) &&
+        !(accessDeniedOK && r == CURLE_REMOTE_ACCESS_DENIED))
       throw std::runtime_error(error[0] ? error
                                         : LIBCALL(lib, curl_easy_strerror)(r));
     return r;
@@ -264,6 +356,53 @@ std::string QuoteSFTP(const std::string &s) {
   }
   return out + '"';
 }
+// RFC 3659 uses UTC Gregorian dates, regardless of the client's time zone.
+void ParseModify(const std::string &value, FileEntry &entry) {
+  constexpr size_t dateLength = 14;
+  if (value.size() < dateLength ||
+      value.find_first_not_of("0123456789") < dateLength)
+    return;
+
+  std::string fraction;
+  if (value.size() > dateLength) {
+    if (value[dateLength] != '.' || value.size() == dateLength + 1 ||
+        value.find_first_not_of("0123456789", dateLength + 1) !=
+            std::string::npos)
+      return;
+    auto last = value.find_last_not_of('0');
+    fraction = value.substr(dateLength + 1, last - dateLength);
+  }
+
+  auto number = [&](size_t start, size_t width) {
+    return std::stoi(value.substr(start, width));
+  };
+  int year = number(0, 4);
+  int month = number(4, 2);
+  int day = number(6, 2);
+  int hour = number(8, 2);
+  int minute = number(10, 2);
+  int second = number(12, 2);
+  // POSIX time cannot represent leap seconds distinctly. Leave such a fact
+  // unknown rather than silently assigning it to a different instant.
+  if (year < 1000 || month < 1 || month > 12 || day < 1 || hour > 23 ||
+      minute > 59 || second > 59)
+    return;
+  bool leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+  int monthDays[] = {31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30,
+                     31};
+  if (day > monthDays[month - 1])
+    return;
+  auto daysBeforeYear = [](int year) -> int64_t {
+    int previous = year - 1;
+    return 365LL * previous + previous / 4 - previous / 100 + previous / 400;
+  };
+  int64_t days = daysBeforeYear(year) - daysBeforeYear(1970) + day - 1;
+  for (int i = 0; i < month - 1; ++i)
+    days += monthDays[i];
+  entry.modified = ((days * 24 + hour) * 60 + minute) * 60 + second;
+  entry.modifiedFraction = std::move(fraction);
+  entry.modifiedKnown = true;
+}
 // MLSD preserves spaces in names. Unix LIST is a fallback for SFTP and older
 // FTP.
 FileEntry ParseList(const std::string &line, const Location &l, bool mlsd) {
@@ -277,6 +416,7 @@ FileEntry ParseList(const std::string &line, const Location &l, bool mlsd) {
     e.name = line.substr(at + 1);
     std::string facts = line.substr(0, at);
     size_t i = 0;
+    bool sawModify = false;
     while (i < facts.size()) {
       auto end = facts.find(';', i);
       if (end == std::string::npos)
@@ -299,6 +439,16 @@ FileEntry ParseList(const std::string &line, const Location &l, bool mlsd) {
           throw std::runtime_error("Invalid FTP file size");
         e.size = std::stoll(v);
         e.sizeKnown = true;
+      } else if (key == "modify") {
+        // Duplicate facts are ambiguous, not a reason to trust the last one.
+        if (!sawModify)
+          ParseModify(v, e);
+        else {
+          e.modifiedKnown = false;
+          e.modified = 0;
+          e.modifiedFraction.clear();
+        }
+        sawModify = true;
       } else if (key == "unix.mode") {
         e.permissions = std::stoul(v, nullptr, 8) & 0777;
         hasPermissions = true;
@@ -351,36 +501,36 @@ std::vector<FileEntry> ListNetwork(const Location &l,
   c.Check();
   std::vector<FileEntry> out;
   if (l.scheme == "smb") {
-    SMBSession s(l);
-    SMBHandle dir{
-        s,
-        LIBCALL(s.lib, smbc_getFunctionOpendir)(s.ctx)(s.ctx, s.URL(l).c_str()),
-        true};
-    if (!dir.file)
-      Error("SMB open folder");
+    SMBSession s(l, c);
+    SMBHandle dir(s, l, true);
     for (;;) {
-      c.Check();
-      errno = 0;
-      auto *de =
-          LIBCALL(s.lib, smbc_getFunctionReaddir)(s.ctx)(s.ctx, dir.file);
-      if (!de) {
-        if (errno)
-          Error("SMB list folder");
-        break;
+      std::string name;
+      unsigned type;
+      {
+        SMBPermit permit(&c);
+        errno = 0;
+        auto *de =
+            LIBCALL(s.lib, smbc_getFunctionReaddir)(s.ctx)(s.ctx, dir.file);
+        if (!de) {
+          if (errno)
+            Error("SMB list folder");
+          break;
+        }
+        name = de->name;
+        type = de->smbc_type;
       }
-      std::string name = de->name;
       if (name == "." || name == "..")
         continue;
-      if (de->smbc_type != SMBC_FILE_SHARE && de->smbc_type != SMBC_DIR &&
-          de->smbc_type != SMBC_FILE && de->smbc_type != SMBC_LINK)
+      if (type != SMBC_FILE_SHARE && type != SMBC_DIR &&
+          type != SMBC_FILE && type != SMBC_LINK)
         continue;
       FileEntry e;
       e.name = name;
       e.path = ChildLocation(l.URL(), name);
       e.directory =
-          de->smbc_type == SMBC_DIR || de->smbc_type == SMBC_FILE_SHARE;
-      e.link = de->smbc_type == SMBC_LINK;
-      if (de->smbc_type != SMBC_FILE_SHARE && !s.Stat(ParseLocation(e.path), e))
+          type == SMBC_DIR || type == SMBC_FILE_SHARE;
+      e.link = type == SMBC_LINK;
+      if (type != SMBC_FILE_SHARE && !s.Stat(ParseLocation(e.path), e))
         continue;
       out.push_back(e);
     }
@@ -397,6 +547,8 @@ std::vector<FileEntry> ListNetwork(const Location &l,
     if (mlsd)
       s.Set(CURLOPT_CUSTOMREQUEST, "MLSD");
     s.sink = [&](const char *p, size_t n) {
+      if (c.cleanup)
+        c.cleanup->Consume(n);
       if (listing.size() + n > 64 * 1024 * 1024)
         throw std::runtime_error("Server listing is too large");
       listing.append(p, n);
@@ -428,10 +580,11 @@ std::vector<FileEntry> ListNetwork(const Location &l,
   }
   return out;
 }
-bool StatNetwork(const Location &l, FileEntry &e, const TransferControl &c) {
+bool StatNetwork(const Location &l, FileEntry &e, const TransferControl &c,
+                 const FileEntry *discovered) {
   c.Check();
   if (l.scheme == "smb") {
-    SMBSession s(l);
+    SMBSession s(l, c);
     return s.Stat(l, e);
   }
   if (l.path == "/") {
@@ -440,30 +593,61 @@ bool StatNetwork(const Location &l, FileEntry &e, const TransferControl &c) {
     e.directory = true;
     return true;
   }
-  for (auto &item : ListNetwork(ParseLocation(ParentLocation(l.URL())), c))
-    if (item.name == LocationLeaf(l.URL())) {
-      e = item;
-      return true;
+  FileEntry entry;
+  const auto url = l.URL();
+  if (discovered && discovered->path == url && !discovered->directory &&
+      !discovered->link) {
+    // Only the initial copy check supplies a sibling from its own traversal.
+    // The post-read check still obtains the size, type, and time afresh.
+    entry = *discovered;
+  } else {
+    auto items = ListNetwork(ParseLocation(ParentLocation(url)), c);
+    const auto name = LocationLeaf(url);
+    auto item = std::find_if(items.begin(), items.end(), [&](const FileEntry &entry) {
+      return entry.name == name;
+    });
+    if (item == items.end())
+      return false;
+    entry = std::move(*item);
+  }
+  if (l.scheme == "sftp" && !entry.directory && !entry.link) {
+    // Curl derives this from SFTP STAT; NOBODY avoids transferring the
+    // file. It may still open it for reading, so a denied probe can
+    // leave metadata unknown without invalidating the listing.
+    CurlSession s(l, c);
+    s.Set(CURLOPT_NOBODY, 1L);
+    s.Set(CURLOPT_FILETIME, 1L);
+    auto result = s.Perform(true, true);
+    if (result == CURLE_REMOTE_FILE_NOT_FOUND)
+      return false;
+    curl_off_t modified = -1;
+    // Some curl SSH backends expose an absent SFTP time as zero, like
+    // an explicit epoch. Do not guess which applies.
+    if (result == CURLE_OK &&
+        LIBCALL(s.lib, curl_easy_getinfo)(s.curl, CURLINFO_FILETIME_T,
+                                          &modified) == CURLE_OK &&
+        modified > 0) {
+      entry.SetModification(modified, 0);
     }
-  return false;
+  }
+  e = std::move(entry);
+  return true;
 }
 void ReadNetwork(const Location &l, const DataSink &sink,
                  const TransferControl &c) {
   if (l.scheme == "smb") {
-    SMBSession s(l);
-    SMBHandle f{s,
-                LIBCALL(s.lib, smbc_getFunctionOpen)(s.ctx)(
-                    s.ctx, s.URL(l).c_str(), O_RDONLY, 0),
-                false};
-    if (!f.file)
-      Error("SMB open file");
+    SMBSession s(l, c);
+    SMBHandle f(s, l, false, O_RDONLY);
     char buf[32768];
     for (;;) {
-      c.Check();
-      auto n = LIBCALL(s.lib, smbc_getFunctionRead)(s.ctx)(s.ctx, f.file, buf,
-                                                           sizeof(buf));
-      if (n < 0)
-        Error("SMB read");
+      ssize_t n;
+      {
+        SMBPermit permit(&c);
+        n = LIBCALL(s.lib, smbc_getFunctionRead)(s.ctx)(s.ctx, f.file, buf,
+                                                       sizeof(buf));
+        if (n < 0)
+          Error("SMB read");
+      }
       if (!n)
         break;
       sink(buf, n);
@@ -491,13 +675,8 @@ void UploadNetwork(const std::string &local, const Location &l,
   }
   std::unique_ptr<FILE, decltype(&fclose)> holder(input, &fclose);
   if (l.scheme == "smb") {
-    SMBSession s(l);
-    SMBHandle f{s,
-                LIBCALL(s.lib, smbc_getFunctionOpen)(s.ctx)(
-                    s.ctx, s.URL(l).c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600),
-                false};
-    if (!f.file)
-      Error("SMB create staged file");
+    SMBSession s(l, c);
+    SMBHandle f(s, l, false, O_WRONLY | O_CREAT | O_EXCL);
     char buf[32768];
     for (;;) {
       c.Check();
@@ -509,11 +688,14 @@ void UploadNetwork(const std::string &local, const Location &l,
       }
       size_t at = 0;
       while (at < n) {
-        c.Check();
-        auto wrote = LIBCALL(s.lib, smbc_getFunctionWrite)(s.ctx)(
-            s.ctx, f.file, buf + at, n - at);
-        if (wrote <= 0)
-          Error("SMB write");
+        ssize_t wrote;
+        {
+          SMBPermit permit(&c);
+          wrote = LIBCALL(s.lib, smbc_getFunctionWrite)(s.ctx)(
+              s.ctx, f.file, buf + at, n - at);
+          if (wrote <= 0)
+            Error("SMB write");
+        }
         at += wrote;
         c.Tick(wrote);
       }
@@ -537,7 +719,8 @@ void ChangeNetwork(const Location &l, const char *action,
   c.Check();
   std::string a = action;
   if (l.scheme == "smb") {
-    SMBSession s(l);
+    SMBSession s(l, c);
+    SMBPermit permit(&c);
     int r;
     if (a == "mkdir")
       r = LIBCALL(s.lib, smbc_getFunctionMkdir)(s.ctx)(s.ctx, s.URL(l).c_str(),

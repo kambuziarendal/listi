@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #pragma once
+#include "TerminalReplies.h"
 #include "InspectorContent.h"
 #include "InspectorPhoto.h"
 #include <View.h>
@@ -9,7 +10,7 @@
 #include <string>
 class BBitmap;
 class BitmapMailbox;
-class BLooper;
+namespace Listi { class ReadWorker; }
 class BButton;
 class BScrollView;
 class ThemeTextView;
@@ -20,6 +21,7 @@ public:
   ~ImagePreview();
   void AttachedToWindow() override;
   void DetachedFromWindow() override;
+  void Pulse() override;
   void MessageReceived(BMessage *) override;
   void Draw(BRect) override;
   void FrameResized(float, float) override;
@@ -34,10 +36,12 @@ public:
   const std::string &File() const { return path; }
 
 private:
+  std::shared_ptr<TerminalReplies> terminal = std::make_shared<TerminalReplies>();
   void Request(int page, bool playback = false);
   void UpdateControls();
   void RemoveEditor();
   void LayoutControls();
+  void SetTextVisible(bool visible);
   BRect PhotoArea() const;
   void PhotoMenu();
   void ZoomPhoto(double factor, BPoint anchor);
@@ -49,7 +53,7 @@ private:
   BPoint lastPointer;
   BBitmap *bitmap = nullptr;
   std::shared_ptr<BitmapMailbox> replies;
-  BLooper *loader = nullptr;
+  Listi::ReadWorker *loader = nullptr;
   std::shared_ptr<std::atomic<int64>> generation;
   ThemeTextView *text;
   BScrollView *textScroll;
@@ -57,6 +61,7 @@ private:
   BButton *fileAction, *closeQuickView;
   BButton *detachEditor, *doneEditing;
   BView *editor = nullptr;
+  bool submissionFailed = false;
   bool ready = false, canEdit = false;
   Inspector::Kind kind = Inspector::Kind::Unknown;
   const bool standalone;

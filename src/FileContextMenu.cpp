@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT
 #include "FileContextMenu.h"
 #include "Common.h"
+#include "FolderHistory.h"
+#include "MainWindow.h"
+#include "CopyTextMenu.h"
 #include "ShelfWindow.h"
 #include <MenuItem.h>
 #include <PopUpMenu.h>
@@ -18,6 +21,12 @@ void FolderActions(BMenu &menu, const ContextMenuOptions &options) {
     item->SetMarked(marked);
     target.AddItem(item);
   };
+  if (options.history) {
+    auto *history = new BMenu("Folder history");
+    add(*history, "Open in window", Listi::kFolderHistory, true);
+    add(*history, "Preview in other panel", Listi::kPreviewHistory, options.dual);
+    menu.AddItem(history);
+  }
   const auto sort = options.sort;
   auto sorting = new BMenu("Sort by");
   auto sortItem = [&](const char *label, int column, bool ascending,
@@ -52,6 +61,7 @@ void FolderActions(BMenu &menu, const ContextMenuOptions &options) {
   const bool local = options.folderLocal;
   const bool writable = local || options.folderArchive;
   menu.AddSeparatorItem();
+  add(menu, "New file…", kNewFile, local);
   add(menu, "New folder...", kMkdir, writable);
   add(menu, "Paste here", kClipboardPaste, writable);
   menu.AddSeparatorItem();
@@ -82,6 +92,8 @@ void FileActions(BMenu &menu, const ContextMenuOptions &options) {
   };
   add("Open", kInvoke, single);
   if (single && directory)
+    add("Open in new window", kSelectedBrowser);
+  if (single && directory)
     add("Add to shortcuts…", kAddShortcut, options.addShortcut);
   if (!directory) {
     add("Open with...", kOpenWith, single && local);
@@ -98,8 +110,8 @@ void FileActions(BMenu &menu, const ContextMenuOptions &options) {
   menu.AddSeparatorItem();
   add("Copy", kClipboardCopy, local || options.archiveRemove);
   add("Cut", kClipboardCut, local || options.archiveRemove);
-  add(single ? "Copy path as text" : "Copy paths as text", kCopyPaths,
-      options.selected != 0);
+  AddCopyTextMenu(menu, local && options.selected, options.selected,
+                  local && options.folderLocal && options.selected);
   add("Add to Shelf", Listi::kAddToShelf, options.addToShelf);
   add("Paste here", kClipboardPaste,
       options.folderLocal || options.folderArchive);

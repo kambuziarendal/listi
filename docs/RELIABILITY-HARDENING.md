@@ -2,8 +2,7 @@
 
 ## Baseline and scope
 
-Private branch `hardening/reliability-27926` started from a clean
-`audit/integrity-27917` at `734fa6996bbcc757e67b79e4e8093004fae3294d`.
+The reviewed branch started from a clean checkout at `734fa6996bbcc757e67b79e4e8093004fae3294d`.
 The earlier 0.38.0-10 installed-package result is baseline evidence only.
 It does not qualify changes on this branch.
 
@@ -109,10 +108,7 @@ Installed package and executable each compared byte-for-byte with the build.
   synchronous journal writes have measurable cost. Do not extrapolate this
   small-tree measurement to large files or physical devices.
 
-Raw local receipts: Kambuzi reports/listi-reliability-27926, notably
-final-audit.log, final-source.sha256, final-package.log, final-gui-verified.log,
-installed-recovery.png, scoped/matrix.json, death-*.log, real-full-run.log,
-two-jobs.log, target3.log and timing.log. No physical USB, power-cut or
+No physical USB, power-cut or
 real NAS testing. No production, hosted workflow or branch-rule change.
 
 ## Portable gate and native fault receipts

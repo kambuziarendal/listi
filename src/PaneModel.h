@@ -20,6 +20,7 @@ struct PaneEntry {
   int64_t size = 0, modified = 0;
   float fraction = 0;
   std::shared_ptr<BBitmap> icon;
+  bool iconRequested = false;
 };
 std::string FileTypeKey(const std::string &name);
 struct PaneSort {
@@ -37,7 +38,11 @@ struct SelectionSummary {
 class PaneModel {
 public:
   void Clear();
+  bool MatchesSnapshot(const std::vector<std::unique_ptr<PaneEntry>> &) const;
   void Add(std::unique_ptr<PaneEntry> entry);
+  // Scans expose matching rows immediately, then sort once at completion.
+  void AddScanned(std::unique_ptr<PaneEntry> entry, const char *query,
+                  bool restoreSelection);
   void Filter(const std::string &query);
   void Sort(PaneSort value);
   PaneSort Sorting() const { return sorting; }

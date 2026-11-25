@@ -126,7 +126,7 @@ SearchSummary SearchFiles(const SearchRequest &request,
       out.limited = true;
       return false;
     }
-    if (!deliver({path, st.st_dev, st.st_ino, relativeFolder})) {
+    if (!deliver({path, st.st_dev, st.st_ino, relativeFolder, st.st_size, st.st_mtime})) {
       out.cancelled = true;
       return false;
     }

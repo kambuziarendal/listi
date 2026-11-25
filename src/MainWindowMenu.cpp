@@ -2,11 +2,16 @@
 #include "MainWindowMenu.h"
 #include "Common.h"
 #include "FlatView.h"
+#include "FolderTabs.h"
+#include "FolderHistory.h"
+#include "AutomaticHistory.h"
 #include "MainWindow.h"
 #include "PaneSidebar.h"
 #include "ShelfWindow.h"
 #include "WorkspaceActions.h"
 #include "WorkspaceEditor.h"
+#include "WindowOverview.h"
+#include "WorkingSets.h"
 #include <MenuItem.h>
 
 namespace {
@@ -23,10 +28,39 @@ MainWindowMenu::MainWindowMenu() : BMenuBar("menu") {
   AddSelectMenu();
   AddViewMenu();
   AddListiMenu();
+  auto *windows = new BMenu("Window");
+  AddCommand(windows, "Name window…", Listi::kNameWindow);
+  AddCommand(windows, "Use folder name", Listi::kUseFolderName);
+  windows->AddSeparatorItem();
+  AddCommand(windows, "Save working set…", Listi::kSaveWorkingSet);
+  AddCommand(windows, "Open working set…", Listi::kOpenWorkingSet);
+  AddCommand(windows, "Open windows…", Listi::kOpenWindowOverview);
+  auto *tabs = new BMenu("Folder tabs");
+  AddCommand(tabs, "New tab here or in selected folder", Listi::kTabNew);
+  AddCommand(tabs, "Duplicate tab", Listi::kTabDuplicate);
+  AddCommand(tabs, "Previous tab", Listi::kTabPrevious);
+  AddCommand(tabs, "Next tab", Listi::kTabNext);
+  AddCommand(tabs, "Name tab…", Listi::kTabRename);
+  AddCommand(tabs, "Move tab left", Listi::kTabLeft);
+  AddCommand(tabs, "Move tab right", Listi::kTabRight);
+  AddCommand(windows, "Detach tab to Einn window", Listi::kTabDetach);
+  AddCommand(tabs, "Close tab", Listi::kTabClose);
+  AddCommand(tabs, "Reopen closed tab", Listi::kTabReopen);
+  tabs->AddSeparatorItem();
+  AddCommand(tabs, "Always show folder tabs", Listi::kTabAlways);
+  windows->AddItem(tabs);
+  AddItem(windows);
+  auto *help = new BMenu("Help");
+  AddCommand(help, "About Listi…", kAboutListi);
+  AddCommand(help, "Layout introduction…", Listi::kShowLayoutGuide);
+  AddItem(help);
 }
 
 void MainWindowMenu::AddFilesMenu() {
   auto files = new BMenu("Files");
+  AddCommand(files, "New window", kNewBrowser, 'N', B_SHIFT_KEY);
+  AddCommand(files, "Open in new window", kSelectedBrowser);
+  files->AddSeparatorItem();
   AddCommand(files, "Copy", kClipboardCopy, 'C');
   AddCommand(files, "Cut", kClipboardCut, 'X');
   AddCommand(files, "Paste into active folder", kClipboardPaste, 'V');
@@ -38,6 +72,7 @@ void MainWindowMenu::AddFilesMenu() {
   AddCommand(files, "View", kView, 'V', B_SHIFT_KEY);
   AddCommand(files, "Edit", kEdit, 'E');
   AddCommand(files, "Edit in external editor", kEditExternally);
+  AddCommand(files, "Copy to window…", kCopyToWindow);
   AddCommand(files, "Copy to other panel", kCopy, 'C', B_SHIFT_KEY);
   AddCommand(files, "Move to other panel", kMove, 'M');
   AddCommand(files, "Rename", kRename, 'R');
@@ -45,6 +80,8 @@ void MainWindowMenu::AddFilesMenu() {
   AddCommand(files, "New folder", kMkdir, 'N');
   AddCommand(files, "Move to Trash", kDelete, 'D');
   AddCommand(files, "Restore from Trash", kRestore);
+  AddCommand(files, "Folder history…", Listi::kFolderHistory);
+  AddCommand(files, "Automatic history settings…", Listi::kAutomaticHistorySettings);
   AddCommand(files, "Delete permanently...", kPermanentDelete);
   undoBulkRenameItem = AddCommand(files, "Undo last bulk rename", kUndoBulkRename);
   undoBulkRenameItem->SetEnabled(false);
@@ -64,9 +101,12 @@ void MainWindowMenu::AddFilesMenu() {
   archives->AddSeparatorItem();
   AddCommand(archives, "Forget archive passwords", 'apfg');
   files->AddItem(archives);
+  AddCommand(files, "Export file list…", kExportFileList);
+  AddCommand(files, "File type and icon…", kFileTypeIcon);
   AddCommand(files, "Properties...", kProperties, 'I', B_SHIFT_KEY);
   files->AddSeparatorItem();
-  AddCommand(files, "Quit", B_QUIT_REQUESTED, 'Q');
+  AddCommand(files, "Close window", B_QUIT_REQUESTED, 'W');
+  AddCommand(files, "Quit Listi", kQuitListi, 'Q');
   AddItem(files);
 }
 
@@ -130,6 +170,7 @@ void MainWindowMenu::AddListiMenu() {
   AddCommand(view, "Switch panel", kSwitch, 'S');
   AddCommand(view, "Same folder in other panel", kSame, 'S', B_SHIFT_KEY);
   AddCommand(view, "Connect to server...", kNetwork, 'K');
+  AddCommand(view, "Add to Haiku file panel favorites…", kFilePanelFavorite);
   AddCommand(view, "Refresh", kRefresh, 'L');
   AddCommand(view, "Filter names", kFilter, 'F');
   AddCommand(view, "Find files...", kSearch, 'F', B_SHIFT_KEY);

@@ -77,6 +77,10 @@ static void CheckFunctionButtons() {
   button(0, kCopy, "Copy");
   button(1, kNone, "None");
   button(2, kEdit, "Edit");
+  bank.SetDestination("←", "/boot/home/Downloads");
+  button(0, kCopy, "Copy ← Downloads");
+  bank.SetDestination("→", "/other/Downloads");
+  button(0, kCopy, "Copy → Downloads");
   bank.SetActions({}, true);
   assert(grid() && grid()->CountChildren() == 0 && fallback->CountItems() == 0);
 }
@@ -130,8 +134,11 @@ static void CheckToolPlacement(BWindow *window) {
   }
   assert(toggle && fallback && toggle->IsEnabled() && toggle->IsMarked());
   assert(!bank->IsHidden(bank) && !fallback->IsEnabled());
-  BMessage prompt(kInlineNotice);
-  prompt.AddString("error", "Temporary question");
+  BMessage notice(kInlineNotice);
+  notice.AddString("error", "Non-blocking file error");
+  window->MessageReceived(&notice);
+  assert(!window->FindView("question") && !bank->IsHidden(bank));
+  BMessage prompt(Listi::kTabRename);
   window->MessageReceived(&prompt);
   assert(bank->IsHidden(bank) && !command->IsHidden(command));
   assert(!bottom->IsHidden(bottom) && toggle->IsMarked() && !fallback->IsEnabled());
@@ -460,7 +467,10 @@ int main(int argc, char **argv) {
       assert(static_cast<BInvoker *>(restore)->Invoke() == B_OK);
       waitFor([&] { return active->Current() == Page::Files; });
       assert(active->Current() == Page::Files && !active->Files().IsHidden());
-      assert(!active->FindView("flat results") && pane->Selected() == selected);
+      assert(!active->FindView("flat results"));
+      // Transfer notifications can reload the underlying pane asynchronously.
+      waitFor([&] { return !pane->IsScanning(); });
+      assert(pane->Selected() == selected);
       if (index == 1)
         send(kSwitch);
     }
@@ -472,13 +482,15 @@ int main(int argc, char **argv) {
   send(kPreviewOtherPanel);
   assert(right->Page(Page::Preview) == inspect &&
          right->Current() == Page::Preview);
-  auto *textPreview = inspect->FindView("preview scroll");
-  assert(textPreview);
-  waitFor([&] { return !textPreview->IsHidden(); });
+  auto textVisible = [&] {
+    auto *scroll = inspect->FindView("preview scroll");
+    return scroll && !scroll->IsHidden();
+  };
+  waitFor(textVisible);
   send(kSearch);
-  assert(left->Current() == Page::Search && textPreview->IsHidden());
+  assert(left->Current() == Page::Search && !textVisible());
   select(Page::Files);
-  waitFor([&] { return !textPreview->IsHidden(); });
+  waitFor(textVisible);
   BMessage focusPreview(Listi::kPanelPage);
   focusPreview.AddInt32("pane", 1);
   focusPreview.AddInt32("page", static_cast<int32>(Page::Preview));

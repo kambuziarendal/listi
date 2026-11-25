@@ -2,10 +2,12 @@
 #pragma once
 #include <View.h>
 #include <string>
+struct PaneEntry;
 class Pane;
 class PaneModel;
 class FileGrid : public BView {
 public:
+  virtual PaneEntry *ScrollRow(const std::string *path, float &top) = 0;
   using BView::BView;
   virtual void SetActive(bool) = 0;
   virtual bool CancelSelectionGesture() = 0;

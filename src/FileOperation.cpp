@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 #include "FileOperation.h"
+#include "JobReportStore.h"
 #include "BulkRename.h"
+#include "DirectoryFinalization.h"
 #include "ArchiveVolumes.h"
 #include "ArchiveJobs.h"
 #include "ImageConvert.h"
@@ -30,6 +32,8 @@
 #include <map>
 #include <memory>
 #include <stdexcept>
+#include <set>
+#include <strings.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <utility>
@@ -84,12 +88,13 @@ struct Runner {
   bool replaceAll = false, skipAll = false;
   Result result;
   const Job *guardedJob = nullptr;
+  std::set<dev_t> approvedFatVolumes;
   std::string guardedSource;
   std::map<std::string, size_t> outcomeIndex;
   struct BackingDevice {
     std::string path, mount;
     NodeIdentity node;
-    bool removable = false;
+    bool removable = false, ntfs = false, fat = false, attributes = false;
   };
   std::map<dev_t, BackingDevice> backingDevices;
   std::string interruptedFolder;
@@ -100,6 +105,9 @@ struct Runner {
       if (fs_stat_dev(volume, &info))
         throw std::runtime_error(folder + ": volume is no longer available.");
       BackingDevice backing;
+      backing.ntfs = strcasecmp(info.fsh_name, "ntfs") == 0;
+      backing.fat = strcasecmp(info.fsh_name, "fat") == 0;
+      backing.attributes = (info.flags & B_FS_HAS_ATTR) != 0;
       if (strncmp(info.device_name, "/dev/disk/", 10) == 0) {
         backing.path = info.device_name;
         backing.removable = (info.flags & B_FS_IS_REMOVABLE) ||
@@ -139,11 +147,61 @@ struct Runner {
   void CheckDestinationDevice(dev_t volume) {
     CheckDevice(volume, guardedJob->destination);
   }
+  bool PlainCopy() const {
+    return guardedJob->action == Action::Copy && !deferCompletion &&
+           !guardedJob->copyForArchiveMove && !h.privateStaging;
+  }
+  bool FatCopy(dev_t volume) const {
+    return PlainCopy() && backingDevices.at(volume).fat;
+  }
+  bool NtfsCopy(dev_t volume) const {
+    return PlainCopy() && backingDevices.at(volume).ntfs;
+  }
+  bool FlushDestination(const PinnedDirectory &directory, dev_t volume,
+                        bool cleanup = false, bool allowUnsupportedNtfs = false) {
+    const auto &backing = backingDevices.at(volume);
+    const auto previous = interruptedFolder;
+    if (backing.removable)
+      interruptedFolder = backing.mount.empty() ? guardedJob->destination
+                                                 : backing.mount;
+    bool flushed = true;
+    if (cleanup)
+      directory.FlushAfterCleanup([&] { CheckDestinationDevice(volume); });
+    else
+      flushed = directory.Flush([&] {
+        CheckDestinationDevice(volume);
+        Check();
+      }, allowUnsupportedNtfs);
+    interruptedFolder = previous;
+    return flushed;
+  }
   void CheckSourceDevice(dev_t volume) {
     CheckDevice(volume, ParentLocation(guardedSource));
   }
   size_t mutations = 0;
+  std::optional<EntryOutcome> pendingOutcome;
+  void FlushOutcome() {
+    if (pendingOutcome) {
+      h.report->WriteOutcome(*pendingOutcome, true);
+      pendingOutcome.reset();
+    }
+  }
+  void AddError(const std::string &error) {
+    if (h.report)
+      h.report->AddError(error);
+    else
+      result.errors.push_back(error);
+  }
   EntryOutcome &Outcome(const std::string &src, const std::string &dst = {}) {
+    if (h.report) {
+      if (!pendingOutcome || pendingOutcome->source != src) {
+        FlushOutcome();
+        pendingOutcome = h.report->FindOutcome(src);
+      }
+      if (!dst.empty())
+        pendingOutcome->destination = dst;
+      return *pendingOutcome;
+    }
     auto index = outcomeIndex.emplace(src, result.outcomes.size());
     if (index.second)
       result.outcomes.push_back({src, dst, "unprocessed", {}});
@@ -204,6 +262,8 @@ struct Runner {
          st.st_dev != destination.device || st.st_ino != destination.inode))
       throw std::runtime_error(
           "Selected destination changed; operation stopped.");
+    if (guardedJob->checkDestinationWindow)
+      guardedJob->checkDestinationWindow();
   }
 
   bool deferCompletion = false, recoverableMove = false;
@@ -212,13 +272,21 @@ struct Runner {
     struct stat committed;
   };
   std::map<std::string, CopiedEntry> copied;
+  bool SamePublishedMode(const struct stat &staged, const struct stat &published) const {
+    // Haiku FAT derives execute bits from the filename. Renaming a regular
+    // .tmp stage to .png changes 0755 to 0644 on the very same open inode.
+    mode_t differing = staged.st_mode ^ published.st_mode;
+    if (S_ISREG(staged.st_mode) && FatCopy(staged.st_dev))
+      differing &= ~(S_IXUSR | S_IXGRP | S_IXOTH);
+    return differing == 0;
+  }
   void Done(const std::string &src, const std::string &dst,
             const struct stat &expected) {
     ++mutations;
     CheckDestinationDevice(expected.st_dev);
     struct stat committed;
     if (lstat(dst.c_str(), &committed) || expected.st_dev != committed.st_dev ||
-        expected.st_ino != committed.st_ino || expected.st_mode != committed.st_mode ||
+        expected.st_ino != committed.st_ino || !SamePublishedMode(expected, committed) ||
         expected.st_size != committed.st_size ||
         expected.st_mtim.tv_sec != committed.st_mtim.tv_sec ||
         expected.st_mtim.tv_nsec != committed.st_mtim.tv_nsec)
@@ -239,17 +307,60 @@ struct Runner {
     if (h.progress)
       h.progress(p, n);
   }
+  bool NtfsAttributesUnavailable(int fd, dev_t volume, const std::string &path) {
+    if (!NtfsCopy(volume) || backingDevices.at(volume).attributes)
+      return false;
+    // BNode collapses open_attr_dir failures into B_FILE_ERROR. Probe the
+    // opened inode to distinguish missing support from a genuine failure.
+    DIR *directory = fs_fopen_attr_dir(fd);
+    if (!directory) {
+      if (errno == B_UNSUPPORTED)
+        return true;
+      Fail(path);
+    }
+    if (fs_close_attr_dir(directory))
+      Fail(path);
+    return false;
+  }
+  void CopyNotice(const std::string &src, const char *notice) {
+    auto &detail = Outcome(src).detail;
+    if (!detail.empty())
+      detail += " ";
+    detail += notice;
+    result.copyLimitations = true;
+  }
   void Attributes(const std::string &src, const std::string &dst,
-                  bool verifyMerge = false) {
-    BNode from(src.c_str()), to(dst.c_str());
+                  bool verifyMerge = false, int destinationFD = -1,
+                  bool destinationAttributesUnavailable = false, dev_t fatVolume = -1) {
+    BNode from(src.c_str()), to;
+    if (destinationFD < 0)
+      to.SetTo(dst.c_str());
     char name[B_ATTR_NAME_LENGTH];
-    if (from.InitCheck() != B_OK || to.InitCheck() != B_OK)
+    if (from.InitCheck() != B_OK || (destinationFD < 0 && to.InitCheck() != B_OK))
       throw std::runtime_error("Could not open copy metadata");
     status_t status;
     std::vector<char> buf(65536);
     std::vector<char> existing(verifyMerge ? buf.size() : 0);
+    bool omitted = false;
     while ((status = from.GetNextAttrName(name)) == B_OK) {
       Check();
+      if (fatVolume >= 0) {
+        if (!approvedFatVolumes.count(fatVolume)) {
+          if (!h.confirmFatCopy)
+            throw std::runtime_error(src + ": FAT cannot preserve Haiku attributes.");
+          if (!h.confirmFatCopy(src, guardedJob->destination))
+            throw Cancelled();
+          CheckDestinationDevice(fatVolume);
+          Guard();
+          approvedFatVolumes.insert(fatVolume);
+        }
+        omitted = true;
+        continue;
+      }
+      if (destinationAttributesUnavailable) {
+        omitted = true;
+        continue;
+      }
       attr_info info;
       if (from.GetAttrInfo(name, &info) != B_OK)
         throw std::runtime_error(src + ": attribute changed during copy");
@@ -273,7 +384,9 @@ struct Runner {
               memcmp(existing.data(), buf.data(), n) != 0)
             throw std::runtime_error(dst + ": folder merge would change attribute " +
                                      name + "; source retained");
-        } else if (to.WriteAttr(name, info.type, pos, buf.data(), n) != n)
+        } else if ((destinationFD >= 0
+                        ? fs_write_attr(destinationFD, name, info.type, pos, buf.data(), n)
+                        : to.WriteAttr(name, info.type, pos, buf.data(), n)) != n)
           throw std::runtime_error(dst + ": could not preserve attribute " +
                                    name);
         pos += n;
@@ -281,10 +394,38 @@ struct Runner {
     }
     if (status != B_ENTRY_NOT_FOUND)
       throw std::runtime_error(src + ": could not enumerate attributes");
+    if (omitted)
+      CopyNotice(src, fatVolume >= 0
+          ? "Copied without Haiku attributes on FAT by request."
+          : "Haiku cannot write attributes on this NTFS destination; source attributes were not copied.");
   }
-  bool Allow(const std::string &dst) {
-    if (!Exists(dst))
+  bool OrdinaryAttributes(const std::string &src, const std::string &dst,
+                          int in, int out, dev_t sourceVolume, dev_t targetVolume) {
+    if (NtfsAttributesUnavailable(in, sourceVolume, src)) {
+      CopyNotice(src, "Haiku does not expose source attributes or Windows permissions on this NTFS driver; used destination creation permissions.");
+      return false;
+    }
+    Attributes(src, dst, false, out,
+               NtfsAttributesUnavailable(out, targetVolume, dst),
+               FatCopy(targetVolume) ? targetVolume : -1);
+    return true;
+  }
+  bool SetCopyMode(int fd, mode_t mode, dev_t volume, const std::string &path) {
+    if (!fchmod(fd, mode & 07777))
       return true;
+    if (errno == B_UNSUPPORTED && NtfsCopy(volume))
+      return false;
+    Fail(path);
+    return false;
+  }
+  void PermissionNotice(const std::string &src) {
+    CopyNotice(src, "Haiku cannot set these permissions on NTFS; destination permissions were not preserved.");
+  }
+  void DurabilityNotice(const std::string &src) {
+    CopyNotice(src, "Published with source retained. Haiku cannot flush this NTFS directory; safe eject and verify after reconnecting. Crash durability was not confirmed.");
+  }
+  bool Allow(std::string &dst, const std::string &src, const struct stat &incoming,
+             const struct stat &existing, bool &keepBoth) {
     if (guardedJob && guardedJob->action == Action::Duplicate)
       throw std::runtime_error(
           dst + ": already exists; duplicate does not overwrite");
@@ -294,7 +435,41 @@ struct Runner {
     }
     if (replaceAll)
       return true;
-    Decision d = h.conflict ? h.conflict(dst) : Decision::Abort;
+    Decision d;
+    if (h.copyConflict && !h.privateStaging && !guardedJob->copyForArchiveMove &&
+        guardedJob->action == Action::Copy && S_ISREG(incoming.st_mode) &&
+        S_ISREG(existing.st_mode)) {
+      const auto leaf = Leaf(dst);
+      const auto dot = leaf.find_last_of('.');
+      const auto split = dot == 0 || dot == std::string::npos ? leaf.size() : dot;
+      const auto prefix = Join(ParentLocation(dst), leaf.substr(0, split));
+      std::string proposed;
+      for (uint64_t number = 2;; ++number) {
+        Check();
+        proposed = prefix + " (" + std::to_string(number) + ")" + leaf.substr(split);
+        struct stat candidate;
+        if (lstat(proposed.c_str(), &candidate) != 0) {
+          if (errno != ENOENT)
+            proposed.clear();
+          break;
+        }
+      }
+      if (proposed.empty())
+        d = h.conflict ? h.conflict(dst) : Decision::Abort;
+      else
+        d = h.copyConflict({src, dst, proposed, incoming.st_size, existing.st_size,
+                            incoming.st_mtime, existing.st_mtime});
+      if (d == Decision::KeepBoth) {
+        if (proposed.empty())
+          throw std::runtime_error(dst + ": no suitable new name");
+        dst = proposed;
+        keepBoth = true;
+      }
+    } else {
+      d = h.conflict ? h.conflict(dst) : Decision::Abort;
+      if (d == Decision::KeepBoth)
+        throw std::runtime_error("Keep both is unavailable for this conflict");
+    }
     if (d == Decision::Abort)
       throw Cancelled();
     if (d == Decision::SkipAll)
@@ -379,9 +554,10 @@ struct Runner {
       auto &row = Outcome(source);
       row.status = "failed";
       row.detail = copy.destination + ": destination changed; source retained";
+      const std::string error = row.detail;
       if (source != guardedSource)
         Outcome(guardedSource).status = "partial";
-      throw std::runtime_error(row.detail);
+      throw std::runtime_error(error);
     }
   }
   void VerifyCopiedTree(const std::string &root, const Snapshot &before) {
@@ -474,7 +650,69 @@ struct Runner {
     if (status != B_OK)
       throw std::runtime_error(dst + ": " + strerror(status));
   }
-  bool Copy(const std::string &src, const std::string &dst,
+  struct stat PublishKeepBoth(const std::string &src, const std::string &dst,
+                              const std::string &tmp, PinnedDirectory &parentDirectory,
+                              const struct stat &staged, bool &published) {
+    const int parent = parentDirectory.Descriptor();
+    const auto leaf = Leaf(tmp);
+    // BFS does not support hard links, and BEntry::MoveTo(false) checks
+    // existence separately from rename. Claim the new leaf exclusively
+    // and never reopen it by name for writing. Keep the verified stage
+    // and publishing journal until the new inode has been flushed.
+    FD input(openat(parent, leaf.c_str(), O_RDONLY | O_NOFOLLOW));
+    struct stat opened;
+    if (input.n < 0 || fstat(input.n, &opened) || !SameEntry(opened, staged))
+      throw std::runtime_error(tmp + ": staging changed before publication");
+    if (!StagingSpaceAvailable(parent, staged.st_size))
+      Fail(dst);
+    FD final(openat(parent, Leaf(dst).c_str(), O_RDWR | O_CREAT | O_EXCL |
+                    O_NOFOLLOW | O_CLOEXEC, 0600));
+    if (final.n < 0)
+      Fail(dst);
+    published = true;
+    ++mutations;
+    Outcome(src, dst).status = "partial";
+    const auto stagingDetail = Outcome(src).detail;
+    Outcome(src).detail = "Publication incomplete; inspect the new file and recovery stage.";
+    FD verify(dup(final.n));
+    if (verify.n < 0)
+      Fail(dst);
+    // FAT stages have no stored Haiku attributes. They may expose a
+    // synthetic MIME type derived from the temporary filename.
+    if (!FatCopy(staged.st_dev))
+      Attributes(tmp, dst, false, final.n);
+    try {
+      WriteRemovableStagingFile(std::exchange(input.n, -1),
+                                std::exchange(final.n, -1), staged,
+                                [&](size_t) {
+                                  Check();
+                                  CheckDestinationDevice(staged.st_dev);
+                                }, true);
+    } catch (const RemovableCopyInterrupted &) {
+      throw RemovableCopyInterrupted(dst + ": publication interrupted; "
+          "inspect the incomplete file and recovery stage.", ParentLocation(dst));
+    }
+    struct stat finalStat;
+    if (fstat(verify.n, &finalStat) || finalStat.st_size != staged.st_size ||
+        !SamePublishedMode(staged, finalStat) ||
+        finalStat.st_mtim.tv_sec != staged.st_mtim.tv_sec ||
+        finalStat.st_mtim.tv_nsec != staged.st_mtim.tv_nsec ||
+        fstatat(parent, Leaf(dst).c_str(), &opened, AT_SYMLINK_NOFOLLOW) ||
+        !SameEntry(opened, finalStat))
+      throw std::runtime_error(dst + ": published file changed");
+    if (fstatat(parent, leaf.c_str(), &opened, AT_SYMLINK_NOFOLLOW) ||
+        !SameEntry(opened, staged))
+      throw std::runtime_error(tmp + ": staging changed during publication");
+    FlushDestination(parentDirectory, staged.st_dev);
+    Outcome(src).detail = stagingDetail;
+    if (unlinkat(parent, leaf.c_str(), 0)) {
+      ++mutations;
+      Outcome(src, dst).status = "published-recovery-pending";
+      Fail(tmp);
+    }
+    return finalStat;
+  }
+  bool Copy(const std::string &src, std::string &dst,
             unsigned depth = 0) {
     Outcome(src, dst);
     const size_t before = mutations;
@@ -485,7 +723,7 @@ struct Runner {
       return complete;
     } catch (const Cancelled &) {
       auto &row = Outcome(src);
-      if (before != mutations)
+      if (before != mutations && row.status == "unprocessed")
         row.status = "partial";
       if (row.status == "unprocessed")
         row.detail = "Cancelled before commit.";
@@ -497,7 +735,7 @@ struct Runner {
       throw;
     }
   }
-  bool CopyEntry(const std::string &src, const std::string &dst, unsigned depth) {
+  bool CopyEntry(const std::string &src, std::string &dst, unsigned depth) {
     Check();
     if (depth > 64)
       throw std::runtime_error("Folder tree exceeds the safe copy depth");
@@ -522,15 +760,27 @@ struct Runner {
       if (existed && !S_ISDIR(before.st_mode))
         throw std::runtime_error(
             dst + ": destination is not a directory; not replaced");
+      const auto parentPath = ParentLocation(dst);
+      struct stat parentIdentity;
+      if (stat(parentPath.c_str(), &parentIdentity))
+        Fail(parentPath);
+      PinnedDirectory parent(parentPath, parentIdentity.st_dev,
+                             parentIdentity.st_ino, true);
       // Merge directories, but never traverse destination symbolic links.
       if (!existed) {
-        if (mkdir(dst.c_str(), 0700) != 0)
+        if (mkdirat(parent.Descriptor(), Leaf(dst).c_str(), 0700))
           Fail(dst);
         ++mutations;
-        if (lstat(dst.c_str(), &before) || !S_ISDIR(before.st_mode))
+        if (fstatat(parent.Descriptor(), Leaf(dst).c_str(), &before,
+                    AT_SYMLINK_NOFOLLOW) || !S_ISDIR(before.st_mode))
           throw std::runtime_error(dst + ": new destination folder changed");
       }
+      parent.Verify();
+      PinnedDirectory directory(dst, before.st_dev, before.st_ino);
       CheckDestinationDevice(before.st_dev);
+      CheckDestinationDevice(parentIdentity.st_dev);
+      const bool ntfsDirectory = NtfsCopy(before.st_dev);
+      const bool ntfsParent = NtfsCopy(parentIdentity.st_dev);
       copyDirectories.emplace_back(dst, before);
       struct DirectoryScope {
         DirectoryStack &stack;
@@ -547,16 +797,22 @@ struct Runner {
       while (auto e = NextEntry(dir.get(), src)) {
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
           continue;
-        if (!Copy(Join(src, e->d_name), Join(dst, e->d_name), depth + 1))
+        auto childDestination = Join(dst, e->d_name);
+        if (!Copy(Join(src, e->d_name), childDestination, depth + 1))
           complete = false;
       }
       Guard();
       if (!existed) {
-        Attributes(src, dst);
-        if (chmod(dst.c_str(), st.st_mode & 07777))
-          Fail(dst);
+        bool useSourceMode = true;
+        if (NtfsCopy(st.st_dev) || ntfsDirectory || FatCopy(before.st_dev))
+          useSourceMode = OrdinaryAttributes(src, dst, dirfd(dir.get()),
+                                             directory.Descriptor(), st.st_dev, before.st_dev);
+        else
+          Attributes(src, dst);
+        if (useSourceMode && !SetCopyMode(directory.Descriptor(), st.st_mode, before.st_dev, dst))
+          PermissionNotice(src);
         struct timespec times[2] = {st.st_atim, st.st_mtim};
-        if (utimensat(AT_FDCWD, dst.c_str(), times, 0))
+        if (futimens(directory.Descriptor(), times))
           Fail(dst);
       }
       struct stat expected;
@@ -564,6 +820,24 @@ struct Runner {
         Fail(dst);
       Tick(src);
       Guard();
+      parent.Verify();
+      try {
+        const bool flushed = FlushDestination(directory, expected.st_dev, false, ntfsDirectory);
+        CheckDestinationDevice(parentIdentity.st_dev);
+        const bool parentFlushed = FlushDestination(parent, parentIdentity.st_dev, false, ntfsParent);
+        if (!flushed || !parentFlushed)
+          DurabilityNotice(src);
+        directory.Verify();
+        Guard();
+      } catch (const Cancelled &) {
+        auto &row = Outcome(src, dst);
+        row.status = "published-flush-failed";
+        row.detail = "Cancelled during directory finalization; durability after restart is unknown.";
+        throw;
+      } catch (const std::runtime_error &) {
+        Outcome(src, dst).status = "published-flush-failed";
+        throw;
+      }
       if (complete) {
         struct stat current;
         if (lstat(src.c_str(), &current) || !SameEntry(st, current))
@@ -577,17 +851,28 @@ struct Runner {
     if (existed && S_ISDIR(before.st_mode))
       throw std::runtime_error(dst +
                                ": a directory cannot be replaced by a file");
-    if (!Allow(dst))
+    if (existed && PlainCopy()) {
+      CheckDestinationDevice(before.st_dev);
+      if (NtfsCopy(before.st_dev))
+        throw std::runtime_error(dst + ": NTFS directory durability is unavailable; "
+                                     "existing files were left untouched. Copy to an unused name.");
+    }
+    bool keepBoth = false;
+    if (existed && !Allow(dst, src, st, before, keepBoth))
       return false;
+    if (keepBoth)
+      Outcome(src, dst);
     Guard();
     const auto parentPath = ParentLocation(dst);
-    FD parent(open(parentPath.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW));
     struct stat parentIdentity;
-    if (parent.n < 0 || fstat(parent.n, &parentIdentity))
+    if (lstat(parentPath.c_str(), &parentIdentity))
       Fail(parentPath);
+    PinnedDirectory parentDirectory(parentPath, parentIdentity.st_dev,
+                                    parentIdentity.st_ino);
+    const int parent = parentDirectory.Descriptor();
     // Keep staging on the target volume without extending a possibly
     // maximum-length destination leaf.
-    if (!StagingSpaceAvailable(parent.n, 0))
+    if (!StagingSpaceAvailable(parent, 0))
       Fail(parentPath);
     RecoveryRecord recovery("copy", parentPath, ".listi-copy-", src, dst);
     const auto &tmp = recovery.Stage();
@@ -602,11 +887,11 @@ struct Runner {
         if (n < 0 || size_t(n) == sizeof(link))
           Fail(src);
         link[n] = 0;
-        if (symlinkat(link, parent.n, leaf.c_str()) ||
-            fstatat(parent.n, leaf.c_str(), &stagingIdentity, AT_SYMLINK_NOFOLLOW))
+        if (symlinkat(link, parent, leaf.c_str()) ||
+            fstatat(parent, leaf.c_str(), &stagingIdentity, AT_SYMLINK_NOFOLLOW))
           Fail(tmp);
       } else {
-        out.n = openat(parent.n, leaf.c_str(),
+        out.n = openat(parent, leaf.c_str(),
                        O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
         if (out.n < 0 || fstat(out.n, &stagingIdentity))
           Fail(tmp);
@@ -614,6 +899,7 @@ struct Runner {
       bound = true;
       recovery.Advance(RecoveryPhase::Writing, &stagingIdentity);
       CheckDestinationDevice(stagingIdentity.st_dev);
+      const bool ntfsTarget = S_ISREG(st.st_mode) && NtfsCopy(stagingIdentity.st_dev);
       if (deferCompletion || guardedJob->copyForArchiveMove)
         RequireSameMoveVolume(guardedJob->expectedDestination.device,
                               stagingIdentity.st_dev);
@@ -631,10 +917,16 @@ struct Runner {
         if (fstat(in.n, &opened) || !S_ISREG(opened.st_mode) ||
             !SameEntry(opened, st))
           throw std::runtime_error(src + ": source changed before copying");
+        auto copyAttributes = [&] {
+          if (NtfsCopy(st.st_dev) || ntfsTarget || FatCopy(stagingIdentity.st_dev))
+            return OrdinaryAttributes(src, tmp, in.n, out.n, st.st_dev, stagingIdentity.st_dev);
+          Attributes(src, tmp);
+          return true;
+        };
         const bool removableSource =
             backingDevices.at(st.st_dev).removable;
         if (removableSource || backingDevices.at(stagingIdentity.st_dev).removable) {
-          Attributes(src, tmp);
+          const bool useSourceMode = copyAttributes();
           // No filename is passed to the worker: only this queue thread can
           // replace the final target, after checking both identities again.
           const std::function<void(size_t)> checkpoint = [&](size_t bytes) {
@@ -654,10 +946,17 @@ struct Runner {
                                   ? (removableSource ? ParentLocation(guardedSource)
                                                      : guardedJob->destination)
                                   : endpoint.mount;
-          WriteRemovableStagingFile(std::exchange(in.n, -1),
-                                    std::exchange(out.n, -1), st, checkpoint,
-                                    true);
+          auto permissions = StagingPermissions::Preserve;
+          if (!useSourceMode)
+            permissions = StagingPermissions::KeepCreationMode;
+          else if (ntfsTarget)
+            permissions = StagingPermissions::PreserveIfSupported;
+          const bool modeSet = WriteRemovableStagingFile(
+              std::exchange(in.n, -1), std::exchange(out.n, -1), st,
+              checkpoint, true, permissions, ntfsTarget);
           interruptedFolder.clear();
+          if (!modeSet)
+            PermissionNotice(src);
         } else {
           std::vector<char> buf(131072);
           for (;;) {
@@ -684,12 +983,12 @@ struct Runner {
           struct stat after;
           if (fstat(in.n, &after) || !SameEntry(after, st))
             throw std::runtime_error(src + ": source changed while copying");
-          Attributes(src, tmp);
-          if (fchmod(out.n, st.st_mode & 07777))
-            Fail(tmp);
+          if (copyAttributes() && !SetCopyMode(out.n, st.st_mode, stagingIdentity.st_dev, tmp))
+            PermissionNotice(src);
           struct timespec times[2] = {st.st_atim, st.st_mtim};
           CheckDestinationDevice(stagingIdentity.st_dev);
-          if (futimens(out.n, times) || fsync(out.n))
+          // NTFS updates mtime when flushed file pages reach the driver.
+          if ((ntfsTarget && fsync(out.n)) || futimens(out.n, times) || fsync(out.n))
             Fail(tmp);
         }
       }
@@ -714,34 +1013,52 @@ struct Runner {
       recovery.PrepareCopyPublication();
       Guard();
       struct stat currentTarget;
-      if (fstatat(parent.n, leaf.c_str(), &currentTarget, AT_SYMLINK_NOFOLLOW) ||
+      if (fstatat(parent, leaf.c_str(), &currentTarget, AT_SYMLINK_NOFOLLOW) ||
           currentTarget.st_dev != stagingIdentity.st_dev ||
           currentTarget.st_ino != stagingIdentity.st_ino)
         throw std::runtime_error(tmp + ": staging identity changed before publication");
-      if (existed) {
+      if (keepBoth) {
+        staged = PublishKeepBoth(src, dst, tmp, parentDirectory, staged, published);
+      } else if (existed) {
         const auto target = Leaf(dst);
-        if (fstatat(parent.n, target.c_str(), &currentTarget, AT_SYMLINK_NOFOLLOW) ||
+        if (fstatat(parent, target.c_str(), &currentTarget, AT_SYMLINK_NOFOLLOW) ||
             !SameEntry(before, currentTarget))
           throw std::runtime_error(dst + ": destination changed during operation; left untouched");
-        if (renameat(parent.n, leaf.c_str(), parent.n, target.c_str()))
+        if (renameat(parent, leaf.c_str(), parent, target.c_str()))
           Fail(dst);
       } else {
         Commit(tmp, dst, false, before);
       }
       published = true;
-      // Removable media have their own interruptible file flush. A directory
-      // flush on the queue thread would reintroduce a hang on unplug.
-      if (!backingDevices.at(stagingIdentity.st_dev).removable && fsync(parent.n)) {
+      bool flushed = false;
+      try {
+        flushed = FlushDestination(parentDirectory, stagingIdentity.st_dev,
+                                   false, ntfsTarget);
+      } catch (const RemovableCopyInterrupted &) {
         ++mutations;
         Outcome(src, dst).status = "published-flush-failed";
-        throw std::runtime_error(dst +
-            ": published, but its directory could not be flushed. Source retained; "
-            "durability after restart is unknown.");
+        throw;
+      } catch (const Cancelled &) {
+        ++mutations;
+        auto &row = Outcome(src, dst);
+        row.status = "published-flush-failed";
+        row.detail = "Published before cancellation; durability after restart is unknown.";
+        throw;
+      } catch (const std::runtime_error &error) {
+        ++mutations;
+        Outcome(src, dst).status = "published-flush-failed";
+        throw std::runtime_error(dst + ": published, but its parent directory "
+                                 "was not flushed. " + error.what());
       }
       try {
-        // Publishing permits either namespace outcome. Keep it until checked
-        // retirement succeeds; a crash here must not authorize any cleanup.
-        recovery.Retire();
+        // Retire only after directory durability is acknowledged. If the
+        // driver cannot do that, leave a review record even on successful I/O.
+        if (flushed)
+          recovery.Retire();
+        else {
+          recovery.Advance(RecoveryPhase::Published);
+          DurabilityNotice(src);
+        }
       } catch (const std::exception &error) {
         ++mutations;
         Outcome(src, dst).status = "published-recovery-pending";
@@ -762,15 +1079,29 @@ struct Runner {
         CheckDestinationDevice(stagingIdentity.st_dev);
       struct stat current;
       if (!published) {
-        if (!fstatat(parent.n, leaf.c_str(), &current, AT_SYMLINK_NOFOLLOW)) {
-          if (bound && current.st_dev == stagingIdentity.st_dev &&
-              current.st_ino == stagingIdentity.st_ino &&
-              !unlinkat(parent.n, leaf.c_str(), 0))
+        bool absent = false;
+        if (!fstatat(parent, leaf.c_str(), &current, AT_SYMLINK_NOFOLLOW)) {
+          absent = bound && current.st_dev == stagingIdentity.st_dev &&
+                   current.st_ino == stagingIdentity.st_ino &&
+                   !unlinkat(parent, leaf.c_str(), 0);
+        } else {
+          absent = errno == ENOENT;
+        }
+        if (absent) {
+          try {
+            CheckDestinationDevice(parentIdentity.st_dev);
+            FlushDestination(parentDirectory, parentIdentity.st_dev, true);
             recovery.Retire();
-          else
-            result.errors.push_back(tmp + ": temporary name retained for manual inspection.");
-        } else if (errno == ENOENT) {
-          recovery.Retire();
+          } catch (const RemovableCopyInterrupted &error) {
+            AddError(tmp + ": " + error.what() +
+                                    " Staging recovery record retained.");
+            throw;
+          } catch (const std::exception &error) {
+            AddError(tmp + ": " + error.what() +
+                                    " Staging recovery record retained.");
+          }
+        } else {
+          AddError(tmp + ": temporary name retained for manual inspection.");
         }
       }
       throw;
@@ -797,6 +1128,27 @@ struct Runner {
         throw std::runtime_error(
             "Named entry operations require one guarded local source and destination.");
       ValidateNewEntryName(job.destination, job.entryName);
+    }
+    if (job.action == Action::MakeFile) {
+      const auto &folder = job.destinationFolder;
+      const auto leaf = Leaf(job.destination);
+      if (job.expectedDestination.device < 0 || folder.empty() || leaf.empty() ||
+          job.destination != Join(folder, leaf) || leaf == "." || leaf == "..")
+        throw std::runtime_error("Choose an available local folder and one filename.");
+      Check();
+      PinnedDirectory directory(folder, job.expectedDestination.device,
+                                job.expectedDestination.inode, true);
+      FD created(openat(directory.Descriptor(), leaf.c_str(),
+                        O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0666));
+      if (created.n < 0)
+        Fail(job.destination);
+      Outcome("", job.destination).status = "created";
+      if (fsync(created.n))
+        Fail(job.destination + " created but not flushed");
+      directory.Flush();
+      result.completed++;
+      Outcome("").status = "completed";
+      return;
     }
     if (job.action == Action::MakeDirectory) {
       Outcome("", job.destination);
@@ -871,15 +1223,20 @@ struct Runner {
           const NodeIdentity observed{sourceStat.st_dev, sourceStat.st_ino};
           const NodeIdentity &expected =
               frozen == job.expectedSources.end() ? observed : frozen->second;
+          const auto confirmed = job.restoreTargets.find(source);
+          if (!job.restoreTargets.empty() &&
+              (confirmed == job.restoreTargets.end() || confirmed->second.empty()))
+            throw std::runtime_error(source + ": original location unavailable at confirmation; retained in Trash.");
           const std::string destination =
               job.action == Action::Trash
                   ? MoveToTrash(source, &expected)
-                  : RestoreFromTrash(source, &warning, &expected);
+                  : RestoreFromTrash(source, &warning, &expected, confirmed == job.restoreTargets.end()
+                        ? nullptr : &confirmed->second);
           auto &row = Outcome(source, destination);
           row.status = "moved";
           if (!warning.empty()) {
             row.detail = warning;
-            result.errors.push_back(warning);
+            AddError(warning);
           }
           result.completed++;
           if (h.fileDone)
@@ -977,14 +1334,14 @@ struct Runner {
               h.fileDone(entry.first, entry.second.destination);
         }
       } catch (const RemovableCopyInterrupted &e) {
-        result.interruptedCopyFolder = interruptedFolder;
+        result.interruptedCopyFolder = e.folder.empty() ? interruptedFolder : e.folder;
         Problem(source, e.what());
         if (h.fileFailed)
           h.fileFailed(source, e.what());
         throw; // Later selected roots must not enter the disconnected mount.
       } catch (const std::runtime_error &e) {
         Problem(source, e.what());
-        result.errors.push_back(e.what());
+        AddError(e.what());
         if (h.fileFailed)
           h.fileFailed(source, e.what());
       }
@@ -998,8 +1355,13 @@ Result Run(const Job &j, const Hooks &h) {
   if (j.action == Action::ConvertImage)
     return RunImageConversion(j, h);
   if (j.action == Action::CreateArchive || j.action == Action::ExtractArchive ||
-      j.action == Action::EditArchive || j.action == Action::MoveArchive)
-    return RunArchiveJob(j, h);
+      j.action == Action::EditArchive || j.action == Action::MoveArchive) {
+    // Archive routines make private intermediate calls to Run and use their
+    // synchronous Result to decide whether publication may proceed.
+    Hooks archive = h;
+    archive.report.reset();
+    return RunArchiveJob(j, archive);
+  }
   // Source-only actions must not depend on the location in the other pane.
   const bool usesDestination =
       j.action == Action::Copy || j.action == Action::Move ||
@@ -1045,10 +1407,13 @@ Result Run(const Job &j, const Hooks &h) {
   } catch (const Cancelled &) {
     r.result.cancelled = true;
   } catch (const std::exception &e) {
-    r.result.errors.push_back(e.what());
-    if (r.result.outcomes.size() == 1)
+    r.AddError(e.what());
+    if (h.report && r.pendingOutcome && h.report->OutcomeCount() == 0)
+      r.Problem(r.pendingOutcome->source, e.what());
+    else if (r.result.outcomes.size() == 1)
       r.Problem(r.result.outcomes.front().source, e.what());
   }
-  return r.result;
+  r.FlushOutcome();
+  return std::move(r.result);
 }
 } // namespace Listi
