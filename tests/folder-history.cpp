@@ -60,6 +60,19 @@ int main() {
   const unsigned char binary[]={0,255,1};
   attr(source/"dir/note","Count",B_INT32_TYPE,&answer,sizeof(answer));
   attr(source/"dir/note","Bytes",B_RAW_TYPE,binary,sizeof(binary));
+  const std::string firstChunk(16 * 1024, 'a'), secondChunk(16 * 1024, 'b');
+  const std::string chunkedAttribute = firstChunk + secondChunk + "tail";
+  {
+    const int fd = open((source/"dir/note").c_str(), O_RDONLY);
+    assert(fd >= 0);
+    assert(fs_write_attr(fd, "Chunked", B_RAW_TYPE, 0, firstChunk.data(), firstChunk.size()) ==
+           ssize_t(firstChunk.size()));
+    assert(fs_write_attr(fd, "Chunked", B_RAW_TYPE, firstChunk.size(),
+                         secondChunk.data(), secondChunk.size()) == ssize_t(secondChunk.size()));
+    assert(fs_write_attr(fd, "Chunked", B_RAW_TYPE, firstChunk.size() + secondChunk.size(),
+                         "tail", 4) == 4);
+    close(fd);
+  }
   attr(source/"dir/note","BEOS:TYPE",B_MIME_STRING_TYPE,"text/plain",11);
   attr(source/"dir","Project",B_STRING_TYPE,"alpha",6);
   attr(source/"pointer","Status",B_STRING_TYPE,"link",5);
@@ -89,9 +102,9 @@ int main() {
     assert(fd>=0);
     attr_info info{};
     assert(fs_stat_attr(fd,name,&info)==0 && info.type==type && info.size==ssize_t(length));
-    char data[128];
-    assert(fs_read_attr(fd,name,type,0,data,sizeof(data))==ssize_t(length));
-    assert(memcmp(data,expected,length)==0);
+    std::vector<char> data(length + 1);
+    assert(fs_read_attr(fd,name,type,0,data.data(),data.size())==ssize_t(length));
+    assert(memcmp(data.data(),expected,length)==0);
     close(fd);
   };
   auto reject = [](auto callback, const char *label, const char *diagnostic = "") {
@@ -151,6 +164,8 @@ int main() {
          restoredLink.st_mtim.tv_nsec == originalLink.st_mtim.tv_nsec);
   checkAttr(base/"one/dir/note","Count",B_INT32_TYPE,&answer,sizeof(answer));
   checkAttr(base/"one/dir/note","Bytes",B_RAW_TYPE,binary,sizeof(binary));
+  checkAttr(base/"one/dir/note", "Chunked", B_RAW_TYPE,
+            chunkedAttribute.data(), chunkedAttribute.size());
   checkAttr(base/"one/dir/note","BEOS:TYPE",B_MIME_STRING_TYPE,"text/plain",11);
   checkAttr(base/"one/dir","Project",B_STRING_TYPE,"alpha",6);
   checkAttr(base/"one/pointer","Status",B_STRING_TYPE,"link",5);
@@ -187,6 +202,30 @@ int main() {
   fs::rename(source,base/"source-offline");
   reject([&]{ history.Save(cancel); }, "source missing");
   assert(count()==5);
+  {
+    HistoryStore savedHistory(store);
+    assert(savedHistory.SourcePath() == source && savedHistory.Browse(first).HasMessage("child"));
+    assert(savedHistory.Points().HasString("point"));
+    reject([&]{ savedHistory.Save(cancel); }, "read-only store cannot save", "browsing and restoring only");
+    reject([&]{ savedHistory.FolderIdentity(); }, "read-only store cannot approve a source",
+           "browsing and restoring only");
+    reject([&]{ savedHistory.SaveAutomatically(cancel, BMessage()); },
+           "read-only store cannot save automatically", "browsing and restoring only");
+    reject([&]{ savedHistory.Restore(first, source, cancel); }, "cannot restore over missing original path");
+    reject([&]{ savedHistory.Restore(first, store/"new-file", cancel, "same"); },
+           "cannot restore into history store");
+    assert(!fs::exists(source) && !fs::exists(store/"new-file"));
+    savedHistory.Restore(first, base/"without-source", cancel);
+    assert(fs::exists(base/"without-source/dir/note"));
+    reject([&]{ savedHistory.Restore(first, base/"without-source", cancel); },
+           "read-only folder restore remains exclusive");
+    savedHistory.Restore(first, base/"file-without-source", cancel, "dir/note");
+    checkAttr(base/"file-without-source", "Count", B_INT32_TYPE, &answer, sizeof(answer));
+    reject([&]{ savedHistory.Restore(first, base/"file-without-source", cancel, "dir/note"); },
+           "read-only file restore remains exclusive");
+    reject([&]{ HistoryStore unrelated((base/"without-source").string()); },
+           "unbound folder cannot be opened as saved history", "existing Listi history folder");
+  }
   fs::rename(base/"source-offline",source);
   fs::rename(store,base/"old");
   reject([&]{ history.Save(cancel); }, "store missing");
@@ -246,6 +285,17 @@ int main() {
   make(source/"private", "never approved");
   HistoryStore replacement(source,store);
   reject([&]{ replacement.SaveAutomatically(cancel, approved); }, "replacement source not approved");
+  HistoryStore readOnlyWithReplacement(store);
+  assert(readOnlyWithReplacement.SourcePath() == source);
+  reject([&]{ readOnlyWithReplacement.Restore(first, source/"copy", cancel, "same"); },
+         "cannot restore inside the reused source path");
+  fs::create_directory_symlink(source, base/"replacement-alias");
+  reject([&]{ readOnlyWithReplacement.Restore(first, base/"replacement-alias/copy", cancel, "same"); },
+         "cannot restore through an alias into the reused source path");
+  assert(!fs::exists(source/"copy"));
+  readOnlyWithReplacement.Restore(first, base/"file-with-replacement", cancel, "same");
+  std::ifstream(base/"file-with-replacement") >> recovered;
+  assert(recovered == "original");
   assert(count() == 6);
 
   fs::remove_all(source);
@@ -268,26 +318,21 @@ int main() {
   assert(count() == 6 && objects() == beforeOversize);
   fs::remove(tooLarge);
 
-  const std::vector<char> largeAttribute(4 * 1024 * 1024, 'x');
-  attr(source/"same", "Large", B_RAW_TYPE, largeAttribute.data(), largeAttribute.size());
+  const auto attrTree = source/"attribute-tree";
+  fs::create_directory(attrTree);
+  // Keep each BFS journal write small while exceeding both aggregate limits.
+  const std::vector<char> metadata(16 * 1024, 'x');
+  for (int node = 0; node < 65; ++node) {
+    const auto folder = attrTree/std::to_string(node);
+    fs::create_directory(folder);
+    for (int field = 0; field < 64; ++field) {
+      const auto name = "payload-" + std::to_string(field);
+      attr(folder, name.c_str(), B_RAW_TYPE, metadata.data(), metadata.size());
+    }
+  }
   reject([&]{ history.SaveAutomatically(cancel, approved); }, "automatic metadata budget",
          "metadata exceeds 4 MiB");
   assert(count() == 6 && objects() == beforeOversize);
-  {
-    const int fd = open((source/"same").c_str(), O_RDONLY);
-    assert(fd >= 0 && fs_remove_attr(fd, "Large") == 0);
-    close(fd);
-  }
-
-  const auto attrTree = source/"attribute-tree";
-  fs::create_directories(attrTree/"first");
-  fs::create_directory(attrTree/"second");
-  const std::vector<char> manualAttribute(8 * 1024 * 1024, 'y');
-  for (int i = 0; i < 9; ++i) {
-    const auto name = "payload-" + std::to_string(i);
-    attr(attrTree/(i < 5 ? "first" : "second"), name.c_str(), B_RAW_TYPE,
-         manualAttribute.data(), manualAttribute.size());
-  }
   reject([&]{ history.Save(cancel); }, "manual cumulative metadata budget across folders",
          "manifest exceeds 64 MiB");
   assert(count() == 6 && latest() == cleanPoint && objects() == beforeOversize);

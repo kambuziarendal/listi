@@ -834,6 +834,10 @@ public:
         PostMainWindowNotice("Could not open automatic history. Install the complete Listi package.");
       return;
     }
+    if (m->what == Listi::kOpenSavedFolderHistory) {
+      if (!PromptBlocksCommand()) Listi::OpenSavedFolderHistory();
+      return;
+    }
     if (m->what == Listi::kFolderHistory || m->what == Listi::kPreviewHistory) {
       int side = m->GetInt32("pane", split->Source());
       if (PromptBlocksCommand() || !split->ActivateFiles(side)) return;

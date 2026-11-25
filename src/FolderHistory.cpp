@@ -25,6 +25,7 @@ namespace {
 namespace fs = std::filesystem;
 constexpr size_t kManifestLimit = 64 * 1024 * 1024;
 constexpr off_t kAttributeLimit = 16 * 1024 * 1024;
+constexpr ssize_t kAttributeWriteChunk = 16 * 1024;
 constexpr char kBinding[] = "listi-history-v1";
 constexpr uint64 kMiB = 1024 * 1024;
 constexpr uint64 kAutomaticStoreBytes = 512 * kMiB;
@@ -286,8 +287,16 @@ void ApplyAttributes(int fd, const BMessage &entry, const std::atomic_bool &canc
     ssize_t length = 0;
     attr.FindData("value", B_RAW_TYPE, &bytes, &length);
     Require(*name && length >= 0 && length <= kAttributeLimit, "Invalid history attribute.");
-    Check(fs_write_attr(fd, name, attr.GetUInt32("type", 0), 0, bytes, length)
-        == length, "Restore BFS attribute");
+    const auto type = attr.GetUInt32("type", 0);
+    const auto *data = static_cast<const char *>(bytes);
+    ssize_t offset = 0;
+    do {
+      CheckCancel(cancel);
+      const auto count = std::min(length - offset, kAttributeWriteChunk);
+      Check(fs_write_attr(fd, name, type, offset, data, count) == count, "Restore BFS attribute");
+      offset += count;
+      if (count) data += count;
+    } while (offset < length);
   }
 }
 
@@ -464,32 +473,60 @@ struct HistoryStore::State {
   std::string source, folder;
   std::unique_ptr<PinnedDirectory> store, root;
 
-  std::string Binding() const { return std::string(kBinding) + "\n" + source; }
-  bool Bound() const {
+  void OpenStore(const fs::path &chosen) {
+    Require(chosen.is_absolute(), "Enter an absolute path to an existing history folder.");
+    folder = fs::canonical(chosen);
+    store = Pin(chosen);
+    Require(fs::canonical(chosen) == folder, "History folder changed while connecting.");
+  }
+
+  std::string ReadBinding() const {
     store->Verify();
     int fd = openat(store->Descriptor(), kBinding, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
-    if (fd < 0 && errno == ENOENT) return false;
+    if (fd < 0 && errno == ENOENT) return {};
     FD marker(fd, "Open history binding");
-    Require(S_ISREG(Stat(marker.fd).st_mode) && Read(marker.fd, B_PATH_NAME_LENGTH + 64) == Binding(),
-            "History belongs to a different source folder.");
+    Require(S_ISREG(Stat(marker.fd).st_mode), "Invalid history binding.");
+    auto binding = Read(marker.fd, B_PATH_NAME_LENGTH + 64);
+    Require(!binding.empty(), "Invalid history binding.");
+    return binding;
+  }
+
+  std::string Binding() const { return std::string(kBinding) + "\n" + source; }
+  bool Bound() const {
+    const auto binding = ReadBinding();
+    if (binding.empty() && root) return false;
+    Require(binding == Binding(), "History belongs to a different source folder.");
     return true;
   }
 };
 
 HistoryStore::HistoryStore(const std::string &source, const std::string &folder)
     : state(std::make_unique<State>()) {
-  Require(fs::path(folder).is_absolute(), "Enter an absolute path to an existing history folder.");
-  const fs::path chosen(folder);
+  state->OpenStore(folder);
   state->source = fs::canonical(source);
-  state->folder = fs::canonical(chosen);
   Separate(state->source, state->folder);
   state->root = Pin(state->source);
-  state->store = Pin(chosen);
-  Require(fs::canonical(chosen) == state->folder, "History folder changed while connecting.");
   Require(state->Bound() || Names(state->store->Descriptor(), 1, true).empty(),
           "Choose an empty folder or an existing Listi history folder.");
 }
+
+HistoryStore::HistoryStore(const std::string &folder) : state(std::make_unique<State>()) {
+  state->OpenStore(folder);
+  const auto binding = state->ReadBinding();
+  const auto prefix = std::string(kBinding) + "\n";
+  Require(binding.compare(0, prefix.size(), prefix) == 0,
+          "Choose an existing Listi history folder.");
+  state->source = binding.substr(prefix.size());
+  const fs::path source(state->source);
+  Require(source.is_absolute() && source.lexically_normal().string() == state->source &&
+          state->source.find('\0') == std::string::npos, "Invalid original history path.");
+  Separate(source, state->folder);
+  state->store->Verify();
+}
+
 HistoryStore::~HistoryStore() = default;
+
+const std::string &HistoryStore::SourcePath() const { return state->source; }
 
 BMessage HistoryStore::Points() const {
   BMessage points;
@@ -521,6 +558,7 @@ void HistoryStore::Save(const std::atomic_bool &cancel) const {
 }
 
 BMessage HistoryStore::FolderIdentity() const {
+  Require(bool(state->root), "Saved history was opened for browsing and restoring only.");
   BMessage identity;
   for (const auto *folder : {state->root.get(), state->store.get()}) {
     folder->Verify();
@@ -544,6 +582,7 @@ bool HistoryStore::SaveAutomatically(const std::atomic_bool &cancel,
 }
 
 bool HistoryStore::SaveInternal(const std::atomic_bool &cancel, bool automatic) const {
+  Require(bool(state->root), "Saved history was opened for browsing and restoring only.");
   CheckCancel(cancel);
   auto &source = *state->root;
   auto &store = *state->store;
@@ -640,6 +679,7 @@ void HistoryStore::Restore(const std::string &point, const std::string &destinat
   auto parentPath = fs::canonical(entered.parent_path());
   auto leaf = entered.filename().string();
   auto target = parentPath / leaf;
+  Separate(entered.lexically_normal(), state->source);
   Separate(target, state->source);
   Separate(target, state->folder);
   auto parent = Pin(parentPath);

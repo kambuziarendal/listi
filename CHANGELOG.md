@@ -1,7 +1,8 @@
 # Changelog
 
-## 0.38.0-25 (local candidate)
+## 0.38.0-26 (local candidate)
 
+- Open a saved history store directly to restore a new copy even when the original folder is gone. This mode cannot save new versions.
 - Manual and automatic folder history verify reused file contents before accepting a version. Large collections of BFS attributes are bounded during capture; restoring a symbolic link preserves its modification time.
 - Large tab collections no longer lay out hidden labels on every change. Cycling a single tab leaves its scan alone.
 - Batched Shelf changes avoid repeated layout work, and archiving many local sources resolves the destination folder once.

@@ -674,6 +674,10 @@ its saved versions directly. For a manual history, click **Choose history
 folder…** and select an existing dedicated BFS folder outside the source.
 Connecting does not write. **Save version** records the current tree.
 
+If the source has moved or no longer exists, choose **Files → Open saved folder history…**
+and select the history store itself. This read-only view shows the recorded source
+path and can restore to a new location; it cannot save versions or enable automatic history.
+
 Slide left to go back in time, right for newer versions, or use the arrows
 for one step at a time. Scrolling over the timeline also steps between versions. The date identifies the saved folder, not the live
 folder. Added and removed paths and changes to file bytes, link targets or
@@ -691,8 +695,8 @@ snapshot or an in-place rollback. For optional scheduled points, see below.
 Identical file bytes share an object independently of the name and BFS attributes. The store
 is not encrypted, and the old standalone F12 SQLite prototype is not compatible
 with this store. This version preserves typed BFS attributes, symlink text,
-file/folder modification times and ordinary permission bits; not symlink
-timestamps, ownership, hard-link relationships or volume indexes.
+file, folder and symlink modification times, and ordinary file/folder permission bits;
+not ownership, hard-link relationships or volume indexes.
 
 Canceling a save before publication leaves existing points readable. An
 interrupted save can leave complete, unreferenced blobs (or private temporary

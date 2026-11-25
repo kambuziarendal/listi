@@ -81,6 +81,7 @@ void MainWindowMenu::AddFilesMenu() {
   AddCommand(files, "Move to Trash", kDelete, 'D');
   AddCommand(files, "Restore from Trash", kRestore);
   AddCommand(files, "Folder history…", Listi::kFolderHistory);
+  AddCommand(files, "Open saved folder history…", Listi::kOpenSavedFolderHistory);
   AddCommand(files, "Automatic history settings…", Listi::kAutomaticHistorySettings);
   AddCommand(files, "Delete permanently...", kPermanentDelete);
   undoBulkRenameItem = AddCommand(files, "Undo last bulk rename", kUndoBulkRename);
