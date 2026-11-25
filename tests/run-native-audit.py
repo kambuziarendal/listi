@@ -49,7 +49,7 @@ WRAPS = {
     "archive-move-scaling": ['lstat'],
     "terminal-delivery": ["_ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl",
                           "_ZN5BView10DrawBitmapEPK7BBitmap5BRectS3_"],
-    "directory-delivery": ['opendir', '_ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl'],
+    "directory-delivery": ['opendir', 'readdir', '_ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl'],
     "operation-queue": ['_ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl', 'opendir'],
     "flat-view": ['_ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl', 'opendir'],
     "folder-compare": ['opendir'],

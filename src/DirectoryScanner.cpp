@@ -337,7 +337,15 @@ public:
               parent = "/";
             row(parent.c_str(), "..", true);
           }
-          while (!deliveryFailed && generation->load() == serial) {
+          // A copy can latch the device before its completion reaches the
+          // pane. Dropping individual rows is not enough: readdir itself
+          // enters the filesystem, as does the final identity check.
+          const auto blocked = [&] {
+            auto &volumes = Listi::InterruptedVolumes();
+            return (identified && volumes.ContainsDevice(opened.st_dev)) ||
+                   volumes.Contains(path.String());
+          };
+          while (!deliveryFailed && generation->load() == serial && !blocked()) {
             errno = 0;
             auto e = readdir(dir);
             if (!e) {
@@ -355,7 +363,11 @@ public:
           if (generation->load() != serial)
             return;
           struct stat named;
-          if (identified && (stat(path.String(), &named) != 0 ||
+          if (blocked()) {
+            count = 0;
+            done.RemoveName("error");
+            done.AddString("error", Listi::kUnavailableVolumeText);
+          } else if (identified && (stat(path.String(), &named) != 0 ||
               named.st_dev != opened.st_dev || named.st_ino != opened.st_ino) &&
               !done.HasString("error"))
             done.AddString("error", "Folder changed while reading. Reload to try again.");
