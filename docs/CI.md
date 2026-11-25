@@ -166,3 +166,7 @@ guarantee or a full protocol qualification.
    Neither repository administration nor hosted execution is performed by a
    local test run. If infrastructure or permissions are missing, leave that
    gate explicitly unqualified.
+
+### Enforced on haiku-native
+
+Audit item **C3: complete**. On 2026-11-25 the effective [repository ruleset](https://github.com/kambuziarendal/listi/rules/28035107) required an up-to-date pull request and both GitHub Actions checks, **Portable** and **Haiku native**, with zero required approvals and no bypass actors. Both appeared in the required-check list on [the alpha pull request](https://github.com/kambuziarendal/listi/pull/1). An unavailable required check blocks merging; a local run is not a substitute.
