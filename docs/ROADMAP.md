@@ -29,25 +29,15 @@ Everyday responsiveness and trustworthy file operations come before new workflow
    “Cancellation requested; waiting for device”, not “Cancelled”. Prevent a
    second write to the same target until the first is resolved. Check the
    original, previously copied files and the reported outcome after remount.
-2. **First new workflow: open a live BFS search in this panel.** Reuse the
-   existing query worker and keep the other panel available for browsing.
-   Show each hit’s original folder. Test with two same-named files: when
-   another hit arrives, the selection must not jump; Quick view and Add to
-   Shelf must still use the selected original. Back returns to the folder
-   the user left. A query is a source of entries, not a destination folder.
-3. **Then add independent tabs, followed by paired navigation.** Each tab
-   remembers its source, history, selection and scroll position. Link two
-   folder roots by relative path only when requested. If a peer folder is
-   missing, say so and leave the peer panel in place; never create or sync
-   files while browsing. Add named project sessions after these work: restore
-   locations, queries and layout, never replay file jobs.
+2. **Search and independent tabs have shipped in the 0.38.0-13 test package.** A pane can show a live BFS search as a navigable file list. Each pane supports independent folder tabs, including detach. Named working sets are implemented on the development branch; see the [versioned feature overview](FEATURES.md#what-changed-since-0380-12).
+3. **Paired navigation remains a goal.** Link two folder roots by relative path only when requested. If a peer folder is missing, say so and leave it in place; never create or sync files while browsing.
 
 **Keep the architecture lister-first.** Let folders and queries feed the same
 panel without tying their state to a particular window layout. Extract shared
 commands as real workflows need them, not in a wholesale rewrite. The first
 custom button should be **Open selected in [app]**: choose the app once, then
 pass the current selection on click without changing MIME defaults. A saved
-bulk-rename template with a preview can follow. Neither blocks live search.
+bulk-rename template with a preview can follow.
 
 ## Optional by design
 
@@ -217,11 +207,7 @@ Miller columns are a file view, independent of the workspace. Each workspace sta
 in Details and has a configurable default view. Explore adaptive views only
 with explicit user control and sensible minimum sizes.
 
-Readable, BeOS-inspired folder cards and saved paired work sets remain goals.
-Named project sessions—such as Accounting, Video editing or Personal—could
-restore open locations, future tabs/cards, view modes, sort choices and layout.
-They must distinguish saved UI state from active operations: restoring a session
-must not replay old file jobs or store credentials in plain layout files.
+Named working sets on the development branch already reopen selected windows, tabs and layouts without replaying operations. Readable, BeOS-inspired folder cards and linked navigation between paired roots remain goals.
 
 ### Inspect files without leaving the task
 
