@@ -42,12 +42,15 @@ FolderTabs::FolderTabs(int32 index, Pane &files)
   tabs.push_back({++nextTab, {}, {}});
   Rebuild();
 }
-FolderTab FolderTabs::Snapshot() {
+void FolderTabs::SaveActive() {
   tabs[active].state = pane.CaptureNavigation();
+}
+FolderTab FolderTabs::Snapshot() {
+  SaveActive();
   return tabs[active];
 }
 BMessage FolderTabs::ArchiveTabs() {
-  Snapshot();
+  SaveActive();
   BMessage result;
   result.AddInt32("active", active);
   for (const auto &tab : tabs) {
@@ -103,7 +106,7 @@ void FolderTabs::RestoreTabs(const BMessage &archive) {
 }
 
 void FolderTabs::OpenDirectory(const char *path) {
-  Snapshot();
+  SaveActive();
   FolderTab tab{++nextTab, {}, {}};
   tab.state.location = path;
   Insert(std::move(tab));
@@ -150,34 +153,44 @@ bool FolderTabs::Change(uint32 cmd, int64 chosen) {
   }
   if (cmd == kTabReopen && !closed)
     return false;
-  auto current = Snapshot();
   switch (cmd) {
   case kTabNew: {
+    SaveActive();
+    const auto &current = tabs[active].state;
     FolderTab tab{++nextTab, {}, {}};
-    tab.state.location = current.state.location;
-    tab.state.queries = current.state.queries;
+    tab.state.location = current.location;
+    tab.state.queries = current.queries;
     auto path = pane.SelectedFolder();
     if (!path.empty())
       tab.state.location = path;
     Insert(std::move(tab));
     break;
   }
-  case kTabDuplicate:
+  case kTabDuplicate: {
+    auto current = Snapshot();
     current.id = ++nextTab;
     Insert(std::move(current));
     break;
+  }
   case kTabReopen:
+    SaveActive();
     Insert(std::move(*closed));
     closed.reset();
     break;
-  case kTabPrevious: active = (active + tabs.size() - 1) % tabs.size(); break;
-  case kTabNext: active = (active + 1) % tabs.size(); break;
+  case kTabPrevious:
+  case kTabNext: {
+    if (tabs.size() == 1)
+      return false;
+    SaveActive();
+    const size_t step = cmd == kTabNext ? 1 : tabs.size() - 1;
+    active = (active + step) % tabs.size();
+    break;
+  }
   case kTabChoose: {
     auto found = std::find_if(tabs.begin(), tabs.end(), [chosen](const auto &t) { return t.id == chosen; });
-    if (found == tabs.end() || found->id == current.id) {
-      UpdateLabel();
+    if (found == tabs.end() || found->id == ActiveId())
       return false;
-    }
+    SaveActive();
     active = size_t(found - tabs.begin());
     break;
   }
@@ -199,7 +212,7 @@ bool FolderTabs::Close(int64 id) {
   }
   const bool wasActive = index == active;
   if (wasActive)
-    Snapshot();
+    SaveActive();
   closed = std::move(tabs[index]);
   Remove(index);
   if (wasActive)
@@ -219,18 +232,17 @@ void FolderTabs::Rebuild() {
 }
 
 void FolderTabs::UpdateLabel() {
-  labels.clear();
-  for (size_t i = 0; i < tabs.size(); ++i) {
-    const auto &tab = tabs[i];
-    const auto location = i == active ? pane.LocationLabel() : tab.state.displayLabel;
-    if (!tab.alias.empty())
-      labels.push_back(tab.alias);
-    else if (location.rfind("Search: ", 0) == 0)
-      labels.push_back(location);
-    else
-      labels.push_back(ShortName(location.empty() ? tab.state.location : location));
-  }
   Arrange();
+}
+
+std::string FolderTabs::LabelAt(size_t index) const {
+  const auto &tab = tabs[index];
+  if (!tab.alias.empty())
+    return tab.alias;
+  const auto location = index == active ? pane.LocationLabel() : tab.state.displayLabel;
+  if (location.rfind("Search: ", 0) == 0)
+    return location;
+  return ShortName(location.empty() ? tab.state.location : location);
 }
 
 void FolderTabs::Arrange() {
@@ -249,15 +261,16 @@ void FolderTabs::Arrange() {
   float left = 0;
   for (size_t offset = 0; offset < visible; ++offset) {
     const size_t i = first + offset;
+    auto label = LabelAt(i);
     const float preferred = std::clamp(
-        std::ceil(StringWidth(labels[i].c_str())) + 2 * kPadding + closeWidth,
+        std::ceil(StringWidth(label.c_str())) + 2 * kPadding + closeWidth,
         kMinTabWidth, kMaxTabWidth);
     const float width = std::min(preferred, std::floor(available / (visible - offset)));
     BRect frame(left, 1, left + width - 1, bottom);
     BRect close;
     if (closeWidth > 0)
       close = BRect(frame.right - closeWidth + 1, frame.top, frame.right - 1, frame.bottom - 2);
-    slots.push_back({i, frame, close});
+    slots.push_back({i, frame, close, std::move(label)});
     left += width;
     available -= width;
   }
@@ -308,7 +321,7 @@ void FolderTabs::Draw(BRect) {
       StrokeLine(BPoint(x + 3, y - 3), BPoint(x - 3, y + 3));
     }
     const float end = slot.close.IsValid() ? slot.close.left : slot.frame.right - kPadding;
-    BString label(labels[slot.tab].c_str());
+    BString label(slot.label.c_str());
     TruncateString(&label, B_TRUNCATE_END, end - slot.frame.left - kPadding);
     SetHighColor(text);
     SetLowColor(fill);
@@ -370,7 +383,9 @@ bool FolderTabs::GetToolTipAt(BPoint point, BToolTip **tip) {
     caption = "Folder tabs";
   for (const auto &slot : slots) {
     if (tabs[slot.tab].id == action.id) {
-      caption = action.command == kTabClose ? "Close " + labels[slot.tab] : labels[slot.tab];
+      caption = slot.label;
+      if (action.command == kTabClose)
+        caption.insert(0, "Close ");
       break;
     }
   }
@@ -384,7 +399,7 @@ void FolderTabs::ShowOverflow() {
     for (size_t i = 0; i < tabs.size(); ++i) {
       auto *message = new BMessage(kTabChoose);
       message->AddInt64("tab", tabs[i].id);
-      auto *item = new BMenuItem(labels[i].c_str(), message);
+      auto *item = new BMenuItem(LabelAt(i).c_str(), message);
       menu.AddItem(item);
       item->SetMarked(i == active);
     }

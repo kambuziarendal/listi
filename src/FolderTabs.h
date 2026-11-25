@@ -39,6 +39,7 @@ private:
   struct Slot {
     size_t tab;
     BRect frame, close;
+    std::string label;
   };
   struct Action {
     uint32 command = 0;
@@ -53,7 +54,6 @@ private:
   std::optional<FolderTab> closed;
   size_t active = 0;
   bool pageVisible = true, pinned = false;
-  std::vector<std::string> labels;
   std::vector<Slot> slots;
   BRect overflow;
   Action pressed;
@@ -65,11 +65,13 @@ private:
   void MouseMoved(BPoint, uint32, const BMessage *) override;
   bool GetToolTipAt(BPoint, BToolTip **) override;
   void Arrange();
+  std::string LabelAt(size_t index) const;
   Action ActionAt(BPoint) const;
   void ShowOverflow();
   void Post(Action);
   bool Close(int64 id);
   void Rebuild();
+  void SaveActive();
   void Insert(FolderTab tab);
   void Remove(size_t index);
   void Restore();

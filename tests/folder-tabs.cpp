@@ -43,6 +43,47 @@ void Ready(BWindow &window) {
   } while (system_time() < until);
   Check(false, "file panes complete navigation in time");
 }
+
+void CheckManyTabs(BWindow &window, const fs::path &left, const fs::path &right) {
+  auto &panel = Panel(window);
+  auto &bar = panel.FolderBar();
+  auto &files = panel.Files();
+  constexpr int count = 128;
+  BMessage archive;
+  archive.AddInt32("active", 0);
+  for (int index = 0; index < count; ++index) {
+    BMessage item;
+    item.AddString("alias", ("Folder " + std::to_string(index)).c_str());
+    item.AddString("location", index % 2 == 0 ? left.c_str() : right.c_str());
+    archive.AddMessage("tab", &item);
+  }
+  bar.RestoreTabs(archive);
+  Ready(window);
+  const auto first = bar.ActiveId();
+  Check(bar.Count() == count && files.Path() == left.string(),
+        "restore 128 suspended tabs without opening more windows");
+  Command(window, kTabPrevious);
+  Ready(window);
+  const auto last = bar.ActiveId();
+  Check(bar.Index() == count - 1 && last != first && files.Path() == right.string(),
+        "switch from the first tab to the end of the overflowing strip");
+  for (int index = 0; index < 8; ++index) {
+    Command(window, kTabChoose, 0, first);
+    Command(window, kTabChoose, 0, last);
+  }
+  Ready(window);
+  files.MatchPattern("two", true);
+  Command(window, kTabClose, 0, first);
+  Check(bar.Count() == count - 1 && bar.ActiveId() == last &&
+        bar.Index() == count - 2 && !files.IsScanning() &&
+        files.SelectedPath() == (right/"two").string(),
+        "rapid switches and a background close preserve the live tab and selection");
+  Command(window, kTabReopen);
+  Ready(window);
+  Check(bar.Count() == count && bar.ActiveId() == first &&
+        bar.Snapshot().alias == "Folder 0" && files.Path() == left.string(),
+        "reopen the closed overflow tab by its original identity");
+}
 }
 int main() {
   BApplication app("application/x-vnd.Listi-FolderTabsTest");
@@ -250,6 +291,14 @@ int main() {
   standalone->Lock();
   Check(standalone->Frame().Width() < fullFrame.Width() && Panel(*standalone).Files().IsEinn(),
         "opening a standalone Einn uses the compact frame");
+  Ready(*standalone);
+  auto &single = Panel(*standalone);
+  const auto singleId = single.FolderBar().ActiveId();
+  Command(*standalone, kTabNext);
+  Command(*standalone, kTabPrevious);
+  Check(single.FolderBar().ActiveId() == singleId && !single.Files().IsScanning(),
+        "cycling a single tab does not restart the directory scan");
+  CheckManyTabs(*standalone, a, b);
   standalone->Quit();
   fs::remove_all(root);
 }

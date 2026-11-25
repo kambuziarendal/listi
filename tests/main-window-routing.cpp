@@ -5,6 +5,7 @@
 #include "../src/FunctionButtonBank.h"
 #include "../src/ImagePreview.h"
 #include "../src/FileClipboard.h"
+#include "../src/FolderTabs.h"
 #include "../src/MainWindow.h"
 #include "../src/MainWindowMenu.h"
 #include "../src/Pane.h"
@@ -253,6 +254,38 @@ static void CheckWindowCLIQuit(BApplication &app) {
     return hasCLI(owner, 0) && hasCLI(detached, 1) && hasCLI(survivor, 0);
   });
 
+  auto withTabs = [](BMessenger target, auto action) {
+    if (target.LockTargetWithTimeout(500000) != B_OK)
+      return false;
+    BLooper *looper = nullptr;
+    target.Target(&looper);
+    auto &browser = *static_cast<BWindow *>(looper);
+    auto *panel = dynamic_cast<Listi::PanelTools *>(browser.FindView("first panel tools"));
+    const bool result = panel && action(browser, panel->FolderBar());
+    looper->Unlock();
+    return result;
+  };
+  int64 activeTab = -1;
+  assert(withTabs(owner, [&](BWindow &browser, Listi::FolderTabs &tabs) {
+    const auto background = tabs.ActiveId();
+    for (int i = 0; i < 12; ++i) {
+      BMessage duplicate(Listi::kTabDuplicate);
+      duplicate.AddInt32("pane", 0);
+      browser.MessageReceived(&duplicate);
+    }
+    activeTab = tabs.ActiveId();
+    BMessage close(Listi::kTabClose);
+    close.AddInt32("pane", 0);
+    close.AddInt64("tab", background);
+    browser.MessageReceived(&close);
+    return tabs.Count() == 12 && tabs.CanReopen() && tabs.ActiveId() == activeTab;
+  }));
+  const auto tabsIntact = [&](BWindow &, Listi::FolderTabs &tabs) {
+    return tabs.Count() == 12 && tabs.CanReopen() && tabs.ActiveId() == activeTab;
+  };
+  assert(hasCLI(owner, 0) && hasCLI(detached, 1) && hasCLI(survivor, 0));
+  puts("Tab overflow and background close leave docked and detached CLIs active");
+
   for (int answer : {0, 1}) {
     assert(owner.SendMessage(B_QUIT_REQUESTED) == B_OK);
     BMessenger alert;
@@ -270,8 +303,10 @@ static void CheckWindowCLIQuit(BApplication &app) {
     assert(dialog->ButtonAt(answer)->Invoke() == B_OK);
     looper->Unlock();
     wait([&] { return !alert.IsValid(); });
-    if (answer == 0)
+    if (answer == 0) {
       assert(hasCLI(owner, 0) && hasCLI(detached, 1) && hasCLI(survivor, 0));
+      assert(withTabs(owner, tabsIntact));
+    }
   }
   wait([&] { return !owner.IsValid() && !detached.IsValid(); });
   assert(hasCLI(survivor, 0));
