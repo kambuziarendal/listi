@@ -20,11 +20,9 @@ Pre-release hands-on testing on Haiku identified failures that scripted checks h
 
 ### Physical USB disconnect during copy
 
-The first physical test on 0.38.0-30 ended in a kernel panic; see the [field report](#physical-usb-field-report-0380-30-2026-11-25). The steps below describe the intended checks.
+A physical disconnect was followed by a kernel panic ([field report](#physical-usb-field-report-0380-30-2026-11-25)). Separately, a Haiku hrev59866+79 VM entered the kernel debugger inside the FAT driver during an interrupted write. Tracker passed an ordinary FAT copy and clean unmount/remount check; that does not establish how it behaves during an unexpected disconnect. Haiku [ticket #19105](https://dev.haiku-os.org/ticket/19105) documents a related, previously fixed issue, not a verified fix for this crash.
 
-1. Use disposable files and a spare USB disk. Record checksums for the source, a file already on the USB disk and an earlier completed copy.
-2. Start **Copy** in Listi. Unplug the USB disk while it is still being written to, then click **Cancel**. Record whether the window responds, the job's exact status and how long it stays in that state.
-3. After reconnecting and remounting the disk, record what is present at the destination and compare the three checksums. Note if a restart was necessary. Record the outcome here before changing roadmap priority 1.
+Do not deliberately unplug a drive during a transfer. If a disconnect happens accidentally, report the Haiku revision, Listi version and any debugger message already visible. Physical hot-unplug qualification remains open.
 
 ## Testing in Haiku VMs
 
