@@ -929,6 +929,9 @@ Result RunArchiveJob(const Job &job, const Hooks &hooks) {
       copy.destination = PathOf(stage.dir);
       Hooks guarded = tracked;
       guarded.privateStaging = true;
+      // The inner copy must return its errors here. A queue report consumes
+      // them, leaving copied.errors empty even when the stage is incomplete.
+      guarded.report.reset();
       // Defer all member completion notifications until atomic publication.
       // Otherwise the UI leaves successfully extracted members marked failed.
       if (hooks.fileDone)

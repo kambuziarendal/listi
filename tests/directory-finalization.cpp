@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "ArchiveJobs.h"
 #include "FileOperation.h"
+#include "JobReportStore.h"
 #include "JobSnapshot.h"
 #include "MessageStore.h"
 #include "VirtualFile.h"
@@ -233,6 +234,17 @@ int main() try {
       !result.completed && !done && DurabilityError(result) &&
           !fs::exists(archivedMember) && fs::exists(archive),
       "whole archive extraction never publishes a stage with a failed subdirectory flush");
+  Hooks queuedExtraction = hooks;
+  queuedExtraction.report = std::make_shared<JobReportStore>();
+  failStageMember = true;
+  result = Run(extract, queuedExtraction);
+  failStageMember = false;
+  Pass(
+      !result.completed && !done && DurabilityError(result) &&
+          !fs::exists(archivedMember) && fs::exists(archive) &&
+          queuedExtraction.report->ErrorCount() == 0 &&
+          queuedExtraction.report->OutcomeCount() == 0,
+      "attached operation report cannot hide a staged extraction failure or publish the incomplete tree");
   failPublishedParent = true;
   result = Run(extract, hooks);
   failPublishedParent = false;
