@@ -25,7 +25,12 @@ struct BrowserRequest {
   std::optional<BMessage> workingSet = {};
 };
 using BrowserOpener = std::function<bool(BrowserRequest)>;
-bool BrowserAllowsQuit(BWindow *);
+bool CheckSharedQuitBlockers();
+bool CheckBrowserQuitBlockers(BWindow *);
+bool BrowserHasCLIs(BWindow *);
+bool CloseBrowserCLIs(BWindow *);
+void ShowQuitBlocker(const char *text);
+BMessenger ConfirmClosingCLIs(BMessenger recipient, uint32 command, bool wholeApp);
 BWindow *CreateMainWindow(const Preferences &, BMessenger service,
                           const Listi::SavedPlaces &, bool placesWritable,
                           const Listi::SavedSearches &, bool searchesWritable, BrowserRequest request = {}, BrowserOpener open = {});

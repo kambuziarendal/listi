@@ -12,6 +12,7 @@
 #include "../src/PaneSidebar.h"
 #include "../src/SavedPlaces.h"
 #include "../src/SavedSearches.h"
+#include "../src/TerminalPanel.h"
 #include "../src/WindowKeyFilter.h"
 #include "../src/WorkspaceSplit.h"
 #include "../src/WorkspaceEditor.h"
@@ -203,6 +204,80 @@ static void CheckWorkspaceSplit(Listi::WorkspaceSplit &split, BView *first) {
   assert(near(split.ItemWeight(0), 0.48f));
   split.RememberWeights(layout, true);
   assert(near(layout.splitWeights[2], 0.2f));
+}
+
+static void CheckWindowCLIQuit(BApplication &app) {
+  auto *window = CreateMainWindow(Preferences{}, BMessenger{}, {}, false, {}, false);
+  auto *other = CreateMainWindow(Preferences{}, BMessenger{}, {}, false, {}, false);
+  auto startCLI = [](BWindow &owner, uint32 action, int lister) {
+    BMessage open(action);
+    open.AddInt32("terminal lister", lister);
+    owner.MessageReceived(&open);
+  };
+  startCLI(*window, Listi::kLeftCLI, 0);
+  startCLI(*window, Listi::kShowFloatingTerminal, 1);
+  startCLI(*other, Listi::kLeftCLI, 0);
+  BMessenger owner(window), survivor(other), detached;
+  window->Show();
+  other->Show();
+
+  auto wait = [](auto condition) {
+    for (int i = 0; i < 250; ++i) {
+      if (condition())
+        return;
+      snooze(20000);
+    }
+    assert(false && "Timed out waiting for CLI quit state");
+  };
+  auto findWindow = [&](const char *title) {
+    for (int32 i = 0; i < app.CountWindows(); ++i) {
+      auto *candidate = app.WindowAt(i);
+      if (candidate && std::string(candidate->Title()) == title)
+        return BMessenger(candidate);
+    }
+    return BMessenger{};
+  };
+  auto hasCLI = [](BMessenger target, int lister) {
+    if (target.LockTargetWithTimeout(500000) != B_OK)
+      return false;
+    BLooper *looper = nullptr;
+    target.Target(&looper);
+    auto *terminal = dynamic_cast<Listi::TerminalPanel *>(
+        static_cast<BWindow *>(looper)->FindView(Listi::TerminalName(lister)));
+    const bool active = terminal && terminal->Active() && !terminal->IsHidden();
+    looper->Unlock();
+    return active;
+  };
+  wait([&] {
+    detached = findWindow(Listi::TerminalName(1));
+    return hasCLI(owner, 0) && hasCLI(detached, 1) && hasCLI(survivor, 0);
+  });
+
+  for (int answer : {0, 1}) {
+    assert(owner.SendMessage(B_QUIT_REQUESTED) == B_OK);
+    BMessenger alert;
+    wait([&] {
+      alert = findWindow("Close CLI sessions?");
+      return alert.IsValid();
+    });
+    assert(alert.LockTargetWithTimeout(500000) == B_OK);
+    BLooper *looper = nullptr;
+    alert.Target(&looper);
+    auto *dialog = dynamic_cast<BAlert *>(looper);
+    assert(dialog && dialog->DefaultButton() == dialog->ButtonAt(0));
+    assert(std::string(dialog->ButtonAt(answer)->Label()) ==
+           (answer == 0 ? "Cancel" : "Close CLI and window"));
+    assert(dialog->ButtonAt(answer)->Invoke() == B_OK);
+    looper->Unlock();
+    wait([&] { return !alert.IsValid(); });
+    if (answer == 0)
+      assert(hasCLI(owner, 0) && hasCLI(detached, 1) && hasCLI(survivor, 0));
+  }
+  wait([&] { return !owner.IsValid() && !detached.IsValid(); });
+  assert(hasCLI(survivor, 0));
+  assert(other->Lock());
+  other->Quit();
+  puts("Window quit: Cancel preserves CLIs; confirm closes this window's CLIs only");
 }
 
 int main(int argc, char **argv) {
@@ -757,5 +832,6 @@ int main(int argc, char **argv) {
   assert(split);
   CheckWorkspaceSplit(*split, left);
   window->Quit();
+  CheckWindowCLIQuit(app);
   puts("Main window: menu shortcuts and workspace routing OK");
 }

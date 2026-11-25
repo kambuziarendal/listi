@@ -365,4 +365,12 @@ bool TerminalDock::Close(int64 requested) {
   return true;
 }
 
+bool TerminalDock::CloseSessions() {
+  for (auto &session : sessions) {
+    if ((session.visible || session.detached.IsValid()) && !Close(session.placement))
+      return false;
+  }
+  return true;
+}
+
 } // namespace Listi

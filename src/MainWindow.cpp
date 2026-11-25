@@ -3,6 +3,7 @@
 #include "../build/ListiBuildIdentity.h"
 #include "FileClipboard.h"
 #include <Alert.h>
+#include <Invoker.h>
 #include <sys/utsname.h>
 #include "MainWindow.h"
 #include "WindowOverview.h"
@@ -61,6 +62,7 @@
 #include <Window.h>
 #include <cstring>
 #include <memory>
+#include <utility>
 using Listi::PanelPage;
 
 void PostMainWindowNotice(const char *text) {
@@ -77,7 +79,60 @@ void PostMainWindowNotice(const char *text) {
   be_app->PostMessage(&error);
 }
 
+void ShowQuitBlocker(const char *text) {
+  auto *alert = new BAlert("Cannot close Listi", text, "OK", nullptr, nullptr,
+                           B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+  alert->SetShortcut(0, B_ESCAPE);
+  alert->Go(nullptr);
+}
+
 namespace {
+class CLIQuitAlert : public BAlert {
+public:
+  CLIQuitAlert(BMessenger recipient, uint32 command, bool wholeApp)
+      : BAlert("Close CLI sessions?",
+               wholeApp
+                   ? "Listi has open CLI sessions. Closing them stops their shells and may interrupt running commands."
+                   : "This window has open CLI sessions. Closing them stops their shells and may interrupt running commands.",
+               "Cancel", wholeApp ? "Close CLI and quit" : "Close CLI and window",
+               nullptr, B_WIDTH_AS_USUAL, B_WARNING_ALERT),
+        result(new BMessage(command), recipient) {
+    SetShortcut(0, B_ESCAPE);
+    SetDefaultButton(ButtonAt(0));
+  }
+
+  void ShowPrompt() { Go(&result); }
+
+private:
+  BInvoker result; // BAlert borrows the invoker until the dialog closes.
+};
+} // namespace
+
+BMessenger ConfirmClosingCLIs(BMessenger recipient, uint32 command, bool wholeApp) {
+  auto *alert = new CLIQuitAlert(recipient, command, wholeApp);
+  BMessenger target(alert);
+  alert->ShowPrompt();
+  return target;
+}
+
+bool CheckSharedQuitBlockers() {
+  if (Listi::FolderHistoryBusy())
+    ShowQuitBlocker("A folder history operation is running. Let it finish or cancel it, then try again.");
+  else if (!InspectorEditorsAllowQuit())
+    ShowQuitBlocker("An editor is still open with unsaved changes or is busy. Check the editor before closing Listi.");
+  else if (!FilePropertiesAllowQuit())
+    ShowQuitBlocker("File Properties has unsaved changes or is busy. Check that window before closing Listi.");
+  else if (!OpenWithAllowQuit())
+    ShowQuitBlocker("Open With is still working. Let it finish before closing Listi.");
+  else if (!ArchiveEditorsAllowQuit())
+    ShowQuitBlocker("An archive editor is still working. Let it finish before closing Listi.");
+  else
+    return true;
+  return false;
+}
+
+namespace {
+constexpr uint32 kConfirmWindowCLIQuit = 'wccl';
 std::atomic<int> browserCount{0};
 class MainWindow : public Listi::WorkingWindow {
   BMessenger overview, guide;
@@ -105,6 +160,8 @@ class MainWindow : public Listi::WorkingWindow {
   Listi::FileDropFlow fileDrop{*actionArea, queue, BMessenger(this), service};
   Listi::FileOperationFlow fileOperations{*actionArea, queue, clipboard, BMessenger(this)};
   std::unique_ptr<Listi::TerminalDock> terminalDock;
+  BMessenger cliQuitAlert;
+  bool closeCLIOnQuit = false;
 
   void PublishPlaces() {
     for (auto pane : panes)
@@ -642,40 +699,62 @@ public:
                          canSaveClipboard, canUndoBulkRename);
   }
 
-  bool QuitRequested() override {
-    if (browserCount == 1 && Listi::FolderHistoryBusy()) {
-      PostMainWindowNotice("Finish or cancel the folder history operation before closing Listi.");
-      return false;
-    }
+  bool CheckQuitBlockers() {
     if (PreferencesOpenFor(BMessenger(this))) {
-      queue.ErrorInfo("Apply or close this window's preferences first.");
-      return false;
-    }
-    if (browserCount > 1 && !InspectorEditorsAllowQuit(this))
-      return false;
-    if (browserCount == 1 && (!InspectorEditorsAllowQuit() || !FilePropertiesAllowQuit() ||
-        !OpenWithAllowQuit() || !ArchiveEditorsAllowQuit()))
-      return false;
-    if (terminalDock->HasSessions()) {
-      queue.ErrorInfo("Close this window's CLI sessions first.");
+      ShowQuitBlocker("Apply or close this window's preferences first.");
       return false;
     }
     if (savedNavigation.Saving()) {
-      queue.ErrorInfo(
-          "Saved places or searches are still being written. Please try quitting again shortly.");
+      ShowQuitBlocker("Saved places or searches are still being written. Wait for the write to finish, then try again.");
       return false;
     }
     if (queue.Busy() || clipboard.Busy()) {
       queue.Show();
-      queue.ErrorInfo("File operations are still running. Let them finish, or use "
-             "Cancel all before quitting.");
+      ShowQuitBlocker("File operations are still running. Let them finish, or use Cancel all in the operation queue.");
       return false;
+    }
+    return true;
+  }
+
+  bool HasCLIs() const { return terminalDock->HasSessions(); }
+  bool CloseCLIs() {
+    if (terminalDock->CloseSessions())
+      return true;
+    ShowQuitBlocker("A CLI session could not be closed. Close it from its CLI toolbar, then try again.");
+    return false;
+  }
+
+  bool QuitRequested() override {
+    const bool closeCLI = std::exchange(closeCLIOnQuit, false);
+    if (!CheckQuitBlockers())
+      return false;
+    if (browserCount == 1) {
+      if (!CheckSharedQuitBlockers())
+        return false;
+    } else if (!InspectorEditorsAllowQuit(this)) {
+      ShowQuitBlocker("This window's editor has unsaved changes or is busy. Check the editor before closing this window.");
+      return false;
+    }
+    if (HasCLIs()) {
+      if (!closeCLI) {
+        if (!cliQuitAlert.IsValid())
+          cliQuitAlert = ConfirmClosingCLIs(BMessenger(this), kConfirmWindowCLIQuit, false);
+        return false;
+      }
+      if (!CloseCLIs())
+        return false;
     }
     if (clipboard.ArchivePromptPending())
       CloseAction();
     return true;
   }
   void MessageReceived(BMessage *m) override {
+    if (m->what == kConfirmWindowCLIQuit) {
+      cliQuitAlert = {};
+      if (m->GetInt32("which", 0) == 1)
+        closeCLIOnQuit = PostMessage(B_QUIT_REQUESTED) == B_OK;
+      return;
+    }
     if (m->what == Listi::kReadHistoryConfig) {
       readingConfig = false;
       historyPairs = Listi::HistoryPairs(*m);
@@ -1112,7 +1191,17 @@ BWindow *CreateMainWindow(const Preferences &prefs, BMessenger service,
                         searches, searchesWritable, std::move(request), std::move(open));
 }
 
-bool BrowserAllowsQuit(BWindow *window) {
+bool CheckBrowserQuitBlockers(BWindow *window) {
   auto *browser = dynamic_cast<MainWindow *>(window);
-  return !browser || browser->QuitRequested();
+  return !browser || browser->CheckQuitBlockers();
+}
+
+bool BrowserHasCLIs(BWindow *window) {
+  auto *browser = dynamic_cast<MainWindow *>(window);
+  return browser && browser->HasCLIs();
+}
+
+bool CloseBrowserCLIs(BWindow *window) {
+  auto *browser = dynamic_cast<MainWindow *>(window);
+  return !browser || browser->CloseCLIs();
 }

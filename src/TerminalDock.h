@@ -36,6 +36,7 @@ public:
   bool Float(int64 placement);
   bool Dock(int64 placement);
   bool Close(int64 placement);
+  bool CloseSessions();
   void Show(int lister);
   void SetSide(TerminalSide side);
   bool Move(int64 placement);
