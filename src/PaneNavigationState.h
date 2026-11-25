@@ -11,6 +11,8 @@ namespace Listi {
 // the visible pane, never to a suspended tab or detached navigation snapshot.
 struct PaneNavigationState {
   std::string location = "/boot/home", displayLabel, filter, focused;
+  // Session identity only; device numbers do not survive a reboot.
+  int64_t folderDevice = -1;
   NavigationHistory history;
   std::optional<VisitPosition> pendingVisit;
   std::map<std::string, SavedSearch> queries;

@@ -10,6 +10,7 @@
 #include "WindowOverview.h"
 #include "FolderTabs.h"
 #include <Screen.h>
+#include <NodeMonitor.h>
 #include "WorkingSets.h"
 #include <atomic>
 #include <MenuItem.h>
@@ -733,6 +734,8 @@ public:
     // Child visibility must not impose a transient maximum on the window.
     // Apply after attachment: Haiku replaces layout explicit-data proxies.
     GetLayout()->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
+    // Suspended tabs outlive the active panes' per-directory subscriptions.
+    watch_node(nullptr, B_WATCH_MOUNT, BMessenger(this));
     queue.Start();
     AddCommonFilter(new Listi::WindowKeyFilter());
 
@@ -788,6 +791,7 @@ public:
       panes[split->Source()]->Navigate(request.path.c_str());
   }
   ~MainWindow() override {
+    stop_watching(BMessenger(this));
     --browserCount;
     BMessage closed(kBrowserClosed);
     closed.AddInt64("id", WindowId());
@@ -916,6 +920,13 @@ public:
     return true;
   }
   void MessageReceived(BMessage *m) override {
+    if (m->what == B_NODE_MONITOR && m->GetInt32("opcode", 0) == B_DEVICE_UNMOUNTED) {
+      for (int side = 0; side < 2; ++side) {
+        split->Panel(side).FolderBar().ForgetUnmountedDevice(m->GetInt32("device", -1));
+        RefreshTerminalTabLabel(side);
+      }
+      return;
+    }
     if (m->what == kConfirmWindowCLIQuit) {
       cliQuitAlert = {};
       if (m->GetInt32("which", 0) == 1)

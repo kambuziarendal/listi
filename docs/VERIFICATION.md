@@ -392,3 +392,10 @@ a problem with ext4, or demonstrate that Listi alone triggers the fault. Do not
 request another physical disconnect as a routine beta check on this system.
 
 Physical retest reported on 2026-11-25: copying to ext4 and deleting on ext4 worked, and a newly mounted volume appeared immediately in an open @disks panel. This does not verify interrupted USB writes.
+
+On hrev59866+79, installed Listi -36 moved two affected browser windows to
+Disks after a normal BFS image unmount and kept an unrelated window in place.
+A suspended tab, however, reopened the old path after remount. In a separate
+Tracker observation a normal RAM-disk unmount entered the kernel debugger
+during window-state saving. That was not a FAT write or a physical USB test;
+it does not establish a common cause.

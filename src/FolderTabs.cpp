@@ -164,6 +164,22 @@ std::string FolderTabs::DescribeTab(int64 id) const {
       return "Tab " + std::to_string(i + 1) + ": " + LabelAt(i);
   return {};
 }
+void FolderTabs::ForgetUnmountedDevice(int32 device) {
+  if (device < 0)
+    return;
+  auto forget = [device](FolderTab &tab) {
+    if (tab.state.folderDevice == device) {
+      tab.state = {};
+      tab.state.location = "@disks";
+    }
+  };
+  for (size_t index = 0; index < tabs.size(); ++index)
+    if (index != active)
+      forget(tabs[index]);
+  if (closed)
+    forget(*closed);
+  Rebuild();
+}
 void FolderTabs::Rename(const std::string &label) {
   tabs[active].alias = label;
   UpdateLabel();

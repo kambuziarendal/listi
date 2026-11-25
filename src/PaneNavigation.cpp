@@ -95,6 +95,7 @@ Listi::PaneNavigationState Pane::CaptureNavigation() {
     return *restoring;
   Listi::PaneNavigationState state;
   state.location = path.String();
+  state.folderDevice = folderIdentity.first;
   state.displayLabel = IsSearchList() ? LocationLabel() : Listi::Leaf(state.location);
   state.history = history;
   state.pendingVisit = pendingVisit;

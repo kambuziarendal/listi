@@ -11,6 +11,7 @@
 #include <Application.h>
 #include <Button.h>
 #include <MenuBar.h>
+#include <NodeMonitor.h>
 #include <TextView.h>
 #include <Window.h>
 #include <cstdlib>
@@ -440,6 +441,35 @@ int main() {
   Command(*standalone, kTabPrevious);
   Check(single.FolderBar().ActiveId() == singleId && !single.Files().IsScanning(),
         "cycling a single tab does not restart the directory scan");
+  single.Files().Navigate(a.c_str());
+  Ready(*standalone);
+  single.Files().MatchPattern("one", true);
+  const auto originalTab = single.FolderBar().ActiveId();
+  const int32 device = single.Files().FolderIdentity().first;
+  Check(device >= 0, "visited tab records its mounted volume");
+  Command(*standalone, kTabDuplicate);
+  Ready(*standalone);
+  Command(*standalone, kTabClose);
+  Ready(*standalone);
+  single.FolderBar().OpenDirectory("@disks");
+  Panel(*standalone, 1).Files().Navigate("@disks");
+  Ready(*standalone);
+  BMessage unmount(B_NODE_MONITOR);
+  unmount.AddInt32("opcode", B_DEVICE_UNMOUNTED);
+  unmount.AddInt32("device", device + 1);
+  standalone->MessageReceived(&unmount);
+  Check(single.FolderBar().CopyTab(originalTab)->state.location == a.string(),
+        "unrelated unmount preserves a suspended tab");
+  unmount.ReplaceInt32("device", device);
+  standalone->MessageReceived(&unmount);
+  Command(*standalone, kTabChoose, 0, originalTab);
+  Ready(*standalone);
+  Check(std::string(single.Files().Path()) == "@disks" && single.Files().Selected().empty(),
+        "suspended tab forgets its detached volume and selection with both panes elsewhere");
+  Command(*standalone, kTabReopen);
+  Ready(*standalone);
+  Check(std::string(single.Files().Path()) == "@disks" && single.Files().Selected().empty(),
+        "reopening a closed tab cannot return to a departed mount");
   CheckManyTabs(*standalone, a, b);
   standalone->Quit();
   fs::remove_all(root);

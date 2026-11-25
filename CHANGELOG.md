@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.38.0-37 (private test candidate)
+
+- Suspended folder tabs no longer reopen a retired location after Haiku reports its volume was unmounted.
+
 ## 0.38.0-36 (private test candidate)
 
 - When Haiku reports that a volume was unmounted, file panels browsing it clear their selection and return to Disks. Panels on other volumes stay where they are.

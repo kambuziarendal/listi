@@ -34,6 +34,7 @@ public:
   void Rename(const std::string &);
   void SetShown(bool filesPage, bool always);
   void UpdateLabel();
+  void ForgetUnmountedDevice(int32 device);
   size_t Count() const { return tabs.size(); }
   size_t Index() const { return active; }
   int64 ActiveId() const { return tabs[active].id; }
