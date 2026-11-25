@@ -1,6 +1,6 @@
 # Qualifying a Haiku x86_64 package
 
-See the [0.38.0-23 alpha release notes](https://github.com/kambuziarendal/listi/releases/tag/v0.38.0-23) for results specific to that package. The procedure below is for qualifying a build.
+See the [0.38.0-37 alpha release notes](https://github.com/kambuziarendal/listi/releases/tag/v0.38.0-37) for results specific to that package. The procedure below is for qualifying a build.
 
 1. Choose the exact commit to qualify. Use a clean release checkout on Haiku;
    save `git rev-parse HEAD` and check `git status --porcelain` is empty.
