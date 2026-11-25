@@ -4,6 +4,7 @@
 #include "../src/Common.h"
 #include "../src/FunctionButtonBank.h"
 #include "../src/ImagePreview.h"
+#include "../src/InspectorEditor.h"
 #include "../src/FileClipboard.h"
 #include "../src/FolderTabs.h"
 #include "../src/MainWindow.h"
@@ -36,7 +37,9 @@
 #include <cassert>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <stdexcept>
 #include <sys/stat.h>
@@ -205,6 +208,145 @@ static void CheckWorkspaceSplit(Listi::WorkspaceSplit &split, BView *first) {
   assert(near(split.ItemWeight(0), 0.48f));
   split.RememberWeights(layout, true);
   assert(near(layout.splitWeights[2], 0.2f));
+}
+
+static void CheckFloatingInspector(BApplication &app) {
+  char directory[] = "/tmp/Listi-floating-inspector-XXXXXX";
+  assert(mkdtemp(directory));
+  const auto root = std::filesystem::canonical(directory);
+  const std::string first = (root / "first.txt").string();
+  const std::string second = (root / "second.txt").string();
+  const std::string content = "Second file\n";
+  std::ofstream(first) << "First file\n";
+  std::ofstream(second) << content;
+  Preferences prefs;
+  prefs.workspace = Workspace::tviskipt;
+  prefs.SetPreview(true);
+  BrowserRequest request;
+  request.path = root.string();
+  auto *browser = CreateMainWindow(prefs, {}, {}, false, {}, false, request);
+  auto *other = CreateMainWindow(prefs, {}, {}, false, {}, false, request);
+  BMessenger owner(browser), independent(other);
+  browser->Show();
+  other->Show();
+  auto with = [](const BMessenger &target, auto check) {
+    if (target.LockTargetWithTimeout(500000) != B_OK)
+      return false;
+    BLooper *looper = nullptr;
+    target.Target(&looper);
+    const bool result = check(*static_cast<BWindow *>(looper));
+    looper->Unlock();
+    return result;
+  };
+  auto wait = [](auto check, const char *label) {
+    const auto until = system_time() + 8000000;
+    while (!check()) {
+      if (system_time() >= until) {
+        fprintf(stderr, "FAIL %s\n", label);
+        std::exit(1);
+      }
+      snooze(20000);
+    }
+    printf("PASS %s\n", label);
+  };
+  auto select = [&](const BMessenger &target, const char *name) {
+    return with(target, [&](BWindow &window) {
+      auto *panel = dynamic_cast<Listi::PanelTools *>(window.FindView("first panel tools"));
+      if (!panel || !panel->Files().LocationValid() || panel->Files().IsScanning())
+        return false;
+      panel->Files().MatchPattern(name, true);
+      return !panel->Files().SelectedPath().empty();
+    });
+  };
+  auto find = [&](const char *title) {
+    for (int32 i = 0; i < app.CountWindows(); ++i) {
+      auto *window = app.WindowAt(i);
+      if (window && window->Title() && std::string(window->Title()) == title)
+        return BMessenger(window);
+    }
+    return BMessenger{};
+  };
+  auto workspace = [&] {
+    BMessage request(B_GET_PROPERTY), reply;
+    request.AddSpecifier("Workspace");
+    if (owner.SendMessage(&request, &reply, 1000000, 1000000) != B_OK)
+      return std::string{};
+    return std::string(reply.GetString("result", ""));
+  };
+  ImagePreview *original = nullptr;
+  wait([&] { return select(owner, "first.txt") && with(owner, [&](BWindow &window) {
+    original = dynamic_cast<ImagePreview *>(window.FindView("inspector"));
+    return original && !original->IsHidden();
+  }); }, "browser exposes a docked Inspector");
+  assert(owner.SendMessage(Listi::kDetachInspector) == B_OK);
+  BMessenger floating;
+  wait([&] {
+    floating = find("Listi: Inspector");
+    return with(floating, [&](BWindow &window) {
+      return window.FindView("inspector") == original && original->File() == first;
+    });
+  }, "detach the same Inspector and preview the browser selection");
+  assert(with(floating, [&](BWindow &window) {
+    window.ResizeTo(640, 460);
+    return window.Bounds().Width() == 640 && window.Bounds().Height() == 460;
+  }));
+  assert(owner.SendMessage(kQuickView) == B_OK);
+  assert(workspace() == WorkspaceName(Workspace::tviskipt));
+  wait([&] { return with(owner, [&](BWindow &window) {
+    auto *right = window.FindView("second panel tools");
+    return right && !right->IsHidden() && !window.FindView("inspector");
+  }); }, "Quick view keeps both panels docked and raises the floating Inspector");
+  wait([&] { return select(owner, "second.txt") && select(independent, "first.txt"); },
+       "change selections in both browsers");
+  wait([&] { return with(floating, [&](BWindow &) { return original->File() == second; }); },
+       "Inspector follows its owner, not the other browser");
+  assert(owner.SendMessage(kEdit) == B_OK);
+  BTextView *body = nullptr;
+  wait([&] { return with(floating, [&](BWindow &window) {
+    body = dynamic_cast<BTextView *>(window.FindView("editor text"));
+    if (!body)
+      return false;
+    body->Insert("Unsaved draft ");
+    return original->HasEditor();
+  }); }, "Edit opens the Inspector's embedded editor while floating");
+  BMessage change(kWorkspace);
+  change.AddInt32("workspace", int32(Workspace::smidja));
+  assert(owner.SendMessage(&change) == B_OK);
+  wait([&] { return workspace() == WorkspaceName(Workspace::smidja) &&
+    with(floating, [&](BWindow &window) { return window.FindView("editor text") == body; });
+  }, "Smiðja keeps the detached Inspector and its draft");
+  assert(!InspectorEditorsAllowQuit());
+  assert(owner.SendMessage(B_QUIT_REQUESTED) == B_OK);
+  wait([&] {
+    return with(find("Cannot close Listi"), [&](BWindow &window) {
+      auto *alert = dynamic_cast<BAlert *>(&window);
+      return owner.IsValid() && alert && alert->ButtonAt(0)->Invoke() == B_OK;
+    });
+  }, "dirty floating editor blocks closing its owner and remains open");
+  assert(independent.SendMessage(B_QUIT_REQUESTED) == B_OK);
+  wait([&] { return !independent.IsValid() && floating.IsValid(); },
+       "dirty floating editor does not block an unrelated browser from closing");
+  assert(floating.SendMessage(B_QUIT_REQUESTED) == B_OK);
+  wait([&] { return !floating.IsValid() && with(owner, [&](BWindow &window) {
+    auto *editorText = dynamic_cast<BTextView *>(window.FindView("editor text"));
+    return window.FindView("inspector") == original && editorText == body &&
+           std::string(editorText->Text()).find("Unsaved draft ") != std::string::npos;
+  }); }, "closing the floating window redocks the same unsaved draft");
+  assert(owner.SendMessage(Listi::kDetachInspector) == B_OK);
+  wait([&] {
+    floating = find("Listi: Inspector");
+    return with(floating, [&](BWindow &window) {
+      if (window.FindView("editor text") != body)
+        return false;
+      body->SetText(content.c_str());
+      return true;
+    });
+  }, "detach the existing draft again without creating another Inspector");
+  assert(InspectorEditorsAllowQuit());
+  assert(owner.SendMessage(B_QUIT_REQUESTED) == B_OK);
+  wait([&] { return !owner.IsValid() && !floating.IsValid(); },
+       "closing the clean owner also closes its detached Inspector");
+  assert(unlink(first.c_str()) == 0 && unlink(second.c_str()) == 0 && rmdir(directory) == 0);
 }
 
 static void CheckWindowCLIQuit(BApplication &app) {
@@ -867,6 +1009,7 @@ int main(int argc, char **argv) {
   assert(split);
   CheckWorkspaceSplit(*split, left);
   window->Quit();
+  CheckFloatingInspector(app);
   CheckWindowCLIQuit(app);
   puts("Main window: menu shortcuts and workspace routing OK");
 }

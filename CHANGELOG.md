@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.38.0-28 (local candidate)
+## 0.38.0-29 (local candidate)
 
 - Detach the live Inspector, move or resize its window, and dock it again without losing the selection or an open text draft.
 
