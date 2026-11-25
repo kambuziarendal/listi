@@ -17,6 +17,10 @@ Choose **View > Workspace**. Switching layouts keeps your locations, selections 
 | **Tvískipt** | Keep a source and a destination side by side. Tab changes which pane is active. |
 | **Smiðja** | Browse two locations with independent sidebars and tools such as search, Inspector or a shell. |
 
+![A compact Einn window listing the Lunar atlas folder with its History (3) button](screenshots/einn.png)
+
+*One folder, one window: the status line gives access to three saved versions.*
+
 **Choose what the folder shows.** Under **View > Active pane view**, use Details for sortable columns, Mini icons for names beside small icons, Icons or Large icons for a grid, Thumbnails for pictures, or Miller columns to keep ancestor folders visible. Remember a view for a particular folder without changing the workspace default. Details loads large folders in batches, so you can navigate before every row appears.
 
 **Keep your place.** Each pane has its own Back and Forward history. Type a path, revisit Recent folders or choose a saved Place from Go. Duplicate, name or reorder folder tabs; reopen a closed tab at the tab strip. **Window > Detach tab to Einn window** moves the active tab to its own compact window. Open another browser with **Files > New window** or **Open in new window**. Name windows and switch among them in **Window > Open windows…**.
@@ -32,6 +36,10 @@ Choose **View > Workspace**. Switching layouts keeps your locations, selections 
 | One list of a local tree | **Flat View** | Sort by subfolder, name, type, size or date across nested folders. Stop a scan to keep partial results; this is not a live search. |
 | Matches across subfolders | **Listi > Find files…** | Combine name, extension, size and dates. Save criteria, or use a BFS formula with Live updates. Open results as a file panel, preview a hit or use **Show original**. |
 
+![Find files shows Observations.md and Observation log.txt with their different original folders](screenshots/recursive-search.png)
+
+*Search reaches into Field notes without changing the folder open in the file pane.*
+
 Type the start of a name to focus an entry; Space toggles selection. Filtered-out entries do not silently rejoin a selection. A search result refers to the original file, not a copy; the list is not a paste destination. [Filtering and search](GUIDE.md#filtering-and-search)
 
 ## Copy, move and recover
@@ -39,6 +47,10 @@ Type the start of a name to focus an entry; Space toggles selection. Filtered-ou
 1. In **Tvískipt**, open the destination on one side and select files on the other. **Copy to other panel** (Command+Shift+C) uses the target shown at the button. For another window, **Files > Copy to window…** lets you choose its writable local folder. Accepted jobs do not follow later navigation.
 2. On a name conflict, choose for **this file** unless you explicitly apply the choice to the rest. **Keep both** proposes a numbered name for a regular local copy. Dragging onto a highlighted local subfolder offers Copy or Move; clipboard Paste targets the active folder.
 3. Read the one-line receipt. **Listi > Operations > Details** shows paths, results and which job failed. Pause/resume, cancel a running or waiting job, or cancel the queue. Cancellation does not undo completed files.
+
+![Lunar atlas in Details on the left; Issue 01 in Icons on the right, with Copy and Move buttons naming Issue 01](screenshots/two-panels.png)
+
+*Same workspace, different views: the buttons identify Issue 01 as the transfer destination.*
 
 **Moving between disks:** Listi copies and checks a root before sending its original to the source volume's Trash. If no supported source Trash is available, use Copy. A normal copy to FAT can ask to omit unsupported Haiku attributes for that job and volume; Move never gets that exception. Verify important copies after remounting. An NTFS volume reporting “device busy” is not ready to unplug.
 
@@ -50,6 +62,10 @@ Open a local BFS folder and choose **Files > Folder history…**. Choose a dedic
 
 In a configured folder the version count is clickable. Right-click the background to choose a separate history window or a read-only preview in the other pane. Drag the timeline, use the arrows or scroll between dates. Additions, removals and changes are relative to the preceding version; browsing never restores anything.
 
+![Folder history timeline at version three, showing Contact sheet.txt as Added and separate file and folder restore buttons](screenshots/history-timeline.png)
+
+*The selected date shows which entries changed. Nothing is restored until you choose a restore action.*
+
 Choose **Restore file…** for one regular file or **Restore folder…** for the whole saved version. Pick a containing folder and confirm the proposed unused name. There is no in-place rollback, merging or overwrite. The helper stops at its limits rather than deleting old versions; this is neither an atomic snapshot nor an independent backup. [Setup, limits and restore](GUIDE.md#automatic-folder-history-optional)
 
 ## Look inside a file
@@ -59,6 +75,10 @@ Choose **Restore file…** for one regular file or **Restore folder…** for the
 - **Images:** fit, zoom to actual pixels or pan. Read recognised JPEG EXIF data locally; showing GPS coordinates is a separate choice. Drop an image on a local panel and choose **Convert here** for a new file. JPEG turns transparency white; choose PNG to retain it.
 - **PDF, audio and video:** turn PDF pages or play a short media sample with installed Haiku codecs. Selecting the file does not start playback. Open a local file in MediaPlayer for full playback.
 - **Text and code:** Markdown and HTML are shown as source. Choose **Edit** for supported writable local UTF-8 files up to 256 KiB. Find and replace, jump to a line, wrap text, undo or detach the draft. Save checks for external changes; Discard leaves the original alone. **Edit in external editor** is a separate command.
+
+![Listi editing palette.py beside the project files, with syntax colours, Detach and Done controls](screenshots/source-editor.png)
+
+*Edit the selected source file without leaving the list. Detach keeps the draft open in its own window.*
 
 [Preview controls and editor limits](GUIDE.md#inspect-and-edit-a-file)
 
@@ -70,9 +90,17 @@ Choose **Restore file…** for one regular file or **Restore folder…** for the
 
 **Compare and share a list.** **Listi > Compare folders…** compares names and sizes or reads contents for SHA-256. It shows differences rather than synchronising or deleting, and doesn't compare permissions or BFS attributes. **Copy as** puts names or paths on the clipboard; **Export file list…** writes selected or visible entries to a new CSV. Pasting clipboard text or an image into a writable folder can instead create a new text file or PNG. [Comparison](GUIDE.md#folder-comparison) · [CSV export](GUIDE.md#export-a-file-list)
 
+![Folder comparison with Observations.md marked Different content and two unequal SHA-256 digests](screenshots/folder-compare.png)
+
+*Both copies are 258 bytes. Comparing their contents reveals the edit that a size check would miss.*
+
 ## Work inside archives and on servers
 
 **Archives.** Open a supported archive like a folder. **Files > Archives** creates an archive from a selection or extracts to a new folder. Change format and compression for one job, or save preferences separately. Supported ZIP and 7z creation can use AES-256; 7z can also encrypt names.
+
+![Create archive dialog showing Observations.md.zip in the Issue 01 destination with ZIP selected](screenshots/create-archive.png)
+
+*For an ordinary ZIP, confirm the destination and filename. Format options stay one click away.*
 
 Writable local formats support selected additions, renames and removals through a rebuild. Edit a regular member in an external editor and resume its save-back session later. Decrypted working copies can remain on disk. Reading a format does not imply it is writable: examples include selected multipart archives (read only) and single-volume RAR5 (Store writer). [ZIP, 7z, TAR, RAR, ISO and other formats](GUIDE.md#archives) · [Archive editing](GUIDE.md#editing-an-archive-member)
 
@@ -83,5 +111,9 @@ Writable local formats support selected additions, renames and removals through 
 **Properties and file types.** Inspect a local entry's size, timestamps and permissions, edit supported typed BFS attributes, or add an attribute column to Details. **Make searchable…** checks or creates a supported volume index; it does not backfill old values. **Open with…** can launch an app once or explicitly change the type default. **File type and icon…** opens Haiku FileTypes for the item. Add a folder to Haiku's Open/Save panel favourites independently of Listi Places.
 
 **Terminals and preferences.** Start **Listi > Terminal here** in the active local folder. Keep separate left and right shells, move the dock or detach a running CLI without losing scrollback. Launch an external terminal or use the optional command field for a separate shell. Settings also control fonts, colours, columns, default views, action buttons and preferred applications.
+
+![A shell docked under the two file panels showing the Lunar atlas working directory and its files](screenshots/terminal.png)
+
+*The left pane’s shell keeps its working directory as you browse.*
 
 [Haiku attributes and queries](GUIDE.md#bfs-columns-and-searchable-attributes) · [Tools and preferences](GUIDE.md#tools-and-preferences) · [Verification and known limits](VERIFICATION.md)

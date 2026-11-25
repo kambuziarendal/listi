@@ -56,6 +56,10 @@ a network server. Unsupported actions are disabled.
   excluded; it is not MIME detection. Recognised compressed-TAR suffixes remain
   distinct from a plain compressed stream.
 
+![The local file menu with Selected files active, This folder available, and actions for the selected image](screenshots/file-context.png)
+
+*Choose the target first: Selected files applies to the image; This folder acts on the containing folder.*
+
 **Sorting and type selection are different:** sorting supports **Name, Size and
 Modified**, each ascending or descending. in the ordinary local Details view. Recursive Flat View also offers **File type** sorting.
 
@@ -83,6 +87,10 @@ Modified**, each ascending or descending. in the ordinary local Details view. Re
 - **Keyboard selection:** Space toggles the focused entry; icon views also
   support arrows, Shift+arrows for range selection, Home/End and Enter to open.
   Tab switches panels in the dual-panel workspaces.
+
+![The pattern-selection confirmation reporting two visible text matches before replacing the selection](screenshots/pattern-selection.png)
+
+*Review the visible match count before selecting the files.*
 
 ### Search and comparison conveniences
 
@@ -120,7 +128,7 @@ Modified**, each ascending or descending. in the ordinary local Details view. Re
 - **Properties:** inspect metadata and explicitly save supported local typed
   attributes or ordinary permissions; opening the window alone changes nothing.
 - **Workspace defaults:** All workspaces start in Details. Change each default in **Listi > Settings**. A remembered
-  folder view takes priority. **View > File view > Use workspace default**
+  folder view takes priority. **View > Active pane view > Use workspace default**
   clears the current folder and panel overrides.
 - **Settings:** show/hide file icons, Size/Modified columns, the action button
   bank and the command field where the workspace exposes them; choose list font,
@@ -205,9 +213,9 @@ choices.
 
 Choose the view that fits the task:
 
-- **Listi > Quick view** (Command+Shift+P) shows the current selection next to the active panel in any workspace. In a two-panel layout, it temporarily replaces the other panel on screen. Move through the active list to inspect another file. Toggle Quick view off to return to the previous layout; the other panel has not navigated away. Space still selects files.
+- **View > Quick view** (Command+Shift+P) shows the current selection next to the active panel in any workspace. In a two-panel layout, it temporarily replaces the other panel on screen. Move through the active list to inspect another file. Toggle Quick view off to return to the previous layout; the other panel has not navigated away. Space still selects files.
 - From a file’s context menu, **Preview in other panel** (or **Preview beside file list** in a single-panel workspace) opens Quick view without toggling it off. Click **×** or press **Esc** to return to the file list. **Preview in window** opens a separate viewer.
-- **View** (Command+Shift+V) opens a separate viewer for one file. Escape or Command+W closes it. **Listi > Inspector panel** keeps an inspector in a two-panel layout instead.
+- **View** (Command+Shift+V) opens a separate viewer for one file. Escape or Command+W closes it. **View > Inspector panel** keeps an inspector in a two-panel layout instead.
 - **Edit** (Command+E) opens a supported local text file for editing inside the lister. You can also click **Edit** in its preview. Use **Detach** to move the live draft into a separate editor window, or **Done** to return to the preview. For the configured external editor, use **Files > Edit in external editor**.
 
 ### Text, source code and unknown formats
@@ -251,6 +259,10 @@ When converting an image on drop, choosing JPEG puts transparent pixels on a whi
 - **Camera information:** for a JPEG with recognised EXIF tags, **Image… > Camera details…** can show the camera, lens, capture time and exposure settings. **Show GPS coordinates…** is a separate, explicit choice when location tags are present. The coordinates do not appear in ordinary camera details; no map or network lookup is used to interpret the tags.
 - **PDF:** use **Previous** and **Next** to inspect individual pages.
 - **Audio or video:** **Play preview** plays a sample of up to 15 seconds using installed Haiku codecs. Choose **Stop preview** to stop early. For a local file, **MediaPlayer** opens the full Haiku player instead. Selection alone does not play or launch anything.
+
+![The first page of a Lunar atlas guide displayed in the right-hand Quick view](screenshots/pdf-preview.png)
+
+*Read a PDF page beside the folder it belongs to.*
 
 ## Panels and jobs
 
@@ -408,9 +420,9 @@ editor's limits remain read-only; this is not a MIME editor or bulk attribute to
 Detected concurrent changes block editing, but checks cannot lock out all other
 programs or guarantee power-loss atomicity.
 
-![Local Properties with typed attributes and explicit save controls](screenshots/listi-properties-0.10.0.png)
+![Local Properties lists typed BFS attributes for the photograph, including Media:Width and its photo credit](screenshots/properties.png)
 
-*Properties, captured in 0.10.0 with synthetic data; cropped to the native window.*
+*Inspect the stored attribute value and type before editing or adding a Details column.*
 
 **Listi > Add to Haiku file panel favorites…** adds the active local folder to
 the favorites in Haiku Open and Save panels. Choose another name if one is
@@ -425,6 +437,10 @@ original item, not a symbolic link.
 regular file. **Open once** does not change associations. To change what Haiku uses for other files of the displayed type, select an application and choose **Set type default**. This changes the Haiku association, not just Listi, and does not open the file. A file with its own preferred application keeps that override. If the type is unknown, use **Open once** instead. Remote/archive members
 must be copied locally for that dialog; ordinary archive Edit has its own
 save-back workflow described below.
+
+![Open with dialog showing ShowImage, WebPositive and WonderBrush for a JPEG](screenshots/open-with.png)
+
+*Open once leaves Haiku’s type default alone; changing the default is a separate button.*
 
 ## Filtering and search
 
@@ -468,10 +484,6 @@ hits and 250,000 examined entries, with explicit incomplete/error outcomes.
 Content, archive-internal, remote and multi-volume search are not supported.
 Date filters apply to current files, not historical snapshots.
 
-![Search with extension, size and date criteria](screenshots/listi-search-filters-0.30.0.png)
-
-*Find files, captured in 0.30.0 with synthetic fixtures.*
-
 ## Folder comparison
 
 **Listi > Compare folders...** compares relative names and types recursively.
@@ -483,10 +495,6 @@ Keep both folders idle for meaningful results. Comparison is not a snapshot;
 remote checks depend on the server's metadata, and hashing can download entire
 files. Limits are 100,000 entries per side, 256 levels and 5,000 displayed rows;
 truncation and incomplete scans are reported.
-
-![SHA-256 comparison distinguishing equal-size files with different contents](screenshots/listi-folder-compare-0.28.0.png)
-
-*Comparison, captured in 0.28.0; the selected files have equal size but different content.*
 
 ## Archives
 
@@ -549,10 +557,6 @@ Listi opens a private working copy in the configured external editor. While the
 edit window remains open, stable editor saves can be written back through a
 verified archive rebuild. **Save now** retries a paused save; external archive
 changes stop automatic saving rather than being silently overwritten.
-
-![Archive edit window after verified save-back, with retained working copy](screenshots/listi-archive-saveback-0.27.0.png)
-
-*Archive save-back, captured in 0.27.0 with a synthetic text file.*
 
 Working copies and recovery records remain under
 `~/config/settings/Listi_archive_edits/edit-*/`. **Decrypted contents are not

@@ -2,9 +2,9 @@
 
 Listi is a native Haiku file manager. Browse a single folder, compare two panels side by side, or use the Smiðja workspace to keep a file list, search results and a terminal in the same window.
 
-![Listi showing a photograph beside its file list](docs/screenshots/listi-quick-view-0.35.0.png)
+![Listi on Haiku: the Lunar atlas folder on the left and the selected Blue Marble photograph on the right](docs/screenshots/photo-quick-view.png)
 
-*Quick view in Listi 0.35.0. [Image credit](docs/screenshots/CREDITS.md).*
+*Quick view follows the selection without opening a second application. [Photograph: NASA / Apollo 17 crew.](docs/screenshots/CREDITS.md)*
 
 ## Feature overview
 
