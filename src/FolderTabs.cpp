@@ -227,12 +227,20 @@ void FolderTabs::SetShown(bool filesPage, bool always) {
   SetViewVisible(this, pageVisible && (pinned || Count() > 1 || CanReopen()));
 }
 void FolderTabs::Rebuild() {
-  UpdateLabel();
+  Arrange();
   SetShown(pageVisible, pinned);
 }
 
 void FolderTabs::UpdateLabel() {
-  Arrange();
+  // Navigation can notify the window again after Restore() laid out the strip.
+  // Only the active label can change without a structural rebuild.
+  for (const auto &slot : slots) {
+    if (slot.tab == active) {
+      if (slot.label != LabelAt(active))
+        Arrange();
+      return;
+    }
+  }
 }
 
 std::string FolderTabs::LabelAt(size_t index) const {
