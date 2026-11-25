@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.38.0-22 alpha](https://github.com/kambuziarendal/listi/releases/tag/v0.38.0-22)
+
+- Added local BFS folder versions and an optional low-priority Deskbar history helper. Browse saved points by date in a window or in the opposite panel. Restore a single regular file or an entire folder into a new path.
+- Added named working sets with a preview, Copy to window, guided setup, compact Einn transitions and Mini icons. Restored searches stay out of Recent folders; unchanged results still report a stopped live search.
+- Copy and Move show their destination. Conflict choices are per item unless explicitly applied to the batch. Trash restore shows original paths. For an ordinary copy to FAT, Listi can request consent to omit unsupported Haiku attributes without relaxing Move safeguards.
+- Simplified successful job feedback, distinguished previous errors and selected rows, and added New file on the local folder background. Improved Inspector transitions, screenshot scaling, ZIP creation and the transparency explanation for JPEG conversion.
+- Includes large-directory batching, FAT32/NTFS copy improvements, fractional file times where available and protection against silent replacement of network account credentials. See [verification and limits](docs/VERIFICATION.md).
+
+## [0.38.0-13 test candidate](https://github.com/kambuziarendal/listi/releases/tag/test-4515)
+
+Added independent windows and tabs, search as a file list, Keep both for local copy conflicts, and selection/list export. See the release record for that candidate.
+
 ## [0.38.0-12 alpha test candidate](https://github.com/kambuziarendal/listi/releases/tag/v0.38.0-12)
 
 - An open destination folder now shows newly copied files in batches. Finishing or cancelling a job still refreshes the final listing.

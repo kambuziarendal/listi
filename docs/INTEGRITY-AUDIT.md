@@ -18,4 +18,4 @@ Audit input: haiku-native at 255a06f. Working baseline: 14d782f, private Listi 0
 | L: testable modules | Prefer separations justified by specific coverage gaps | Keep native integration coverage |
 | M: metadata and connection UI | Distinguish clear reporting from workflow changes | Verify existing behavior before proposing changes |
 
-Baseline evidence (already tested, not a rerun of the new candidate): on Haiku x86_64 0.38.0-5 passed 78 default native test programs, installed self-test 58/58, full-volume Copy and Move, and 27 network integration scenarios. These tests did not inject same-length remote corruption. See the baseline logs in listi-hunt-27910. New native results must identify the actual source and package exercised.
+Baseline evidence (already tested, not a rerun of the new candidate): on Haiku x86_64 0.38.0-5 passed 78 default native test programs, installed self-test 58/58, full-volume Copy and Move, and 27 network integration scenarios. These tests did not inject same-length remote corruption. New native results must identify the actual source and package exercised.

@@ -8,8 +8,6 @@ The application baseline is 64e26b39970d2391c43da3b6446b5756ac440985
 branch starts at a969d2c, which adds the driver receipts. Between the
 application baseline and a969d2c only ci/run-extended.py,
 tests/run-network-interruptions.py and docs/RELIABILITY-HARDENING.md differ.
-The older followup/performance-27934 checkout had uncommitted runner work;
-it was not reset or used as the application baseline.
 
 The historical warm-source, fresh-directory timings in timing.log, in execution
 order (microseconds), are 123051, 102490, 101088 on revision 10 and 571349,
@@ -168,8 +166,6 @@ conflict OCR attempt stopped before clicking because the mouse pointer obscured
 the label; the retry verified the label and file contents. The first VM
 preflight stopped before build because the scratch disk was not mounted; the
 operator preserved the seeded disk and mounted a new disposable BFS volume.
-All original receipts, including failed attempts, are under
-`reports/listi-27947/native/` in the private operations evidence tree.
 
 **Storage negative control:** the unchanged extended test failed on the fresh
 96 MiB BFS even though it passed on the original seeded fixture. Closing two
@@ -215,10 +211,7 @@ VM was rebooted, trust restored and installed hashes rechecked. The second
 refused to overwrite a surviving fixture directory. Its contents were retained
 under a different name. The third run exited zero. These are not three green
 runs; the first stall is not root-caused. Trust restoration and shutdown
-were verified. Raw evidence and screenshots: private operations tree
-`reports/listi-27947/native-final/`, specifically verified-final.json,
-run-status.log, extended-verified/, recovery.png, gui-Replace.png and inflight.png.
-The same report root holds perf/*.jsonl and ci/exact-{gcc,clang,lint}.log.
+were verified.
 
 Linux GCC and Clang each passed the portable checks on the pinned source,
 including compiler/assertion/missing-case negative controls, 24 transfer fault

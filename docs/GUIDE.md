@@ -1,6 +1,6 @@
 # Workflow guide
 
-This guide describes the development source. The [0.38.0-12 packaged alpha](../README.md#install) includes the latest transfer and recovery changes. New to Listi? Start with the [feature tour](FEATURES.md). Try file operations on disposable copies and keep independent backups.
+This guide describes the [0.38.0-22 alpha for Haiku x86_64](../README.md#install). New to Listi? Start with the [feature tour](FEATURES.md). Try file operations on disposable copies and keep independent backups.
 
 ## Window names and layouts
 
@@ -16,7 +16,7 @@ A CLI shows where its shell started, not the shell’s current directory. Dockin
 a CLI removes its floating window from the list without stopping the shell.
 Names normally last for the life of the window. To reuse a layout, choose
 **Window > Save working set…**, name it and select the file windows to include.
-**Open working set…** adds new windows with their saved names, positions,
+**Open working set…** previews the number of windows and their active panel locations before opening them. It adds new windows with their saved names, positions,
 layouts and folder tabs. Opening a set does not close other windows, launch
 shells, repeat file operations or overwrite the saved set. If a folder is
 unavailable, reconnect its volume and reload, or enter another location.
@@ -32,6 +32,8 @@ folder requests should open windows, add tabs or ask each time. Navigation
 within a panel is unchanged. **Apply setup** saves the choices; **Skip** or
 **Cancel** keeps the current settings. Reopen the setup through **Help > Layout
 introduction…**. Existing preferences are not reset on upgrade.
+
+Opening **Einn**, switching to it, or detaching a tab to it gives you a compact single-panel window. Resize it normally. Switching back in the same window restores the previous multi-panel frame. To save versions while Listi is closed, see [automatic folder history](#automatic-folder-history-optional). The helper remains off until you enable it in its settings.
 
 ## Small features at a glance
 
@@ -55,8 +57,7 @@ a network server. Unsupported actions are disabled.
   distinct from a plain compressed stream.
 
 **Sorting and type selection are different:** sorting supports **Name, Size and
-Modified**, each ascending or descending. **Sort by file type is not implemented**
-in this alpha.
+Modified**, each ascending or descending. in the ordinary local Details view. Recursive Flat View also offers **File type** sorting.
 
 ### Navigation, views and selection
 
@@ -244,6 +245,8 @@ application that already has the file open.
 
 ### Photos, PDF and media
 
+When converting an image on drop, choosing JPEG puts transparent pixels on a white background. Choose PNG instead to retain transparency when the PNG translator is available. Conversion writes a new file; it does not modify the original.
+
 - **Photos:** open **Image…** for **Fit to window**, **Actual pixels (100%)**, **Zoom in** or **Zoom out**. Scroll over the image to zoom; drag it to pan. These controls do not crop or resize the original file.
 - **Camera information:** for a JPEG with recognised EXIF tags, **Image… > Camera details…** can show the camera, lens, capture time and exposure settings. **Show GPS coordinates…** is a separate, explicit choice when location tags are present. The coordinates do not appear in ordinary camera details; no map or network lookup is used to interpret the tags.
 - **PDF:** use **Previous** and **Next** to inspect individual pages.
@@ -299,7 +302,7 @@ not mean an in-flight write has stopped, and it does not undo completed work.
 See the [virtual USB result](VERIFICATION.md#0361-3-package-results) and the
 [physical USB test, not yet run](VERIFICATION.md#physical-usb-disconnect-during-copy).
 
-In the development version, cancelling an upload does not start another
+Cancelling an upload does not start another
 download to verify or remove temporary files. If the old destination has
 already been renamed, its contents may be at the reported backup path rather
 than the original name. Keep the local source and check the destination and
@@ -641,6 +644,11 @@ From Terminal, use `/boot/system/apps/Listi --new-window [directory]`. Without a
 
 **Close window** (Command+W) closes that browser; **Quit Listi** (Command+Q) requests application-wide shutdown. Close a browser’s CLI sessions and finish or cancel its file operations first. Closing the last browser normally quits Listi. Additional browsers keep layout changes for the session; global preferences, Places, and saved searches are shared.
 
+**Copy as** in the file context menu copies human-readable text, one item per
+line, without shell quoting. Names retain their extensions. Relative paths
+start at the displayed folder (the root in Flat View); this option is disabled
+in search results. A newline in a filename remains a newline in the text.
+
 ### Export a file list
 
 In a Files panel (including a search list), choose **Files → Export file list…**.
@@ -699,7 +707,7 @@ reopen it to explicitly connect again.
 ### Automatic folder history (optional)
 
 1. In Listi, choose **Files → Automatic history settings…**. It starts off
-   and nothing is monitored until you enable it.
+   and nothing is monitored until you enable it. **How it works** opens the built-in walkthrough.
 2. Set up to three source/history pairs. Use **Choose…** or enter absolute
    paths. Each source and each existing, dedicated history folder must be
    on local BFS and separate from all other selected folders. Use an empty

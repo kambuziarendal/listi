@@ -20,6 +20,7 @@ Its interface uses Haiku controls, system colours, MIME icons and Layout Kit.
   ordered bank of existing actions. Profiles contain layout state, not paths,
   credentials, selections, running jobs or pending confirmations. Configurability must not
   disable safety checks or hide operation targets.
+- **Folder versions, not snapshots.** Local BFS history reuses objects for unchanged file bytes. Browsing a saved manifest is read-only. The optional Deskbar helper runs bounded checks outside the file manager; restoring publishes a new copy rather than rolling back a live directory. See the [history guide](GUIDE.md#manual-folder-history).
 - **Honest outcomes.** Report cancellation, errors and partial completion.
   Cancellation is not rollback, and a job log is not a backup.
 

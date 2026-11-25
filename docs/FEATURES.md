@@ -4,32 +4,32 @@ Listi is a native Haiku file manager. Browse one folder at a time or set up a
 source and destination side by side, then use the same menus, clipboard and
 file actions in either layout.
 
-The screenshots show earlier alpha builds. The [public 0.38.0-13 test package][release]
+The screenshots show earlier alpha builds. The [public 0.38.0-22 alpha][release]
 runs on Haiku x86_64. See [installation instructions](../README.md#install).
 Use disposable files when trying transfers; changing package versions does not undo operations.
 
 ## What changed since 0.38.0-12?
 
-**In the downloadable 0.38.0-13 candidate:**
+**Included in the public alpha:**
 
 - **Windows and tabs.** Open independent file windows, name them and switch between them. Each pane can have its own folder tabs. Duplicate, rename, reorder, close and reopen tabs, or detach one into its own window. Back and Forward remember the selection and visible position when possible. Queued jobs do not follow the active tab.
 - **Search as a file list.** Open a local search in a pane, preview or copy the selected original, and use Back to return. A live BFS query updates the list as matches change. Search results are not paste destinations. In recursive Flat View, sort by name, subfolder, file type, date or size.
 - **Copy, drop and export.** Use **Copy as** for names, full paths or relative paths where available. Export a captured selection or visible list to a new CSV file. Drop on a highlighted local subfolder, or confirm creation of a missing destination folder. For a local regular-file copy conflict, **Keep both** assigns a numbered name instead of replacing the original.
 - **Haiku integration.** Add the current folder to Haiku's Open/Save panel favorites, or open FileTypes for an individual file or folder. Help includes offline build and workspace information.
 - **Recover and keep browsing.** Inspect interrupted-operation records without first probing an unavailable disk. Large job reports are paged. Further changes bound archive listing and staging work, handle uncertain remote upload outcomes conservatively, preserve supported remote file times and reduce SMB contention while browsing during a transfer.
-
-**In the [public development branch](https://github.com/kambuziarendal/listi/tree/feature/listi-c-4515), after the downloadable candidate:**
-
 - **Save a working set** of selected file windows with their names, layouts, positions and folder tabs. Reopening it adds windows; it does not restart shells or replay file jobs.
 - **Copy to window…** sends a local selection to the active writable local folder in another file window. Its destination is checked rather than following later navigation.
 - **Layout introduction…** previews the four workspaces and lets you choose tools and how external folder requests open. Skip it to keep current preferences.
-
-**Implemented in 0.38.0-19, tested locally in Haiku, not in the public download:**
-
-- **Manual folder history.** Open a quiet local BFS folder and choose **Files > Folder history…**. Connect a separate, dedicated BFS folder outside the source tree. **Create point** records the tree; identical file bytes are reused, even after a rename. Browse a point read-only or **Restore as copy** into a new folder. Typed BFS attributes are preserved. An interrupted restore can leave an incomplete copy, not a replacement for the original. This is not an atomic snapshot, automatic backup or scheduled cleanup.
+- **Folder history on local BFS.** Save versions by hand, or enable the optional Deskbar helper for up to three configured folders. Click the version count or right-click the folder background to open its timeline in a window or the opposite panel. Restore a file or the whole saved tree as a new copy without replacing the original. The helper checks periodically; there is no atomic snapshot, automatic pruning or independent backup. See [setup, limits and restore](GUIDE.md#manual-folder-history).
 - **Large folders.** Details view appends rows in batches and limits pending work so you can leave a folder while it is still loading. In one Haiku VM benchmark with 100,000 files, leaving during a scan took about 0.4 seconds (median); leaving after the entire list was built still took about 5.5 seconds.
 - **Removable media.** Ordinary FAT32 copies survived a clean detach and reattach in a VM. Copies between BFS and NTFS passed content checks in both directions. Writable NTFS still reported “device busy” on unmount; unplugging at that point is not qualified. These are virtual-media checks, not physical-device results.
 - **Search, network and windows.** An unchanged search result still reports if live updates have stopped. Restored searches stay out of Recent folders. Local and SMB file metadata retain available fractional timestamps. A second login cannot silently replace the account bound to a server route; using a different account on that route requires a new process. Checking another window's destination no longer stalls the source window, and thumbnails retry when reader capacity returns.
+
+**Everyday changes in revision 22** ([25 workflows to try](UX-TODO.md)):
+
+- **Browsing.** Einn opens compactly, including when switching from a larger layout. Detach the current tab directly from Window or reopen a closed tab at the tab strip. Mini icons put names beside small icons. Selected rows are marked separately from keyboard focus; the pane filter and recursive search identify their different scopes.
+- **File jobs.** Copy and Move indicate the target. A conflict choice applies once unless you explicitly apply it to remaining conflicts. Restore from Trash previews its destinations. Right-click a local folder background to create a file; creation prompts identify the parent. Routine success uses a single line, while errors stay attached to the job and affected files. An ordinary copy to FAT can ask to copy file data without Haiku attributes; declining leaves the original intact. Move does not get this exception.
+- **Tools.** Preview active folders before reopening a working set. Less-used ZIP options are separated from the common creation path. Quick view supports inspecting screenshots at native size, Inspector switches from discarded text edits back to images, and JPEG conversion explains its white background. Select PNG when you need transparency.
 
 ## Set up the window for the task
 
@@ -257,6 +257,6 @@ layout profiles are not saved project sessions.
 
 *Language-model assistance was used during development and documentation.*
 
-[release]: https://github.com/kambuziarendal/listi/releases/tag/test-4515
+[release]: https://github.com/kambuziarendal/listi/releases/tag/v0.38.0-22
 [jobs]: GUIDE.md#panels-and-jobs
 [archives]: GUIDE.md#archives

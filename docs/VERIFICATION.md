@@ -4,7 +4,11 @@ Listi is alpha software that works directly on files. Tests provide evidence for
 specific cases, not proof that every filesystem, server or archive variant is
 safe. Use disposable fixtures and independent backups.
 
-## Current development build
+## 0.38.0-22 alpha
+
+The [release notes](https://github.com/kambuziarendal/listi/releases/tag/v0.38.0-22) identify the source, package digest and checks for this revision. The package is the tested binary, not a rebuild of the documentation branch. Local native tests run inside Haiku; they are not physical USB tests or hosted CI results. In particular, a successful copy to NTFS does not establish safe removal if the mounted volume still reports “device busy.”
+
+## Folder refresh measurements (0.38.0 development)
 
 On Haiku R1/beta6 x86_64 in QEMU, we copied 120 files of 64 KiB into an open folder on a throttled virtual USB disk. The panel started 78 and 77 directory scans in two baseline runs, versus 30 and 31 with the [refresh change](https://github.com/kambuziarendal/listi/commit/a85d258040e8d4e185c03cdf85b4465fcffed0fb). Every copied file matched its source. This counts scans, not UI latency or elapsed copy time. Separate GUI checks covered navigation away during a copy, external folder changes, cancellation and the final listing. The built-in self-test passed 58 of 58 checks.
 
@@ -12,19 +16,11 @@ An earlier [qualification run](POST-HARDENING-FOLLOWUP.md) measured the median t
 
 ## Hands-on testing on physical hardware
 
-The developer tests Listi on a ThinkPad X1 Carbon (6th Gen) running Haiku R1/beta6 directly on the hardware, not in a VM. Add one row per hands-on test. No individual result has been supplied yet. Use **Passed**, **Failed** or **Not tested** once the status is known; an unreported test is not necessarily untested.
-
-| Listi version | Haiku version / hrev | What was done | Outcome |
-| --- | --- | --- | --- |
-| TODO: ask developer | R1/beta6 / TODO: ask developer | TODO: ask developer | TODO: ask developer |
+Pre-release hands-on testing on Haiku identified failures that scripted checks had missed: an attributed screenshot could not be copied to a FAT stick, Inspector could identify a PNG without drawing it after discarding a text edit, and Einn inherited an oversized window. These observations motivated the revision 22 changes; they are not physical revalidation of the new package.
 
 ### Physical USB disconnect during copy
 
 **Disconnecting a physical USB disk during a copy has not been tested.** The steps below are a plan, not a result.
-
-| Listi version | Haiku version / hrev | Planned action | Outcome |
-| --- | --- | --- | --- |
-| TODO: ask developer | R1/beta6 / TODO: ask developer | Unplug the destination USB disk during a copy on the ThinkPad. | Not tested |
 
 1. Use disposable files and a spare USB disk. Record checksums for the source, a file already on the USB disk and an earlier completed copy.
 2. Start **Copy** in Listi. Unplug the USB disk while it is still being written to, then click **Cancel**. Record whether the window responds, the job's exact status and how long it stays in that state.
@@ -36,14 +32,14 @@ Much of the automated stress testing is LLM-assisted and runs in Haiku VMs. In t
 
 ### 0.36.1-3 package results
 
-The [candidate HPKG](https://github.com/kambuziarendal/listi/releases/tag/v0.36.1-3) was installed on Haiku R1/beta6 x86_64 in a VM (hrev: TODO: ask developer). The installed executable matched the tested build. All 71 native test cases and 58 built-in checks passed. The VM record also mentions the cases below. The record does not give separate outcomes for them.
+The [candidate HPKG](https://github.com/kambuziarendal/listi/releases/tag/v0.36.1-3) was installed on Haiku R1/beta6 x86_64 in a VM (hrev not recorded). The installed executable matched the tested build. All 71 native test cases and 58 built-in checks passed. The VM record also mentions the cases below. The record does not give separate outcomes for them.
 
 | Additional check (same package and VM) | Individual outcome |
 | --- | --- |
-| Full destination disk | TODO: ask developer |
-| Change folder contents during a copy | TODO: ask developer |
-| Rename and undo | TODO: ask developer |
-| Restore files with colliding names from Trash | TODO: ask developer |
+| Full destination disk | Not individually recorded |
+| Change folder contents during a copy | Not individually recorded |
+| Rename and undo | Not individually recorded |
+| Restore files with colliding names from Trash | Not individually recorded |
 
 The installed app refused a move between disks. During an explicit copy, disconnecting the virtual USB device late in the write left the job pending for over 100 seconds, even after cancellation was requested. It did not report success. After cold restart, the original, an unrelated destination file and an earlier completed copy matched their expected bytes. This was a virtual USB disconnect, not the [physical USB test](#physical-usb-disconnect-during-copy).
 
