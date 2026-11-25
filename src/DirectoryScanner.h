@@ -53,21 +53,38 @@ private:
   int64 current = -1;
   int pending = 0;
 };
-// The pane and its retired scanner may briefly coexist. Register against the
-// opened directory, but never install a stale reader's watch after navigation.
+// A retired scanner must never install a watch after its pane has navigated.
+// A pane watches either the opened directory or changes to the volume roster.
 class DirectoryWatch {
   std::mutex lock;
   std::optional<node_ref> node;
   int64 current = -1;
+  bool watchingVolumes = false;
 
 public:
   void Begin(int64 serial, bool keep, BMessenger target) {
     std::lock_guard<std::mutex> guard(lock);
     current = serial;
-    if (!keep && node) {
+    if (keep)
+      return;
+    if (watchingVolumes) {
+      // The mount watch has no node_ref, and no directory watch coexists.
+      stop_watching(target);
+      watchingVolumes = false;
+    } else if (node) {
       watch_node(&*node, B_STOP_WATCHING, target);
       node.reset();
     }
+  }
+  status_t InstallVolumes(int64 serial, BMessenger target) {
+    std::lock_guard<std::mutex> guard(lock);
+    if (current != serial)
+      return B_CANCELED;
+    if (watchingVolumes)
+      return B_OK;
+    const auto status = watch_node(nullptr, B_WATCH_MOUNT, target);
+    watchingVolumes = status == B_OK;
+    return status;
   }
   status_t Install(int64 serial, node_ref opened, BMessenger target) {
     std::lock_guard<std::mutex> guard(lock);

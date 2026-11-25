@@ -281,6 +281,9 @@ public:
         done.AddString("error", error.what());
       }
     } else if (path == "@disks") {
+      // Subscribe before enumerating so changes during the scan aren't lost.
+      if (watch && watch->InstallVolumes(serial, target) != B_OK)
+        done.AddBool("watchFailed", true);
       BVolumeRoster roster;
       BVolume volume;
       while (!deliveryFailed && generation->load() == serial &&

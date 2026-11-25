@@ -1458,9 +1458,13 @@ void Pane::MessageReceived(BMessage *m) {
     }
     break;
   }
-  case B_NODE_MONITOR:
-    ScheduleDirectoryRefresh();
+  case B_NODE_MONITOR: {
+    const auto opcode = m->GetInt32("opcode", 0);
+    const bool volumeChange = opcode == B_DEVICE_MOUNTED || opcode == B_DEVICE_UNMOUNTED;
+    if (volumeChange == (path == "@disks"))
+      ScheduleDirectoryRefresh();
     break;
+  }
   case B_COLORS_UPDATED:
     Apply(prefs);
     SetSource(active);
