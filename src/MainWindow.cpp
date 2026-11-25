@@ -118,6 +118,8 @@ BMessenger ConfirmClosingCLIs(BMessenger recipient, uint32 command, bool wholeAp
 bool CheckSharedQuitBlockers() {
   if (Listi::FolderHistoryBusy())
     ShowQuitBlocker("A folder history operation is running. Let it finish or cancel it, then try again.");
+  else if (FolderCompareBusy())
+    ShowQuitBlocker("A folder comparison is running. Let it finish or cancel it, then try again.");
   else if (!InspectorEditorsAllowQuit())
     ShowQuitBlocker("An editor is still open with unsaved changes or is busy. Check the editor before closing Listi.");
   else if (!FilePropertiesAllowQuit())

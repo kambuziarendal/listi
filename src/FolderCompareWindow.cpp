@@ -23,6 +23,7 @@
 #include <mutex>
 #include <thread>
 namespace {
+std::atomic<int> activeComparisons{0};
 constexpr uint32 kPathsChanged = 'cmpc';
 constexpr uint32 kQuick = 'cmqu', kHash = 'cmha', kDone = 'cmdn',
                  kTick = 'cmtk', kCancel = 'cmca', kFilter = 'cmfi',
@@ -134,6 +135,7 @@ class CompareWindow : public BWindow {
     haveResults = false;
     ClearRows();
     busy = true;
+    ++activeComparisons;
     Controls();
     Listi::CompareRequest request{left->Text(), right->Text(), checksum};
     heading = checksum ? "SHA-256 comparison. " : "Quick size comparison. ";
@@ -231,6 +233,8 @@ public:
     Show();
   }
   ~CompareWindow() override {
+    if (busy)
+      --activeComparisons;
     if (work)
       work->cancel = true;
     timer.reset();
@@ -278,11 +282,12 @@ public:
       }
       return;
     case kDone:
-      if (work) {
+      if (work && busy) {
         std::lock_guard<std::mutex> lock(work->mutex);
         result = std::move(work->result);
         haveResults = true;
         busy = false;
+        --activeComparisons;
         timer.reset();
         Controls();
         Render();
@@ -345,6 +350,8 @@ public:
   }
 };
 } // namespace
+bool FolderCompareBusy() { return activeComparisons.load() != 0; }
+
 void OpenFolderCompare(const std::string &left, const std::string &right) {
   new CompareWindow(left, right);
 }

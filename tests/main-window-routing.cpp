@@ -212,14 +212,14 @@ static void CheckWindowCLIQuit(BApplication &app) {
   auto startCLI = [](BWindow &owner, uint32 action, int lister) {
     BMessage open(action);
     open.AddInt32("terminal lister", lister);
-    owner.MessageReceived(&open);
+    assert(owner.PostMessage(&open) == B_OK);
   };
-  startCLI(*window, Listi::kLeftCLI, 0);
-  startCLI(*window, Listi::kShowFloatingTerminal, 1);
-  startCLI(*other, Listi::kLeftCLI, 0);
   BMessenger owner(window), survivor(other), detached;
   window->Show();
   other->Show();
+  startCLI(*window, Listi::kLeftCLI, 0);
+  startCLI(*window, Listi::kShowFloatingTerminal, 1);
+  startCLI(*other, Listi::kLeftCLI, 0);
 
   auto wait = [](auto condition) {
     for (int i = 0; i < 250; ++i) {
@@ -232,7 +232,7 @@ static void CheckWindowCLIQuit(BApplication &app) {
   auto findWindow = [&](const char *title) {
     for (int32 i = 0; i < app.CountWindows(); ++i) {
       auto *candidate = app.WindowAt(i);
-      if (candidate && std::string(candidate->Title()) == title)
+      if (candidate && candidate->Title() && std::string(candidate->Title()) == title)
         return BMessenger(candidate);
     }
     return BMessenger{};
