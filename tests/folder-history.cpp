@@ -15,6 +15,7 @@
 #include <fs_attr.h>
 #include <sys/stat.h>
 #include <sys/file.h>
+#include <vector>
 namespace fs=std::filesystem;
 using Listi::HistoryStore;
 namespace {
@@ -63,6 +64,10 @@ int main() {
   attr(source/"dir","Project",B_STRING_TYPE,"alpha",6);
   attr(source/"pointer","Status",B_STRING_TYPE,"link",5);
   attr(source, "Listi:RestoreIncomplete", B_STRING_TYPE, "user data", 10);
+  const timespec oldTimes[] = {{0, UTIME_OMIT}, {946684800, 125000000}};
+  assert(utimensat(AT_FDCWD, (source/"pointer").c_str(), oldTimes, AT_SYMLINK_NOFOLLOW) == 0);
+  struct stat originalLink{};
+  assert(lstat((source/"pointer").c_str(), &originalLink) == 0);
   HistoryStore history(source,store);
   std::atomic_bool cancel(false);
   auto count = [&] {
@@ -89,9 +94,13 @@ int main() {
     assert(memcmp(data,expected,length)==0);
     close(fd);
   };
-  auto reject = [](auto callback, const char *label) {
+  auto reject = [](auto callback, const char *label, const char *diagnostic = "") {
     try { callback(); }
-    catch(const std::exception &e) { std::cout << "PASS " << label << ": " << e.what() << std::endl; return; }
+    catch(const std::exception &e) {
+      assert(std::string(e.what()).find(diagnostic) != std::string::npos);
+      std::cout << "PASS " << label << ": " << e.what() << std::endl;
+      return;
+    }
     assert(false);
   };
   assert(count()==0 && fs::is_empty(store));
@@ -132,6 +141,14 @@ int main() {
   assert(fs::exists(base/"one/dir/note") && fs::exists(base/"two/dir/note") && fs::exists(base/"three/dir/renamed"));
   assert(!fs::exists(base/"last/dir/renamed"));
   assert(fs::read_symlink(base/"one/pointer")=="dir/note");
+  struct stat restoredLink{};
+  assert(lstat((base/"one/pointer").c_str(), &restoredLink) == 0 &&
+         restoredLink.st_mtim.tv_sec == originalLink.st_mtim.tv_sec &&
+         restoredLink.st_mtim.tv_nsec == originalLink.st_mtim.tv_nsec);
+  assert(fs::is_symlink(base/"last/pointer") && !fs::exists(base/"last/pointer") &&
+         lstat((base/"last/pointer").c_str(), &restoredLink) == 0 &&
+         restoredLink.st_mtim.tv_sec == originalLink.st_mtim.tv_sec &&
+         restoredLink.st_mtim.tv_nsec == originalLink.st_mtim.tv_nsec);
   checkAttr(base/"one/dir/note","Count",B_INT32_TYPE,&answer,sizeof(answer));
   checkAttr(base/"one/dir/note","Bytes",B_RAW_TYPE,binary,sizeof(binary));
   checkAttr(base/"one/dir/note","BEOS:TYPE",B_MIME_STRING_TYPE,"text/plain",11);
@@ -191,6 +208,32 @@ int main() {
   assert(fs::exists(base/"automatic/future"));
   std::cout << "PASS automatic saves only changed trees and uses the manual restore format" << std::endl;
 
+  fs::path originalObject;
+  for (const auto &entry : fs::directory_iterator(store)) {
+    if (entry.path().filename().string().find("object-") != 0) continue;
+    std::string contents;
+    std::ifstream(entry.path()) >> contents;
+    if (contents == "original") originalObject = entry.path();
+  }
+  assert(!originalObject.empty());
+  const auto cleanPoint = latest();
+  make(originalObject, "corrupt!");
+  assert(fs::file_size(originalObject) == fs::file_size(source/"same"));
+  reject([&]{ history.Save(cancel); }, "manual rejects a same-length corrupt reused object",
+         "damaged existing history object");
+  reject([&]{ history.SaveAutomatically(cancel, approved); },
+         "unchanged automatic save still verifies reused objects", "damaged existing history object");
+  reject([&]{ history.Restore(first, base/"damaged-single", cancel, "dir/note"); },
+         "single-file restore detects same-length corruption", "Saved file content is damaged");
+  checkAttr(base/"damaged-single", "Listi:RestoreIncomplete", B_STRING_TYPE,
+            incomplete, sizeof(incomplete));
+  assert(count() == 6 && latest() == cleanPoint && objects() == 3);
+  make(originalObject, "original");
+  assert(!history.SaveAutomatically(cancel, approved) && latest() == cleanPoint);
+  history.Restore(first, base/"recovered-single", cancel, "dir/note");
+  std::ifstream(base/"recovered-single") >> recovered;
+  assert(recovered == "original");
+
   int otherWriter = open(store.c_str(), O_RDONLY | O_DIRECTORY);
   assert(otherWriter >= 0 && flock(otherWriter, LOCK_EX | LOCK_NB) == 0);
   reject([&]{ history.Save(cancel); }, "another writer holds the folder");
@@ -216,6 +259,42 @@ int main() {
   reject([&]{ history.SaveAutomatically(cancel, approved); }, "automatic entry budget");
   assert(count() == 6 && objects() == beforeOversize);
   fs::remove_all(wide);
+
+  const auto tooLarge = source/"too-large";
+  make(tooLarge, "");
+  fs::resize_file(tooLarge, 256ULL * 1024 * 1024 + 1);
+  reject([&]{ history.SaveAutomatically(cancel, approved); }, "automatic read budget",
+         "reached its size limit");
+  assert(count() == 6 && objects() == beforeOversize);
+  fs::remove(tooLarge);
+
+  const std::vector<char> largeAttribute(4 * 1024 * 1024, 'x');
+  attr(source/"same", "Large", B_RAW_TYPE, largeAttribute.data(), largeAttribute.size());
+  reject([&]{ history.SaveAutomatically(cancel, approved); }, "automatic metadata budget",
+         "metadata exceeds 4 MiB");
+  assert(count() == 6 && objects() == beforeOversize);
+  {
+    const int fd = open((source/"same").c_str(), O_RDONLY);
+    assert(fd >= 0 && fs_remove_attr(fd, "Large") == 0);
+    close(fd);
+  }
+
+  const auto attrTree = source/"attribute-tree";
+  fs::create_directories(attrTree/"first");
+  fs::create_directory(attrTree/"second");
+  const std::vector<char> manualAttribute(8 * 1024 * 1024, 'y');
+  for (int i = 0; i < 9; ++i) {
+    const auto name = "payload-" + std::to_string(i);
+    attr(attrTree/(i < 5 ? "first" : "second"), name.c_str(), B_RAW_TYPE,
+         manualAttribute.data(), manualAttribute.size());
+  }
+  reject([&]{ history.Save(cancel); }, "manual cumulative metadata budget across folders",
+         "manifest exceeds 64 MiB");
+  assert(count() == 6 && latest() == cleanPoint && objects() == beforeOversize);
+  fs::remove_all(attrTree);
+  history.Restore(cleanPoint, base/"after-metadata-rejection", cancel, "same");
+  std::ifstream(base/"after-metadata-rejection") >> recovered;
+  assert(recovered == "original");
 
   const auto saved = store/latest();
   for (int i = 0; i < 18; ++i)
