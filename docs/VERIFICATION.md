@@ -381,3 +381,12 @@ The tester unplugged the stick during Copy and dismissed the visible errors. The
 ### Second physical USB field report, 2026-11-25
 
 During another transfer **to** the USB stick, the tester removed it and Listi froze. MímisSendir also crashed. The tester could switch to the workspace containing Telegram but not back, could not take a screenshot, and reported that Telegram subsequently crashed. The photo records the unsent account, not a debugger trace. The installed Listi revision, kernel state, file integrity and cause are unknown. Record this separately from the earlier panic and the ext4 reports. Beta remains blocked. Investigate on a disposable Haiku VM before requesting another hardware disconnect.
+
+A separate disposable Haiku R1~beta6 VM (hrev59866+79) running the installed
+0.38.0-33 package entered the kernel debugger during an interrupted FAT USB
+write. The captured serial trace shows a kernel page fault during
+`dosfs_write` under Listi's `_kern_write`. This is not a returned I/O error:
+Listi cannot acknowledge it, retry it, or restore the desktop. This finding
+does not identify what happened on the tester's second physical run, establish
+a problem with ext4, or demonstrate that Listi alone triggers the fault. Do not
+request another physical disconnect as a routine beta check on this system.
