@@ -138,7 +138,7 @@ def run_tar_move_ownership(binary):
     moved = {**target, "recv/tree": source["box/tree"],
              "recv/tree/file": source["box/tree/file"], "recv/loose": source["loose"]}
 
-    def write(path, entries):
+    def write(path, entries, *, local_mtime=None, sticky=None):
         with tarfile.open(path, "w:gz" if path.suffix == ".gz" else "w") as archive:
             for name, (owner, data) in entries.items():
                 header = tarfile.TarInfo(name)
@@ -149,7 +149,11 @@ def run_tar_move_ownership(binary):
                 if name == "recv/local-item":
                     # Damage only numeric ownership, not content, names, mode or time.
                     header.uname = header.gname = ""
-                    header.mode, header.mtime = 0o640, 1700000000.125
+                    header.mode = 0o640
+                    if local_mtime is not None:
+                        header.pax_headers["mtime"] = local_mtime
+                if name == sticky:
+                    header.mode = 0o1777
                 header.size = len(data) if data is not None else 0
                 archive.addfile(header, io.BytesIO(data) if data is not None else None)
 
@@ -192,25 +196,55 @@ def run_tar_move_ownership(binary):
             os.chmod(src, 0o640)
             timestamp = 1700000000125000000
             os.utime(src, ns=(timestamp, timestamp))
+            # BFS can quantize the requested time. Match the actual source, not the request.
+            seconds, nanos = divmod(src.stat().st_mtime_ns, 10**9)
+            observed = f"{seconds}.{nanos:09d}"
             assert (src.stat().st_uid, src.stat().st_gid) == (1003, 2003)
             dst = Path(folder) / "target.tar"
             write(dst, target)
             command = [binary, src, dst]
             if damage:
                 substitute = Path(folder) / "changed.tar"
-                write(substitute, {**target, "recv/local-item": (9, b"original bytes")})
+                write(substitute, {**target, "recv/local-item": (9, b"original bytes")}, local_mtime=observed)
                 command.append(substitute)
             subprocess.run(command, cwd=ROOT, check=True, timeout=90)
             with tarfile.open(dst) as archive:
                 header = archive.getmember("recv/local-item")
                 assert (header.uid, header.gid) == ((1009, 2009) if damage else (1003, 2003))
                 assert archive.extractfile(header).read() == b"original bytes"
-                assert header.mode == 0o640 and header.mtime == 1700000000.125
+                from decimal import Decimal
+                assert header.mode == 0o640
+                assert Decimal(header.pax_headers.get("mtime", str(header.mtime))) == Decimal(observed)
             if damage:
                 assert src.read_bytes() == b"original bytes"
                 assert (src.stat().st_uid, src.stat().st_gid) == (1003, 2003)
             else:
                 assert not src.exists()
+
+    for local_source in (False, True):
+        with tempfile.TemporaryDirectory(prefix="listi-tar-directory-conflict-") as folder:
+            src, dst = Path(folder) / "source.tar", Path(folder) / "target.tar"
+            write(src, source)
+            original = src.read_bytes()
+            dest_tree = {**target, "recv/tree": (8, None), "recv/tree/old": (8, b"untouched")}
+            write(dst, dest_tree, sticky="recv/tree")
+            prior_target = dst.read_bytes()
+            local_dir = Path(folder) / "tree"
+            local_dir.mkdir()
+            (local_dir / "new").write_bytes(b"new")
+            subprocess.run([binary, local_dir if local_source else src, dst, "directory-conflict"],
+                           cwd=ROOT, check=True, timeout=90)
+            assert src.read_bytes() == original and (local_dir / "new").read_bytes() == b"new"
+            assert dst.read_bytes() == prior_target
+
+    with tempfile.TemporaryDirectory(prefix="listi-tar-directory-compatible-") as folder:
+        src, dst = Path(folder) / "source.tar", Path(folder) / "target.tar"
+        write(src, source)
+        old_child = {"recv/tree/old": (8, b"untouched")}
+        write(dst, {**target, "recv/tree": source["box/tree"], **old_child})
+        subprocess.run([binary, src, dst], cwd=ROOT, check=True, timeout=90)
+        verify(dst, {**moved, **old_child})
+        verify(src, {"box": source["box"], "keep": source["keep"]})
 
     with tempfile.TemporaryDirectory(prefix="listi-tar-portable-") as folder:
         from zipfile import ZipFile
@@ -225,6 +259,20 @@ def run_tar_move_ownership(binary):
             subprocess.run([binary, src, target_path, "unsupported"], cwd=ROOT, check=True, timeout=90)
             assert src.read_bytes() == original and dst.read_bytes() == prior_zip
             assert list(local.iterdir()) == []
+        # ZIP stores full seconds here; keep the source TAR when a selected file
+        # has higher precision, even though names, permissions and bytes all match.
+        with tarfile.open(src, "w") as archive:
+            for name, data in (("box/tree", None), ("box/tree/file", b"data"), ("loose", b"loose")):
+                header = tarfile.TarInfo(name)
+                header.type = tarfile.DIRTYPE if data is None else tarfile.REGTYPE
+                header.mode = 0o755 if data is None else 0o644
+                header.mtime = 1700000000.125 if name == "loose" else 1700000000
+                header.size = len(data) if data else 0
+                archive.addfile(header, io.BytesIO(data) if data else None)
+        original = src.read_bytes()
+        subprocess.run([binary, src, dst, "time-mismatch"], cwd=ROOT, check=True, timeout=90)
+        assert src.read_bytes() == original
+        prior_zip = dst.read_bytes()  # The verified content copy may remain after refusal.
         local_file = Path(folder) / "local-item"
         local_file.write_bytes(b"original bytes")
         os.chown(local_file, 1003, 2003)

@@ -323,7 +323,8 @@ free. FTP rename cannot atomically promise not to replace a destination;
 Listi therefore refuses direct FTP and FTPS rename and same-server move. Check any reported recovery
 path after a failed upload, even if a directory listing does not show it.
 
-Avoid concurrent writers to the same destination during FTP upload. The
+Avoid concurrent writers to the same destination during FTP upload. Creating a new name requires an exact lookup that distinguishes
+absence from an ambiguous failure; not all FTP servers provide one. The
 final server rename is not an atomic no-replace operation. Haiku's native
 same-volume move to an unused local name likewise checks the name before a
 separate rename. A competing process creating that name in between is not
@@ -567,6 +568,12 @@ capabilities. A successful listing does not establish member-data integrity.
   represent its metadata. Editing a TAR with recognized extended ACLs,
   xattrs, sparse records or file flags is refused; a rebuild is not a
   bit-for-bit preservation of arbitrary vendor-specific PAX headers.
+  When moving local files into other formats, Listi checks the permissions
+  read back and the modification time at the precision the format supports.
+  Job Details records a loss of time precision: generally whole seconds,
+  two-second file times for ARJ and CAB, and no time on implicit CAB folders.
+  Conflicting TAR directory metadata stops a merge rather than changing the
+  existing destination folder.
 - With the p7zip RAR5 reader installed, Listi writes single-volume RAR5 using
   Store (no compression). Ordinary existing RAR5 files, including supported
   compressed members, can be edited if their metadata can be retained.

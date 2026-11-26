@@ -335,9 +335,13 @@ void RequirePortableTarMove(const TarMemberMap &members, bool toLocal) {
             "Cannot preserve selected permissions or ownership for " + name + ". Use Copy; source retained.");
   }
 }
-void VerifyPortableTarMove(const TarMemberMap &members, const std::string &target,
-                           const TransferControl &control) {
+// Only local sources use the documented non-TAR timestamp precision.
+void VerifyPortableMove(const TarMemberMap &members, const std::string &target,
+                        const TransferControl &control, const std::string &localToFormat = {},
+                        Result *receipt = nullptr) {
   auto location = ParseLocation(target);
+  const bool dosTime = localToFormat == "arj" || localToFormat == "cab";
+  bool reducedTime = false;
   for (const auto &[name, member] : members) {
     control.Check();
     bool matches = false;
@@ -350,12 +354,31 @@ void VerifyPortableTarMove(const TarMemberMap &members, const std::string &targe
     } else {
       location.path = "/" + name;
       FileEntry entry;
-      matches = StatFile(location.URL(), entry, control) && !entry.link &&
-                entry.directory == member.directory && entry.permissions == member.mode &&
-                entry.modifiedKnown && entry.modified == member.modified &&
+      const bool exists = StatFile(location.URL(), entry, control);
+      Require(exists && !entry.link && entry.directory == member.directory,
+              "Destination member type differs for " + name + ". Source entries were retained.");
+      Require(entry.permissions == member.mode,
+              "Destination permissions differ for " + name + ". Source entries were retained.");
+      matches = entry.modifiedKnown && entry.modified == member.modified &&
                 entry.ModifiedNanoseconds() == member.nanoseconds;
+      if (!matches && !localToFormat.empty()) {
+        const auto expectedSeconds = dosTime ? member.modified - (member.modified % 2) : member.modified;
+        // No timestamp field for CAB's implicit directories. DOS writers store
+        // even seconds; other archive writers must at least reproduce the second.
+        matches = (entry.modifiedKnown && entry.modified == expectedSeconds) ||
+                  (localToFormat == "cab" && member.directory && !entry.modifiedKnown);
+        reducedTime |= matches;
+      }
     }
-    Require(matches, "Destination metadata differs for " + name + ". Source entries were retained.");
+    Require(matches, "Destination timestamp or ownership differs for " + name +
+                         ". Source entries were retained.");
+  }
+  if (reducedTime && receipt) {
+    receipt->copyLimitations = true;
+    receipt->outcomes.push_back({{}, target, "archive timestamp precision",
+                                localToFormat == "cab" ? "CAB keeps file times to two seconds and stores no folder times." :
+                                dosTime ? "ARJ keeps modification times to two seconds." :
+                                "Non-TAR modification times verified to the second; finer precision was not retained."});
   }
 }
 
@@ -390,8 +413,14 @@ Result RunArchiveEdit(const Job &job, const Hooks &hooks,
     const auto format = DetectArchiveEditFormat(job.destination, hooks, &metadata);
     Require(format == job.archiveFormat,
             "Archive format changed after selection.");
-    for (const auto &[name, member] : incomingMetadata)
+    for (const auto &[name, member] : incomingMetadata) {
+      const auto existing = metadata.find(name);
+      Require(existing == metadata.end() || !member.directory || !existing->second.directory ||
+                  existing->second == member,
+              "Cannot merge directories with conflicting TAR metadata: " + name +
+                  ". Both original entries were retained.");
       metadata.insert_or_assign(name, member);
+    }
     const auto passwordGeneration = ArchivePasswordGeneration();
     const auto originalSet = FindArchiveVolumes(job.destination);
     ArchiveEditProtection protection(originalSet.files.front().identity,
@@ -766,12 +795,12 @@ Result RunArchiveLocalMove(const Job &job, const Hooks &hooks) {
     if (target.Archive()) {
       auto add =
           PrepareArchiveEditJob(target.archive, additions, {}, target.path);
-      auto captured = localSource->TarMetadata(add.archivePath);
-      if (IsTarFormat(add.archiveFormat))
-        movedMetadata = std::move(captured);
-      else
-        RequirePortableTarMove(captured, false);
-      auto written = RunArchiveEdit(add, internal, {}, movedMetadata);
+      movedMetadata = localSource->TarMetadata(add.archivePath);
+      const bool tarTarget = IsTarFormat(add.archiveFormat);
+      if (!tarTarget)
+        RequirePortableTarMove(movedMetadata, false);
+      auto written = tarTarget ? RunArchiveEdit(add, internal, {}, movedMetadata)
+                               : RunArchiveEdit(add, internal);
       stage.CheckInterrupted(written);
       if (written.cancelled)
         throw Cancelled();
@@ -821,8 +850,12 @@ Result RunArchiveLocalMove(const Job &job, const Hooks &hooks) {
     // publication atomic. Archive destinations have cheap fingerprint guards.
     verify.proceed = localDestination ? hooks.proceed : destinationGuard;
     destinationGuard();
-    VerifyTarMetadata(target.archive, published.archiveFormat, movedMetadata, internal);
-    VerifyPortableTarMove(fromTar, job.destination, verify);
+    if (!target.Archive())
+      VerifyPortableMove(fromTar, job.destination, verify);
+    else if (IsTarFormat(published.archiveFormat))
+      VerifyTarMetadata(target.archive, published.archiveFormat, movedMetadata, internal);
+    else
+      VerifyPortableMove(movedMetadata, job.destination, verify, published.archiveFormat, &result);
     for (size_t i = 0; i < additions.size(); ++i)
       VerifyMovedEntry(additions[i], destinations[i], verify);
     destinationGuard();
@@ -970,7 +1003,7 @@ Result RunArchiveMove(const Job &job, const Hooks &hooks) {
       if (tarTarget)
         VerifyTarMetadata(target.archive, add.archiveFormat, movedMetadata, internal);
       else
-        VerifyPortableTarMove(movedMetadata, job.destination, verify);
+        VerifyPortableMove(movedMetadata, job.destination, verify);
       for (const auto &path : job.sources)
         VerifyMovedEntry(Join(snapshot, LocationLeaf(path)),
                          ChildLocation(job.destination, LocationLeaf(path)),
