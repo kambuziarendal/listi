@@ -78,6 +78,12 @@ def extended(config, output, ssh, scratch):
             (share / "hello world.txt").write_bytes(b"Listi network fixture\n")
             (share / "Årsrapport.txt").write_bytes(b"UTF-8 test\n")
 
+        compare = network / "share" / "comparison"
+        (compare / "folder").mkdir(parents=True)
+        (compare / "hello world.txt").write_bytes(b"Listi network fixture\n")
+        (compare / "Årsrapport.txt").write_bytes(b"UTF-8 test\n")
+        (compare / "folder" / "nested.txt").write_bytes(b"nested\n")
+
         with (network / "known_hosts").open("rb") as known:
             guest("cat > ~/listi-ephemeral/build/known-hosts", "known-host.log", stdin=known)
         forwards = []
@@ -100,6 +106,9 @@ def extended(config, output, ssh, scratch):
                                    stdout=stream, stderr=subprocess.STDOUT)
 
         with forwarding("forwarding.log"):
+            guest("cd ~/listi-ephemeral && build/folder-compare-network build/known-hosts "
+                  "smb://127.0.0.1:1445/files/comparison ftp://127.0.0.1:2121/comparison "
+                  "sftp://127.0.0.1:2222/comparison", "folder-compare-network.log")
             guest("set -e; cd ~/listi-ephemeral; "
                   'LISTI_TEST_NETWORK_HOST=127.0.0.1 LISTI_TEST_FTPS=1 /boot/system/apps/Listi '
                   '--virtual-test "$PWD/build/virtual" "$PWD/build/known-hosts"',
