@@ -32,7 +32,7 @@ audit-io theme-text connection-defaults ssh-key-format folder-history
 """.split()
 
 WRAPS = {
-    "folder-history": ["write", "fstat"],
+    "folder-history": ["write", "fstat", "real_time_clock_usecs"],
     "working-windows": ["stat", "_ZN10BPopUpMenu2GoE6BPointbbb"],
     "removable-copy": ["fsync", "write", "read"],
     "directory-finalization": ["fsync", "fs_stat_dev"],

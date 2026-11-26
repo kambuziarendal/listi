@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.38.0-42 (private alpha candidate)
+
+- Folder history now records the order of new saves independently of the system clock. After a clock change, the timeline and automatic history use the last saved version, not the version with the latest date. Existing versions remain readable without a migration.
+
 ## 0.38.0-41 (private alpha candidate)
 
 - Disks also listens for Haiku's final partition mount and unmount notifications, so it can refresh after another application changes a volume.

@@ -21,6 +21,12 @@ using Listi::HistoryStore;
 namespace {
 std::atomic_bool *cancelAfterWrite = nullptr;
 const struct stat *oversizedFixture = nullptr;
+bigtime_t historyClock = 0;
+}
+
+extern "C" bigtime_t __real_real_time_clock_usecs();
+extern "C" bigtime_t __wrap_real_time_clock_usecs() {
+  return historyClock ? historyClock : __real_real_time_clock_usecs();
 }
 
 extern "C" int __real_fstat(int, struct stat *);
@@ -53,10 +59,55 @@ int main() {
     }
   } scratch{path};
   const auto &base = scratch.path;
+  auto make = [&](const fs::path &path, const char *data) { std::ofstream(path) << data; };
+  {
+    const auto orderSource = base/"order-source", orderStore = base/"order-store";
+    fs::create_directory(orderSource);
+    fs::create_directory(orderStore);
+    make(orderSource/"version", "legacy");
+    const std::atomic_bool cancel(false);
+    auto newest = [](const HistoryStore &history) {
+      return std::string(history.Points().GetString("point", ""));
+    };
+    const std::string legacy = "point-1750000000000000-1-0";
+    {
+      HistoryStore history(orderSource, orderStore);
+      historyClock = 1750000000000000LL;
+      history.Save(cancel);
+      fs::rename(orderStore/newest(history), orderStore/legacy);
+    }
+
+    historyClock = 1740000000000000LL;
+    std::vector<std::string> saved{legacy};
+    for (int i = 0; i < 11; ++i) {
+      HistoryStore reopened(orderSource, orderStore);
+      const auto approved = reopened.FolderIdentity();
+      assert(!reopened.SaveAutomatically(cancel, approved));
+      const auto contents = std::to_string(i);
+      make(orderSource/"version", contents.c_str());
+      assert(reopened.SaveAutomatically(cancel, approved));
+      assert(!reopened.SaveAutomatically(cancel, approved));
+      const auto point = newest(reopened);
+      assert(point.find("point-1740000000000000-") == 0);
+      assert(point != saved.back());
+      saved.push_back(point);
+    }
+    historyClock = 0;
+    const HistoryStore reopened(orderStore);
+    const auto points = reopened.Points();
+    for (size_t i = 0; i < saved.size(); ++i)
+      assert(points.GetString("point", int32(i), "") == saved[saved.size() - 1 - i]);
+    const char *extra;
+    assert(points.FindString("point", int32(saved.size()), &extra) != B_OK);
+    reopened.Restore(legacy, base/"original-order", cancel, "version");
+    std::string original;
+    std::ifstream(base/"original-order") >> original;
+    assert(original == "legacy");
+    std::cout << "PASS Save order and automatic dedup survive rolled-back and equal clocks" << std::endl;
+  }
   auto source=base/"source", store=base/"store";
   fs::create_directories(source/"dir");
   fs::create_directory(store);
-  auto make = [&](const fs::path &path, const char *data) { std::ofstream(path) << data; };
   make(source/"dir/note", "original");
   make(source/"same", "original");
   fs::create_symlink("dir/note", source/"pointer");

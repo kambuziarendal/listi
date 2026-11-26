@@ -690,7 +690,9 @@ for one step at a time. Scrolling over the timeline also steps between versions.
 folder. Added and removed paths and changes to file bytes, link targets or
 saved metadata (attributes, mode and modification time) are relative to the preceding version. The listing is read-only and is
 limited to 2,048 entries per version. Changes are not annotated when truncated.
-**Refresh** reloads saved versions.
+**Refresh** reloads saved versions. Starting with private alpha revision 42, new
+versions follow save order even if the clock moves backward. Each still shows
+its recorded date. Existing versions keep their previous order.
 
 Select a regular file and click **Restore file…**, or **Restore folder…** for
 the entire version. Choose the containing folder and name the new copy.
