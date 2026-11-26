@@ -28,7 +28,7 @@ std::string FileTypeKey(const std::string &name) {
 }
 std::string PaneModel::FocusedFileType() const {
   auto entry = Focused();
-  return entry && !entry->directory && !entry->parent && entry->kind != 2
+  return entry && !entry->unmountedDisk && !entry->directory && !entry->parent && entry->kind != 2
              ? FileTypeKey(entry->name)
              : std::string();
 }
@@ -38,7 +38,7 @@ bool PaneModel::SelectSameFileType() {
     return false;
   selection.clear();
   for (auto entry : visible)
-    if (!entry->parent && !entry->directory && entry->kind != 2 &&
+    if (!entry->parent && !entry->unmountedDisk && !entry->directory && entry->kind != 2 &&
         FileTypeKey(entry->name) == type)
       selection.insert(entry->path);
   anchor = focused;
@@ -135,6 +135,17 @@ std::vector<std::string> PaneModel::Selected() const {
   for (auto entry : visible)
     if (!entry->parent && IsSelected(entry->path))
       result.push_back(entry->path);
+  return result;
+}
+std::vector<std::string> PaneModel::SelectedFiles() const {
+  std::vector<std::string> result;
+  for (const auto *row : visible) {
+    if (row->parent || !IsSelected(row->path))
+      continue;
+    if (row->unmountedDisk)
+      return {};
+    result.push_back(row->path);
+  }
   return result;
 }
 std::map<std::string, Listi::NodeIdentity>

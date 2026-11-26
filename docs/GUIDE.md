@@ -35,6 +35,12 @@ introduction…**. Existing preferences are not reset on upgrade.
 
 Opening **Einn**, switching to it, or detaching a tab to it gives you a compact single-panel window. Resize it normally. Switching back in the same window restores the previous multi-panel frame. To save versions while Listi is closed, see [automatic folder history](#automatic-folder-history-optional). The helper remains off until you enable it in its settings.
 
+## Mount or unmount a volume (private alpha revision 40)
+
+Open **Disks**. Right-click an unmounted volume and choose **Mount** to make it available, or right-click a mounted volume and choose **Unmount**. Double-clicking a mounted volume still opens it. Listi does not offer to format unrecognized partitions.
+
+Finish transfers before unmounting. If Haiku reports that the volume is busy, close files using it and retry. Unmount every mounted volume on a removable drive before unplugging it. This feature does not fix the known Haiku FAT crash on unexpected removal.
+
 ## Small features at a glance
 
 Available actions depend on whether the location is local, in an archive or on

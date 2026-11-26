@@ -24,7 +24,12 @@ PaneContextMenuResult RunPaneContextMenu(
   const auto selected = pane.Selected();
   const std::string folder = pane.Path(), destination = other.Path();
   const bool background = request.GetBool("folderContext", false);
-  if (!background && selected.empty())
+  const auto *disk = pane.SelectedDisk();
+  const uint32 diskAction = disk && disk->partition
+      ? (disk->unmountedDisk ? kMountDisk : kUnmountDisk) : 0;
+  const DiskPartition partition = diskAction ? *disk->partition : DiskPartition{};
+  const auto revision = pane.SelectionRevision();
+  if (!background && selected.empty() && !diskAction)
     return {};
   const bool folderLocal = !pane.IsSearchList() && folder != "@disks" && !Listi::IsVirtual(folder);
   bool local = true;
@@ -65,7 +70,8 @@ PaneContextMenuResult RunPaneContextMenu(
     return {};
   ContextMenuOptions options;
   options.folder = background;
-  options.selected = selected.size();
+  options.selected = diskAction == kMountDisk ? 1 : selected.size();
+  options.diskAction = diskAction;
   options.directory = request.GetBool("directory", false);
   options.local = local;
   options.dual = dual && !other.IsSearchList();
@@ -107,6 +113,15 @@ PaneContextMenuResult RunPaneContextMenu(
       folder != pane.Path() || destination != other.Path())
     throw std::runtime_error(
         "The panel changed. Open the file menu again.");
+  if (action == kMountDisk || action == kUnmountDisk) {
+    const auto *current = pane.SelectedDisk();
+    if (revision < 0 || revision != pane.SelectionRevision() || !current ||
+        !current->partition || !(*current->partition == partition) ||
+        action != diskAction)
+      throw std::runtime_error("The disk selection changed. Open the menu again.");
+    pane.ChangeDiskMount(*current, action == kMountDisk);
+    return {};
+  }
   if (action == kTabDetach) {
     BMessage detach(kTabDetach);
     detach.AddInt32("pane", owner);

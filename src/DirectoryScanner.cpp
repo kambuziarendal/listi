@@ -18,6 +18,7 @@
 #include <cstring>
 #include <dirent.h>
 #include <fcntl.h>
+#include <map>
 #include <sys/stat.h>
 namespace {
 void ReadLocalIcon(const entry_ref &ref, int32 pixels, BMessage &row) {
@@ -156,7 +157,8 @@ public:
       batchLimit = 80;
     };
     auto row = [&](const char *full, const char *label, bool parent = false,
-                   int directory = -1, const struct stat *opened = nullptr) {
+                   int directory = -1, const struct stat *opened = nullptr,
+                   const Listi::DiskListing *disk = nullptr) {
       if (deliveryFailed || generation->load() != serial ||
           Listi::InterruptedVolumes().Contains(full))
         return;
@@ -185,6 +187,8 @@ public:
       item.AddInt64("node", st.st_ino);
       item.AddInt64("size", st.st_size);
       item.AddInt64("date", st.st_mtime);
+      if (disk && st.st_dev == disk->mountedDevice && !disk->protectedVolume)
+        disk->partition.WriteTo(item);
       const bool cells = !parent && (S_ISREG(st.st_mode) || S_ISDIR(st.st_mode)) &&
                          m->HasString("attribute");
       const bool localIcon = icons && (S_ISREG(targetMode) || S_ISDIR(targetMode));
@@ -282,8 +286,28 @@ public:
       }
     } else if (path == "@disks") {
       // Subscribe before enumerating so changes during the scan aren't lost.
-      if (watch && watch->InstallVolumes(serial, target) != B_OK)
+      if (watch && watch->InstallDisks(serial, target) != B_OK)
         done.AddBool("watchFailed", true);
+      std::map<int32, Listi::DiskListing> mounted;
+      Listi::VisitDiskPartitions([&](const Listi::DiskListing &disk) {
+        if (deliveryFailed || generation->load() != serial)
+          return true;
+        if (disk.mountedDevice >= 0) {
+          mounted.emplace(disk.mountedDevice, disk);
+          return false;
+        }
+        BMessage item;
+        const auto key = "@partition/" + std::to_string(disk.partition.id);
+        item.AddString("name", (disk.name + " (unmounted)").c_str());
+        item.AddString("path", key.c_str());
+        item.AddBool("sizeKnown", false);
+        item.AddBool("unmountedDisk", true);
+        disk.partition.WriteTo(item);
+        batch.AddMessage("entry", &item);
+        if (++count == batchLimit)
+          send();
+        return false;
+      });
       BVolumeRoster roster;
       BVolume volume;
       while (!deliveryFailed && generation->load() == serial &&
@@ -296,8 +320,11 @@ public:
         char name[B_FILE_NAME_LENGTH];
         if (volume.GetRootDirectory(&root) == B_OK &&
             root.GetEntry(&e) == B_OK && e.GetPath(&p) == B_OK &&
-            volume.GetName(name) == B_OK)
-          row(p.Path(), name);
+            volume.GetName(name) == B_OK) {
+          const auto disk = mounted.find(volume.Device());
+          row(p.Path(), name, false, -1, nullptr,
+              disk != mounted.end() ? &disk->second : nullptr);
+        }
       }
     } else {
       char resolved[PATH_MAX];

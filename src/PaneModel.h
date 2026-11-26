@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #pragma once
 #include "FileOperation.h"
+#include "DiskActions.h"
 #include <cstdint>
 #include <memory>
 #include <set>
@@ -21,6 +22,8 @@ struct PaneEntry {
   float fraction = 0;
   std::shared_ptr<BBitmap> icon;
   bool iconRequested = false;
+  std::unique_ptr<Listi::DiskPartition> partition;
+  bool unmountedDisk = false;
 };
 std::string FileTypeKey(const std::string &name);
 struct PaneSort {
@@ -52,6 +55,8 @@ public:
     return selection.count(path);
   }
   std::vector<std::string> Selected() const;
+  // Non-filesystem disk rows must never become file-operation sources.
+  std::vector<std::string> SelectedFiles() const;
   std::map<std::string, Listi::NodeIdentity> SelectedLocalIdentities(size_t limit = SIZE_MAX) const;
   const PaneEntry *OnlySelected() const;
   SelectionSummary Summary() const;

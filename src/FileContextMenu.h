@@ -19,5 +19,6 @@ struct ContextMenuOptions {
   std::string fileType;
   PaneSort sort;
   int view = 0;
+  uint32 diskAction = 0;
 };
 ContextAction ShowContextMenu(BPoint screen, const ContextMenuOptions &options);

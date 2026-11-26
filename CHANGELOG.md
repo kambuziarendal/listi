@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.38.0-40 (private alpha candidate)
+
+- In Disks, right-click a recognized unmounted volume to mount it, or a mounted volume to unmount it. The boot volume cannot be unmounted from Listi. This does not change the known FAT disconnect limitation.
+
 ## 0.38.0-39 (private alpha candidate)
 
 - Archive edits stop before publication if a private copy fails. Creating an archive claims its new filename exclusively; allow space for the staged archive and its final copy. A failed final write can leave an incomplete file and a recovery stage.

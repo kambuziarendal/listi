@@ -15,7 +15,7 @@ SRC = ROOT / "src"
 OUTPUT = ROOT / "build/native-audit-tests"
 REQUIRED = """
 file-operation-faults directory-finalization copy-crash-recovery worker-lifecycle virtual-operation-faults archive-read-scope
-operation-queue removable-copy archive-move-scaling directory-delivery terminal-delivery search-filters
+operation-queue removable-copy disk-actions archive-move-scaling directory-delivery terminal-delivery search-filters
 archive-local-move-faults archive-local-move same-file-type folder-compare
 archive-editor-faults archive-editor archive-move-faults archive-move
 archive-folder-operations transfer-races archive-ambiguity archive-metadata archive-volumes
