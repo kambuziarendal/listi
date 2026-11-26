@@ -97,6 +97,8 @@ void Fill(FileEntry &e, const Location &l, const struct stat &st) {
   e.name = LocationLeaf(e.path);
   e.directory = S_ISDIR(st.st_mode);
   e.link = S_ISLNK(st.st_mode);
+  if (st.st_ino)
+    e.providerIdentity = std::to_string(st.st_ino);
   e.size = st.st_size;
   e.SetModification(st.st_mtim.tv_sec, st.st_mtim.tv_nsec);
   e.permissions = st.st_mode & 0777;
@@ -434,6 +436,8 @@ FileEntry ParseList(const std::string &line, const Location &l, bool mlsd) {
           return {};
         e.directory = v == "dir";
         e.link = v.find("slink") != std::string::npos;
+      } else if (key == "unique") {
+        e.providerIdentity = v;
       } else if (key == "size") {
         if (v.empty() || v.find_first_not_of("0123456789") != std::string::npos)
           throw std::runtime_error("Invalid FTP file size");
@@ -497,7 +501,10 @@ bool NetworkAvailable(const std::string &s) {
   return s == "smb" ? SMB().Available() : Curl().Available();
 }
 std::vector<FileEntry> ListNetwork(const Location &l,
-                                   const TransferControl &c) {
+                                   const TransferControl &c,
+                                   ListingMethod *method) {
+  if (method)
+    *method = ListingMethod::Provider;
   c.Check();
   std::vector<FileEntry> out;
   if (l.scheme == "smb") {
@@ -537,15 +544,16 @@ std::vector<FileEntry> ListNetwork(const Location &l,
     return out;
   }
   std::string listing;
-  bool mlsd = l.scheme != "sftp";
-  auto fetch = [&] {
+  bool mlsd = false;
+  auto fetch = [&](const char *command) {
+    listing.clear();
     CurlSession s(l, c);
     auto url = l.URL();
     if (url.back() != '/')
       url += '/';
     s.Set(CURLOPT_URL, url.c_str());
-    if (mlsd)
-      s.Set(CURLOPT_CUSTOMREQUEST, "MLSD");
+    if (command)
+      s.Set(CURLOPT_CUSTOMREQUEST, command);
     s.sink = [&](const char *p, size_t n) {
       if (c.cleanup)
         c.cleanup->Consume(n);
@@ -553,18 +561,37 @@ std::vector<FileEntry> ListNetwork(const Location &l,
         throw std::runtime_error("Server listing is too large");
       listing.append(p, n);
     };
-    s.Perform();
-  };
-  try {
-    fetch();
-  } catch (const Cancelled &) {
-    throw;
-  } catch (const std::exception &) {
-    if (!mlsd)
+    try {
+      s.Perform();
+    } catch (const std::runtime_error &) {
+      long reply = 0;
+      LIBCALL(s.lib, curl_easy_getinfo)(s.curl, CURLINFO_RESPONSE_CODE, &reply);
+      // Some FTP servers reject MLSD or interpret "-a" as a filename.
+      // Do not retry cancellation, partial transfers or transport errors.
+      if (command && !s.failure &&
+          (reply == 500 || reply == 501 || reply == 502 || reply == 504 ||
+           reply == 550))
+        return false;
       throw;
-    mlsd = false;
-    listing.clear();
-    fetch();
+    }
+    // libcurl can accept a 450 list rejection as an empty directory.
+    if (l.scheme != "sftp") {
+      long reply = 0;
+      LIBCALL(s.lib, curl_easy_getinfo)(s.curl, CURLINFO_RESPONSE_CODE, &reply);
+      if (reply >= 400)
+        throw std::runtime_error("FTP listing failed (reply " +
+                                 std::to_string(reply) + ").");
+    }
+    return true;
+  };
+  if (l.scheme == "sftp") {
+    fetch(nullptr);
+  } else {
+    mlsd = fetch("MLSD");
+    if (!mlsd && !fetch("LIST -a"))
+      fetch(nullptr);
+    if (method)
+      *method = mlsd ? ListingMethod::FtpMlsd : ListingMethod::FtpList;
   }
   std::istringstream lines(listing);
   std::string line;

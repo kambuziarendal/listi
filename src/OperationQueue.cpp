@@ -1144,12 +1144,19 @@ void OperationQueue::Loop() {
       summary << ". 1 folder partially copied.";
     else if (result.partialCopies > 1)
       summary << ". " << result.partialCopies << " folders partially copied.";
+    if (result.partialDeletions)
+      summary << ". " << result.partialDeletions
+              << (result.partialDeletions == 1 ? " folder partially deleted." : " folders partially deleted.");
     if (result.bulkRenameRecoveryNeeded)
       summary << ". Check entry locations in the operation report.";
-    else if (result.cancelled)
-      summary << (renameBatch || undoBatch ? ". Cancelled; originals retained."
-                                           : ". Cancelled; completed entries kept.");
-    else if (renameBatch && result.completed && !undoAvailable)
+    else if (result.cancelled) {
+      if (renameBatch || undoBatch)
+        summary << ". Cancelled; originals retained.";
+      else if (job.action == Listi::Action::Delete)
+        summary << ". Cancelled.";
+      else
+        summary << ". Cancelled; completed entries kept.";
+    } else if (renameBatch && result.completed && !undoAvailable)
       summary << ". Undo unavailable: contents could not be verified.";
     if (result.copyLimitations)
       summary << ". Metadata or filesystem limitations: see Details. Safely eject removable disks.";
@@ -1193,7 +1200,7 @@ void OperationQueue::Loop() {
       if (details.ErrorCount() == 1 && !details.Incomplete() && failedFiles == 1)
         done.AddString("onlyFailedFile", failedSource.c_str());
       std::string issue = std::string(Verb(job.action)) + " #" + std::to_string(operation);
-      issue += (result.completed || result.partialCopies)
+      issue += (result.completed || result.partialCopies || result.partialDeletions)
                    ? " partially completed" : " not confirmed";
       if (!failedSource.empty())
         issue += ": " + Listi::LocationLeaf(failedSource);

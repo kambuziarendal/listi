@@ -259,6 +259,7 @@ void FileOperationFlow::BeginOperation(Action action, const Pane &source,
     }
     return;
   }
+  job.expectedRemoteDeletes = source.ExportModel().SelectedRemoteEntries();
   auto accepted = EncodeJob(job, kConfirm);
   const auto text = "Permanently delete " + SelectedLabel(job) + "?\nThis cannot be undone.";
   AskInline(text.c_str(), "Delete permanently", accepted);

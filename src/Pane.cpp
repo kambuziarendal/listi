@@ -1383,6 +1383,9 @@ void Pane::MessageReceived(BMessage *m) {
       row->size = e.GetInt64("size", 0);
       row->sizeKnown = e.GetBool("sizeKnown", true);
       row->modified = e.GetInt64("date", 0);
+      row->modifiedKnown = e.GetBool("modifiedKnown", false);
+      row->modifiedFraction = e.GetString("modifiedFraction", "");
+      row->providerIdentity = e.GetString("providerIdentity", "");
       auto transfer = transfers.find(row->path);
       if (transfer != transfers.end()) {
         row->transferState = transfer->second.state;

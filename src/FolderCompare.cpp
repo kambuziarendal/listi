@@ -20,6 +20,7 @@ struct Item {
   FileEntry entry;
   struct stat native {};
   bool local = false;
+  ListingMethod listing = ListingMethod::Provider;
   std::string link;
 };
 using Tree = std::map<std::string, Item>;
@@ -82,7 +83,8 @@ Tree Scan(std::string root, size_t limit,
     Need(p.depth < 256,
          "Folder nesting limit reached. Comparison is incomplete.");
     std::vector<std::string> omitted;
-    auto entries = ListFiles(p.path, control, &omitted);
+    auto &directory = out.at(p.relative);
+    auto entries = ListFiles(p.path, control, &omitted, &directory.listing);
     if (!omitted.empty())
       throw std::runtime_error(omitted.front() + ": " + kUnavailableVolumeText);
     for (auto &e : entries) {
@@ -102,6 +104,16 @@ Tree Scan(std::string root, size_t limit,
   }
   return out;
 }
+bool UncertainAbsence(const Tree &tree, std::string name) {
+  // For a missing subtree only the first absent component needs checking.
+  for (;;) {
+    auto slash = name.rfind('/');
+    name.resize(slash == std::string::npos ? 0 : slash);
+    auto parent = tree.find(name);
+    if (parent != tree.end())
+      return parent->second.listing == ListingMethod::FtpList;
+  }
+}
 bool Same(const Item &a, const Item &b) {
   if (a.local && b.local)
     return Stable(a.native, b.native) && a.link == b.link;
@@ -116,7 +128,8 @@ void Validate(const Tree &before, const Tree &after) {
        "A folder changed during comparison. Run it again.");
   for (const auto &p : before) {
     auto f = after.find(p.first);
-    Need(f != after.end() && Same(p.second, f->second),
+    Need(f != after.end() && p.second.listing == f->second.listing &&
+             Same(p.second, f->second),
          "An entry changed during comparison: " + p.second.entry.path);
   }
 }
@@ -251,11 +264,14 @@ CompareResult CompareFolders(const CompareRequest &r,
         if (!b->second.entry.directory && b->second.entry.sizeKnown)
           e.rightBytes = b->second.entry.size;
       }
-      if (a == left.end())
-        e.state = CompareState::OnlyRight;
-      else if (b == right.end())
-        e.state = CompareState::OnlyLeft;
-      else {
+      if (a == left.end() || b == right.end()) {
+        if (UncertainAbsence(a == left.end() ? left : right, name)) {
+          e.state = CompareState::Unverified;
+          e.detail = "Not shown by the FTP server; absence is not verified.";
+        } else
+          e.state = a == left.end() ? CompareState::OnlyRight
+                                    : CompareState::OnlyLeft;
+      } else {
         auto &x = a->second;
         auto &y = b->second;
         if (x.entry.directory != y.entry.directory ||
@@ -318,9 +334,17 @@ CompareResult CompareFolders(const CompareRequest &r,
     Need(leftGuard == ArchiveGuard(r.left) &&
              rightGuard == ArchiveGuard(r.right),
          "An archive changed during comparison. Run it again.");
-    result.complete = result.unverified == 0;
-    if (result.unverified)
+    const auto usedFtpList = [](const Tree &tree) {
+      return std::any_of(tree.begin(), tree.end(), [](const auto &row) {
+        return row.second.listing == ListingMethod::FtpList;
+      });
+    };
+    if (usedFtpList(left) || usedFtpList(right))
+      result.error = "Only entries shown by the FTP server were compared. "
+                     "Its LIST response may omit hidden entries.";
+    else if (result.unverified)
       result.error = "Some entries could not be verified. See the result rows.";
+    result.complete = result.error.empty();
   } catch (const Cancelled &) {
     result.cancelled = true;
     result.error = "Comparison cancelled. Results are incomplete.";

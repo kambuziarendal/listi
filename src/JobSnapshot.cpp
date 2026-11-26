@@ -74,6 +74,20 @@ BMessage EncodeJob(const Job &job, uint32 what) {
     item.AddInt64("node", entry.second.inode);
     m.AddMessage("identity", &item);
   }
+  for (const auto &[path, entry] : job.expectedRemoteDeletes) {
+    BMessage item;
+    item.AddString("path", path.c_str());
+    item.AddBool("directory", entry.directory);
+    item.AddBool("link", entry.link);
+    if (entry.sizeKnown)
+      item.AddInt64("size", entry.size);
+    if (entry.modifiedKnown) {
+      item.AddInt64("modified", entry.modified);
+      item.AddString("fraction", entry.modifiedFraction.c_str());
+    }
+    item.AddString("providerIdentity", entry.providerIdentity.c_str());
+    m.AddMessage("remoteDelete", &item);
+  }
   for (const auto &[source, target] : job.restoreTargets) {
     BMessage item;
     item.AddString("source", source.c_str());
@@ -116,6 +130,22 @@ Job DecodeJob(const BMessage &m) {
   for (int32 i = 0; m.FindMessage("identity", i, &item) == B_OK; ++i)
     job.expectedSources[item.GetString("path", "")] = {
         item.GetInt32("device", -1), item.GetInt64("node", -1)};
+  for (int32 i = 0; m.FindMessage("remoteDelete", i, &item) == B_OK; ++i) {
+    FileEntry entry;
+    bool directory, link;
+    if (item.FindString("path", &path) != B_OK ||
+        item.FindBool("directory", &directory) != B_OK || item.FindBool("link", &link) != B_OK)
+      continue;
+    entry.directory = directory;
+    entry.link = link;
+    entry.sizeKnown = item.HasInt64("size");
+    entry.size = item.GetInt64("size", 0);
+    entry.modifiedKnown = item.HasInt64("modified");
+    entry.modified = item.GetInt64("modified", 0);
+    entry.modifiedFraction = item.GetString("fraction", "");
+    entry.providerIdentity = item.GetString("providerIdentity", "");
+    job.expectedRemoteDeletes.emplace(path, std::move(entry));
+  }
   for (int32 i = 0; m.FindMessage("archiveSet", i, &item) == B_OK; ++i)
     job.expectedArchiveSets[item.GetString("path", "")] =
         item.GetString("fingerprint", "");

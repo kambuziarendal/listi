@@ -99,9 +99,20 @@ int main() {
   auto member = std::make_unique<PaneEntry>();
   member->name = "child";
   member->path = "sftp://example.invalid/child";
+  member->kind = 2;
+  member->modified = 128;
+  member->modifiedKnown = true;
+  member->modifiedFraction = "123";
+  member->sizeKnown = false;
+  member->providerIdentity = "node-5";
   remote.Add(std::move(member));
   remote.Filter("");
   remote.Select(1);
   check(remote.Selected().size() == 1 && remote.SelectedLocalIdentities().empty(),
         "virtual selections need no local node identity");
+  const auto selected = remote.SelectedRemoteEntries().at("sftp://example.invalid/child");
+  check(selected.link && !selected.directory && !selected.sizeKnown && selected.modifiedKnown &&
+            selected.modified == 128 && selected.modifiedFraction == "123" &&
+            selected.providerIdentity == "node-5",
+        "remote deletion binds the type and available revision from the displayed row");
 }

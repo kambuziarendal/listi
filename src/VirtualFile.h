@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #pragma once
+#include "FileEntry.h"
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -55,41 +56,6 @@ struct Location {
   std::string URL() const;
   std::string Authority() const;
 };
-struct FileEntry {
-  std::string name, path;
-  bool directory = false, link = false;
-  bool sizeKnown = true;
-  int64_t size = 0, modified = 0;
-  unsigned permissions = 0644;
-  bool modifiedKnown = false; // Distinguishes an explicit epoch from an absent timestamp.
-  // Decimal digits, without insignificant trailing zeros. Do not round
-  // the source revision to the precision of time_t or of the local filesystem.
-  std::string modifiedFraction;
-
-  bool SameModification(const FileEntry &other) const {
-    return modifiedKnown == other.modifiedKnown && modified == other.modified &&
-           modifiedFraction == other.modifiedFraction;
-  }
-
-  void SetModification(int64_t seconds, long nanoseconds) {
-    modified = seconds;
-    modifiedKnown = true;
-    modifiedFraction.clear();
-    if (nanoseconds > 0 && nanoseconds < 1000000000) {
-      modifiedFraction = std::to_string(1000000000 + nanoseconds).substr(1);
-      while (modifiedFraction.back() == '0')
-        modifiedFraction.pop_back();
-    }
-  }
-
-  long ModifiedNanoseconds() const {
-    long ns = 0;
-    for (size_t i = 0; i < 9; ++i)
-      ns = ns * 10 +
-           (i < modifiedFraction.size() ? modifiedFraction[i] - '0' : 0);
-    return ns;
-  }
-};
 struct Connection {
   std::string username, password, domain, privateKey, knownHosts, keyPassphrase;
 };
@@ -108,11 +74,14 @@ std::string LocationLeaf(const std::string &);
 bool SetConnection(const std::string &url, const Connection &);
 void RequireConnection(const std::string &url);
 Connection GetConnection(const std::string &url);
+// FTP LIST, even with -a, does not guarantee that the server showed all names.
+enum class ListingMethod { Provider, FtpMlsd, FtpList };
 // Browsers hide interrupted volumes. Integrity-sensitive callers also collect
 // the exact paths that were omitted without opening them.
 std::vector<FileEntry> ListFiles(const std::string &,
                                  const TransferControl & = {},
-                                 std::vector<std::string> *omitted = nullptr);
+                                 std::vector<std::string> *omitted = nullptr,
+                                 ListingMethod *method = nullptr);
 // Only a copy's initial FTP/SFTP lookup may reuse an entry from its traversal.
 // Leave discovered unset when checking the current revision.
 bool StatFile(const std::string &, FileEntry &, const TransferControl & = {},
@@ -134,7 +103,8 @@ bool StatArchive(const Location &, FileEntry &, const TransferControl &);
 void ReadArchive(const Location &, const DataSink &, const TransferControl &);
 bool ArchiveAvailable();
 bool NetworkAvailable(const std::string &scheme);
-std::vector<FileEntry> ListNetwork(const Location &, const TransferControl &);
+std::vector<FileEntry> ListNetwork(const Location &, const TransferControl &,
+                                   ListingMethod *method = nullptr);
 bool StatNetwork(const Location &, FileEntry &, const TransferControl &,
                  const FileEntry *discovered = nullptr);
 void ReadNetwork(const Location &, const DataSink &, const TransferControl &);

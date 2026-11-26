@@ -20,6 +20,21 @@ int main() {
     check(accepted && accepted->sources.front() == src && accepted->destination == dst,
           "a valid confirmation carries its original paths");
   }
+  {
+    const std::string path = "sftp://fixture/selected";
+    Listi::Job deletion{Listi::Action::Delete, {path}, ""};
+    auto &entry = deletion.expectedRemoteDeletes[path];
+    entry.link = true;
+    entry.size = 42;
+    entry.SetModification(123, 456000000);
+    entry.providerIdentity = "object-7";
+    auto captured = Listi::DecodeSubmittedJob(Listi::EncodeJob(deletion, 'test'),
+                                               {Listi::Action::Delete});
+    const auto &saved = captured->expectedRemoteDeletes.at(path);
+    check(!saved.directory && saved.link && saved.sizeKnown && saved.size == entry.size &&
+              saved.SameModification(entry) && saved.providerIdentity == entry.providerIdentity,
+          "delete confirmation retains the selected network type and revision");
+  }
   for(auto action:{Listi::Action::Trash,Listi::Action::Delete,Listi::Action::Rename,Listi::Action::Copy,Listi::Action::Move}) {
     {std::ofstream f(src);f<<"original";}
     Listi::Job job{action,{src},dst};
