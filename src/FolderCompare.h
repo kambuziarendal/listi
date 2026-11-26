@@ -44,5 +44,6 @@ CompareResult CompareFolders(const CompareRequest &,
 const char *CompareLabel(CompareState);
 bool CompareMatch(CompareState);
 } // namespace Listi
-void OpenFolderCompare(const std::string &left, const std::string &right);
+class BWindow;
+BWindow *OpenFolderCompare(const std::string &left, const std::string &right);
 bool FolderCompareBusy();

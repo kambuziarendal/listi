@@ -155,6 +155,13 @@ struct Runner {
   // Preserve each local destination directory across staging, recursive descent
   // and conflict questions. Contents may change; the directory identity may not.
   std::map<std::string, NodeIdentity> directories;
+  // Keep claims across selected roots, unlike the scoped directory guards.
+  std::map<std::string, std::string> directoryOwners;
+  void ClaimDirectory(const std::string &key, const std::string &src, const std::string &dst) {
+    const auto inserted = directoryOwners.emplace(key, src);
+    if (!inserted.second && inserted.first->second != src)
+      throw std::runtime_error("Two source folders resolve to the same destination: " + dst);
+  }
   std::string selectedSource;
   void Guard() {
     if (job.checkDestinationWindow)
@@ -211,7 +218,7 @@ struct Runner {
     AddError(error);
   }
   void NoteLimitedListing(const std::string &path) {
-    NoteOmission(path + ": FTP LIST may omit entries; a complete folder copy cannot be verified.");
+    NoteOmission(path + ": Only entries shown by the FTP server can be copied; folder completeness cannot be verified.");
   }
   void RecordPartialRoot(const std::string &dst, size_t publishedBefore,
                          const std::string &detail) {
@@ -329,7 +336,7 @@ struct Runner {
       auto entries = ListFiles(src, control, &omitted, &initialMethod);
       // Track completeness for this subtree independently of earlier siblings.
       const size_t omittedBefore = omissions;
-      if (initialMethod == ListingMethod::FtpList)
+      if (VisibleEntriesOnly(initialMethod))
         NoteLimitedListing(src);
       for (const auto &path : omitted) {
         NoteOmission(path + ": " + kUnavailableVolumeText);
@@ -337,7 +344,9 @@ struct Runner {
           RecordOutcome({path, ChildLocation(dst, LocationLeaf(path)),
                          "unprocessed", kUnavailableVolumeText});
       }
-      if (entries.empty() && omissions != omittedBefore)
+      // The folder itself is visible even if FTP lists zero children.
+      // Preserve it, but never label its contents completely copied.
+      if (entries.empty() && !omitted.empty())
         return;
       std::optional<PinnedDirectory> localParent, directory;
       if (!IsVirtual(dst)) {
@@ -356,12 +365,32 @@ struct Runner {
         if (fstatat(localParent->Descriptor(), leaf.c_str(), &named,
                     AT_SYMLINK_NOFOLLOW) || !S_ISDIR(named.st_mode))
           throw std::runtime_error(dst + ": destination directory changed.");
+        ClaimDirectory("local:" + std::to_string(named.st_dev) + ":" +
+                       std::to_string(named.st_ino), src, dst);
         directories.emplace(dst, NodeIdentity{int32_t(named.st_dev), int64_t(named.st_ino)});
         Guard();
         directory.emplace(dst, named.st_dev, named.st_ino);
-      } else if (!exists) {
-        MakeFolder(dst, control);
-        ++publishedEntries;
+      } else {
+        if (!exists) {
+          MakeFolder(dst, control);
+          ++publishedEntries;
+          if (!StatFile(dst, target, control) || !target.directory || target.link)
+            throw std::runtime_error("Created folder could not be verified: " + dst);
+        }
+        // A provider can resolve an alias to the existing folder yet return
+        // the requested spelling from stat. Without identity, only merge a
+        // folder if the parent actually lists that spelling.
+        if (exists && target.providerIdentity.empty()) {
+          const auto siblings = ListFiles(parent, control);
+          const auto leaf = LocationLeaf(dst);
+          if (std::none_of(siblings.begin(), siblings.end(), [&](const FileEntry &e) {
+                return e.directory && !e.link && e.name == leaf;
+              }))
+            throw std::runtime_error("Cannot establish destination folder identity: " + dst);
+        }
+        auto key = target.providerIdentity.empty() ? TransferIdentity(dst) :
+            ParseLocation(dst).Authority() + "#directory:" + target.providerIdentity;
+        ClaimDirectory(key, src, dst);
       }
       int skippedBefore = result.skipped;
       for (const auto &e : entries)
@@ -393,7 +422,7 @@ struct Runner {
       std::vector<std::string> nowOmitted;
       ListingMethod finalMethod;
       auto current = ListFiles(src, control, &nowOmitted, &finalMethod);
-      if (initialMethod != ListingMethod::FtpList && finalMethod == ListingMethod::FtpList)
+      if (!VisibleEntriesOnly(initialMethod) && VisibleEntriesOnly(finalMethod))
         NoteLimitedListing(src);
       std::sort(omitted.begin(), omitted.end());
       std::sort(nowOmitted.begin(), nowOmitted.end());
@@ -588,7 +617,9 @@ struct Runner {
       }, {}, &budget};
       // No network work after explicit cancellation. SMB's synchronous library
       // and session lock have no total deadline; defer its recovery on error.
-      const bool reconcile = !result.cancelled && ParseLocation(dst).scheme != "smb";
+      const auto provider = ParseLocation(dst);
+      const bool ftp = provider.scheme == "ftp" || provider.scheme == "ftps";
+      const bool reconcile = !result.cancelled && provider.scheme != "smb";
       auto matches = [&](const std::string &path, const FileEntry &file,
                          const std::string &digest) {
         return !file.directory && !file.link && file.sizeKnown && file.size >= 0 &&
@@ -596,7 +627,9 @@ struct Runner {
                RemoteDigest(path, cleanup) == digest;
       };
       // Prefer restoring the original if either check would consume the budget.
-      if (reconcile && backupExists)
+      // FTP RNTO cannot restore without clobbering a concurrent writer.
+      // Leave the backup and its journal for explicit recovery instead.
+      if (reconcile && backupExists && !ftp)
         try {
           FileEntry current, saved;
           if (!StatFile(backup, saved, cleanup)) {
@@ -613,9 +646,11 @@ struct Runner {
       if (reconcile && stagedExists)
         try {
           FileEntry remote;
-          if (!StatFile(staged, remote, cleanup))
-            stagedExists = false;
-          else if (receipt.contentVerified && stagedRevision.SameRevision(remote) &&
+          if (!StatFile(staged, remote, cleanup)) {
+            // After STOR, some FTP services hide even an exact path probe.
+            // Keep the recovery record until our own removal is acknowledged.
+            stagedExists = ftp;
+          } else if (receipt.contentVerified && stagedRevision.SameRevision(remote) &&
                    matches(staged, remote, expectedDigest)) {
             RemoveFile(staged, false, cleanup);
             stagedExists = StatFile(staged, remote, cleanup);
@@ -751,6 +786,10 @@ Result RunVirtual(const Job &job, const Hooks &hooks) {
               canonicalDestination.compare(0, canonicalSource.size() + 1,
                                            canonicalSource + "/") == 0)
             throw std::runtime_error("Cannot move a folder into itself");
+          if (from.scheme == "ftp" || from.scheme == "ftps")
+            throw std::runtime_error(
+                "FTP cannot rename without risking replacement of a concurrently created target. "
+                "The source was retained.");
           RenameFile(source, dst, control);
           if (hooks.fileDone)
             hooks.fileDone(source, dst);

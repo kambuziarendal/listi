@@ -9,9 +9,18 @@
 
 int main(int argc, char **argv) {
   BApplication app("application/x-vnd.Listi-tar-edit-ownership");
-  if (argc != 2)
+  if (argc != 2 && argc != 3)
     return 2;
   using namespace Listi;
+  if (argc == 3) {
+    const auto oldPath = ChildLocation(OpenArchive(argv[1]), "old-name");
+    const auto newPath = ChildLocation(OpenArchive(argv[1]), "new-name");
+    auto result = Run(PrepareArchiveMutation(Job{Action::Rename, {oldPath}, newPath}), {});
+    for (const auto &error : result.errors)
+      if (error.find("extended TAR metadata") != std::string::npos)
+        return result.completed == 0 ? 0 : 1;
+    return 1;
+  }
   const char *name = "Listi:empty-outer-attribute";
   const auto isEmpty = [&](int fd) {
     attr_info info{};
@@ -25,7 +34,9 @@ int main(int argc, char **argv) {
   if (attr < 0 || fs_close_attr(attr) || !isEmpty(original) || close(original))
     return 2;
   const auto member = ChildLocation(OpenArchive(argv[1]), "remove");
-  auto result = Run(PrepareArchiveEditJob(argv[1], {}, {member}), {});
+  auto edit = PrepareArchiveEditJob(argv[1], {}, {member});
+  edit.archiveRenames.emplace("old-name", "new-name");
+  auto result = Run(edit, {});
   for (const auto &error : result.errors)
     std::cerr << error << std::endl;
   const int published = open(argv[1], O_RDONLY);

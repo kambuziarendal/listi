@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #pragma once
 #include "FileOperation.h"
+#include "ArchiveWriting.h"
 #include <set>
 #include <sys/stat.h>
 
@@ -12,6 +13,7 @@ public:
   LocalMoveTree(const std::vector<std::string> &, const Hooks &,
                 bool portableSource, std::optional<dev_t> requiredVolume = {});
   void Verify() const;
+  TarMemberMap TarMetadata(const std::string &targetFolder) const;
   void Remove(const std::string &root, const Hooks &);
 
 private:

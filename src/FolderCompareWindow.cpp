@@ -220,7 +220,7 @@ public:
         .Add(scroll)
         .Add(new BStringView("compare scope",
                              "Read-only comparison. Includes subfolders "
-                             "and hidden files; links are not followed. "
+                             "and listed hidden files; links are not followed. "
                              "Attributes and permissions are not compared."))
         .AddGroup(B_HORIZONTAL, 8)
         .AddGlue()
@@ -352,6 +352,6 @@ public:
 } // namespace
 bool FolderCompareBusy() { return activeComparisons.load() != 0; }
 
-void OpenFolderCompare(const std::string &left, const std::string &right) {
-  new CompareWindow(left, right);
+BWindow *OpenFolderCompare(const std::string &left, const std::string &right) {
+  return new CompareWindow(left, right);
 }

@@ -42,16 +42,25 @@ AFTER = "modify=20240229123000.1234567892;"
 
 
 LEGACY = {"list-only", "hidden-only", "mixed-nested", "guarded-rename"}
-UPLOADS = {"upload-uncertain", "upload-cancel"}
+UPLOADS = {"upload-uncertain", "upload-cancel", "upload-mlsd", "cancel-mlsd", "upload-cleanup"}
+FILTERED = {"mlsd-hidden", "mlsd-mixed", "upload-mlsd"}
 
 
 class MetadataFS(AbstractedFS):
+    def ftp2fs(self, path):
+        resolved = Path(super().ftp2fs(path))
+        if resolved.parent.name == "rename-insensitive" and resolved.name == "report":
+            return str(resolved.with_name("Report"))
+        return str(resolved)
+
     def format_list(self, basedir, listing, *args, **kwargs):
         if Path(basedir).name in LEGACY | UPLOADS:
             listing = [name for name in listing if not name.startswith(".")]
         return super().format_list(basedir, listing, *args, **kwargs)
 
     def format_mlsx(self, basedir, listing, perms, facts, ignore_err=True):
+        if ignore_err and Path(basedir).name in FILTERED:
+            listing = [name for name in listing if not name.startswith(".")]
         for row in super().format_mlsx(basedir, listing, perms, facts, ignore_err):
             attrs, name = row.split(b" ", 1)
             leaf = name.rstrip().decode()
@@ -103,15 +112,26 @@ class MetadataFTP(FTPHandler):
         folder = Path(path)
         if (folder.name in LEGACY | {"list-all"} or
                 (folder.name == "upload-uncertain" and any(folder.glob("*.part"))) or
-                (folder.name == "upload-cancel" and self.cancel_signal.exists())):
+                (folder.name == "upload-cancel" and (self.cancel_signal.parent / folder.name).exists())):
             self.respond("502 MLSD unavailable.")
             return
         return super().ftp_MLSD(path)
+
+    def ftp_MLST(self, path):
+        file = Path(path)
+        if (file.name == ".settings" and file.parent.name in LEGACY or
+                file.suffix == ".part" and file.exists() and
+                file.parent.name in {"upload-uncertain", "upload-mlsd"}):
+            self.respond("550 Entry unavailable.")
+            return
+        return super().ftp_MLST(path)
 
     def on_file_sent(self, filename):
         # Small transfers can finish before pyftpdlib assigns DTPHandler.cmd.
         # This callback runs before servicing the client's next stat/list.
         path = Path(filename)
+        if path.suffix == ".part" and path.parent.name == "upload-cleanup":
+            (path.parent / "upload.txt").write_bytes(b"other client")
         if path.name == "sample" and path.parent.name in {"identity-compare", "identity-copy"}:
             replacement = path.with_suffix(".next")
             if path.read_bytes() == b"aaaa":
@@ -123,9 +143,11 @@ class MetadataFTP(FTPHandler):
 
     def ftp_RETR(self, path):
         file = Path(path)
-        if file.parent.name == "upload-cancel" and file.suffix == ".part":
+        if file.parent.name in {"upload-cancel", "cancel-mlsd"} and file.suffix == ".part":
             # Only reached when the client verifies a STOR acknowledged earlier.
-            self.cancel_signal.touch()
+            (self.cancel_signal.parent / file.parent.name).touch()
+            if file.parent.name == "cancel-mlsd":
+                FILTERED.add(file.parent.name)
         return super().ftp_RETR(path)
 
 
@@ -154,6 +176,8 @@ class MetadataSFTP(paramiko.SFTPServerInterface):
 
     def resolve(self, path):
         candidate = (self.root / path.lstrip("/")).resolve()
+        if candidate.parent.name == "aliases" and candidate.name == "report":
+            candidate = candidate.with_name("Report")
         if not candidate.is_relative_to(self.root):
             raise PermissionError(13, "Outside fixture")
         return candidate
@@ -177,6 +201,13 @@ class MetadataSFTP(paramiko.SFTPServerInterface):
             return item
         except OSError as error:
             return paramiko.SFTPServer.convert_errno(error.errno)
+
+    def rename(self, oldpath, newpath):
+        (self.root / "sftp-rename-seen").touch()
+        return paramiko.SFTP_PERMISSION_DENIED
+
+    def posix_rename(self, oldpath, newpath):
+        return self.rename(oldpath, newpath)
 
     def open(self, path, flags, attr):
         if flags != os.O_RDONLY:
@@ -222,11 +253,17 @@ def main():
         sample = ftp_root / directory / "sample"
         sample.write_bytes(b"aaaa")
         os.utime(sample, (MODIFIED, MODIFIED))
-    for directory in ("hidden-only", "guarded-rename", "outer/mixed-nested"):
+    for directory in ("rename-sensitive", "rename-insensitive"):
+        folder = ftp_root / directory
+        folder.mkdir()
+        (folder / "Report").write_bytes(b"original")
+        (folder / "third").write_bytes(b"third")
+    for directory in ("hidden-only", "guarded-rename", "outer/mixed-nested",
+                      "mlsd-hidden", "mlsd-outer/mlsd-mixed"):
         folder = ftp_root / directory
         folder.mkdir(parents=True)
         (folder / ".settings").write_bytes(b"hidden\n")
-        if directory != "hidden-only":
+        if directory not in {"hidden-only", "mlsd-hidden"}:
             (folder / "visible").write_bytes(b"visible\n")
     for directory in UPLOADS:
         (ftp_root / directory).mkdir()
@@ -241,6 +278,9 @@ def main():
     sftp_root = staging / "sftp"
     (sftp_root / "signals").mkdir(parents=True)
     MetadataFTP.cancel_signal = sftp_root / "signals" / "checking-upload"
+    (sftp_root / "aliases").mkdir()
+    (sftp_root / "aliases" / "Report").write_bytes(b"original")
+    (sftp_root / "aliases" / "third").write_bytes(b"third")
     (sftp_root / "compare").mkdir()
     for name in ("known", "unknown", "compare/known"):
         file = sftp_root / name
@@ -266,7 +306,7 @@ def main():
     auth = DummyAuthorizer()
     auth.add_user(USER, PASSWORD, str(ftp_root), perm="elr")
     for directory in UPLOADS:
-        auth.override_perm(USER, str(ftp_root / directory), perm="elrw")
+        auth.override_perm(USER, str(ftp_root / directory), perm="elrwd")
     MetadataFTP.authorizer = auth
     class SFTPServer(socketserver.ThreadingTCPServer):
         allow_reuse_address = True

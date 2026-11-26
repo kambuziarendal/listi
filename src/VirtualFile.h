@@ -74,16 +74,19 @@ std::string LocationLeaf(const std::string &);
 bool SetConnection(const std::string &url, const Connection &);
 void RequireConnection(const std::string &url);
 Connection GetConnection(const std::string &url);
-// FTP LIST, even with -a, does not guarantee that the server showed all names.
+// FTP servers may omit names from both MLSD and LIST.
 enum class ListingMethod { Provider, FtpMlsd, FtpList };
+inline bool VisibleEntriesOnly(ListingMethod method) {
+  return method == ListingMethod::FtpMlsd || method == ListingMethod::FtpList;
+}
 // Browsers hide interrupted volumes. Integrity-sensitive callers also collect
 // the exact paths that were omitted without opening them.
 std::vector<FileEntry> ListFiles(const std::string &,
                                  const TransferControl & = {},
                                  std::vector<std::string> *omitted = nullptr,
                                  ListingMethod *method = nullptr);
-// False means confirmed absence. An incomplete FTP LIST that omits the
-// requested name throws rather than authorizing a mutation at that path.
+// False means the provider reports absence; a directory listing alone does
+// not establish absence on FTP. Ambiguous replies throw.
 // Only a copy's initial FTP/SFTP lookup may reuse an entry from its traversal.
 // Leave discovered unset when checking the current revision.
 bool StatFile(const std::string &, FileEntry &, const TransferControl & = {},

@@ -349,19 +349,20 @@ std::vector<FileEntry> LibarchiveList(const Location &location,
       item.directory = true;
     } else if (type == AE_IFDIR) {
       item.directory = true;
-      item.permissions = LIBCALL(reader.lib, archive_entry_perm)(entry) & 0777;
+      item.permissions = LIBCALL(reader.lib, archive_entry_perm)(entry) & 07777;
     } else {
       item.link = type == AE_IFLNK ||
                   LIBCALL(reader.lib, archive_entry_hardlink)(entry) != nullptr;
       item.size = LIBCALL(reader.lib, archive_entry_size)(entry);
       item.sizeKnown = LIBCALL(reader.lib, archive_entry_size_is_set)(entry);
-      item.permissions = LIBCALL(reader.lib, archive_entry_perm)(entry) & 0777;
+      item.permissions = LIBCALL(reader.lib, archive_entry_perm)(entry) & 07777;
       if (type != AE_IFREG && !item.link)
         throw std::runtime_error("Archive contains a special device entry");
     }
     if (!implied) {
-      item.modified = LIBCALL(reader.lib, archive_entry_mtime)(entry);
-      item.modifiedKnown = LIBCALL(reader.lib, archive_entry_mtime_is_set)(entry);
+      if (LIBCALL(reader.lib, archive_entry_mtime_is_set)(entry))
+        item.SetModification(LIBCALL(reader.lib, archive_entry_mtime)(entry),
+                             LIBCALL(reader.lib, archive_entry_mtime_nsec)(entry));
     }
   }
   return children.Finish();

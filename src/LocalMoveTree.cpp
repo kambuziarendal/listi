@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "LocalMoveTree.h"
 #include "MoveVolume.h"
+#include "ArchiveMetadata.h"
 #include "VirtualFile.h"
 #include <Node.h>
 #include <cerrno>
@@ -25,7 +26,7 @@ bool Identity(const struct stat &a, const struct stat &b) {
   return a.st_dev == b.st_dev && a.st_ino == b.st_ino && a.st_mode == b.st_mode;
 }
 bool Same(const struct stat &a, const struct stat &b) {
-  return Identity(a, b) && a.st_nlink == b.st_nlink && a.st_size == b.st_size &&
+  return Identity(a, b) && a.st_uid == b.st_uid && a.st_gid == b.st_gid && a.st_nlink == b.st_nlink && a.st_size == b.st_size &&
          a.st_mtim.tv_sec == b.st_mtim.tv_sec &&
          a.st_mtim.tv_nsec == b.st_mtim.tv_nsec &&
          a.st_ctim.tv_sec == b.st_ctim.tv_sec &&
@@ -139,6 +140,28 @@ void LocalMoveTree::Verify() const {
     if (portable)
       Portable(entry.first, now);
   }
+}
+// Use the original frozen stat records, not the private staging files.
+TarMemberMap LocalMoveTree::TarMetadata(const std::string &targetFolder) const {
+  TarMemberMap metadata;
+  ArchiveMetadataBudget budget;
+  for (const auto &[selected, root] : aliases) {
+    const auto leaf = LocationLeaf(selected);
+    const auto target = targetFolder.empty() ? leaf : Join(targetFolder, leaf);
+    auto record = [&](const std::string &name, const struct stat &st) {
+      budget.Charge(sizeof(TarMemberMap::value_type) + ArchiveMetadataBudget::NodeOverhead + name.size());
+      TarMemberMetadata member{st.st_uid, st.st_gid, {}, {}, bool(S_ISDIR(st.st_mode)),
+                               unsigned(st.st_mode) & 07777, st.st_mtim.tv_sec, st.st_mtim.tv_nsec};
+      Require(metadata.emplace(name, std::move(member)).second,
+              "Conflicting local move destinations: " + name);
+    };
+    record(target, entries.at(root));
+    const auto prefix = root + "/";
+    for (auto it = entries.lower_bound(prefix);
+         it != entries.end() && it->first.compare(0, prefix.size(), prefix) == 0; ++it)
+      record(target + it->first.substr(root.size()), it->second);
+  }
+  return metadata;
 }
 void LocalMoveTree::Remove(const std::string &selected, const Hooks &hooks) {
   const auto &root = aliases.at(selected);

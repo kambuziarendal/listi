@@ -52,10 +52,9 @@ bool state(const CompareResult &r, const std::string &name, CompareState s) {
       return e.state == s;
   return false;
 }
-bool NumericSizeOrder(BApplication &app, const std::string &left,
+bool NumericSizeOrder(const std::string &left,
                       const std::string &right) {
-  OpenFolderCompare(left, right);
-  BWindow *window = app.WindowAt(0);
+  BWindow *window = OpenFolderCompare(left, right);
   if (!window)
     return false;
   BMessenger target(window);
@@ -81,19 +80,20 @@ bool NumericSizeOrder(BApplication &app, const std::string &left,
   target.SendMessage(B_QUIT_REQUESTED);
   return sorted;
 }
-bool ShowsIncompletePath(BApplication &app, const std::string &left,
+bool ShowsIncompletePath(const std::string &left,
                          const std::string &right, const std::string &blocked) {
-  OpenFolderCompare(left, right);
-  BWindow *window = app.WindowAt(0);
+  BWindow *window = OpenFolderCompare(left, right);
   if (!window)
     return false;
   BMessenger target(window);
   target.SendMessage('cmha');
   bool incomplete = false;
-  for (int i = 0; i < 250 && !incomplete; ++i) {
+  std::string text;
+  const auto deadline = system_time() + 10000000;
+  while (system_time() < deadline && !incomplete) {
     if (window->LockWithTimeout(20000) == B_OK) {
       auto summary = dynamic_cast<BTextView *>(window->FindView("compare summary"));
-      const std::string text = summary ? summary->Text() : "";
+      text = summary ? summary->Text() : "(missing summary view)";
       incomplete = text.find("Incomplete:") != std::string::npos &&
                    text.find(blocked) != std::string::npos &&
                    text.find("No differences found") == std::string::npos;
@@ -102,12 +102,14 @@ bool ShowsIncompletePath(BApplication &app, const std::string &left,
     snooze(10000);
   }
   target.SendMessage(B_QUIT_REQUESTED);
+  if (!incomplete)
+    std::cerr << "Expected incomplete status for " << blocked
+              << "; final window summary: " << text << std::endl;
   return incomplete;
 }
-bool FilterResetsFocusedRow(BApplication &app, const std::string &left,
+bool FilterResetsFocusedRow(const std::string &left,
                             const std::string &right) {
-  OpenFolderCompare(left, right);
-  BWindow *window = app.WindowAt(0);
+  BWindow *window = OpenFolderCompare(left, right);
   if (!window)
     return false;
   BMessenger target(window);
@@ -184,7 +186,7 @@ int main() {
   try {
     put(l + "/a", std::string(10, 'a'));
     put(l + "/b", "bb");
-    check(NumericSizeOrder(app, l, r),
+    check(NumericSizeOrder(l, r),
           "comparison byte column sorts 2 before 10 and preserves exact displayed bytes");
     unlink((l + "/a").c_str());
     unlink((l + "/b").c_str());
@@ -216,8 +218,14 @@ int main() {
     const auto withSibling = CompareFolders({peer, blockedParent, true});
     check(!withSibling.complete && withSibling.error.find(blocked) != std::string::npos,
           "matching healthy siblings cannot hide an omitted child on the right");
-    check(ShowsIncompletePath(app, blockedParent, peer, blocked),
+    // A different window can still be open when a new comparison starts.
+    auto *other = new BWindow(BRect(20, 20, 180, 100), "Other window",
+                              B_TITLED_WINDOW, 0);
+    other->Show();
+    BMessenger otherWindow(other);
+    check(ShowsIncompletePath(blockedParent, peer, blocked),
           "SHA-256 window reports incomplete and names the omitted directory");
+    otherWindow.SendMessage(B_QUIT_REQUESTED);
     const auto blockedRoot = CompareFolders({blocked, peer, true});
     check(!blockedRoot.complete && blockedRoot.error.find(blocked) != std::string::npos,
           "a registered unavailable comparison root is reported by its exact path");
@@ -364,7 +372,7 @@ int main() {
     put(filterLeft + "/a-match", "equal");
     put(filterRight + "/a-match", "equal");
     put(filterRight + "/z-different", "right only");
-    check(FilterResetsFocusedRow(app, filterLeft, filterRight),
+    check(FilterResetsFocusedRow(filterLeft, filterRight),
           "showing matching entries safely clears the previous row focus and "
           "selection");
     CompareResult limited;

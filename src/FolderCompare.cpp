@@ -111,7 +111,7 @@ bool UncertainAbsence(const Tree &tree, std::string name) {
     name.resize(slash == std::string::npos ? 0 : slash);
     auto parent = tree.find(name);
     if (parent != tree.end())
-      return parent->second.listing == ListingMethod::FtpList;
+      return VisibleEntriesOnly(parent->second.listing);
   }
 }
 bool Same(const Item &a, const Item &b) {
@@ -330,14 +330,14 @@ CompareResult CompareFolders(const CompareRequest &r,
     Need(leftGuard == ArchiveGuard(r.left) &&
              rightGuard == ArchiveGuard(r.right),
          "An archive changed during comparison. Run it again.");
-    const auto usedFtpList = [](const Tree &tree) {
+    const auto limitedListing = [](const Tree &tree) {
       return std::any_of(tree.begin(), tree.end(), [](const auto &row) {
-        return row.second.listing == ListingMethod::FtpList;
+        return VisibleEntriesOnly(row.second.listing);
       });
     };
-    if (usedFtpList(left) || usedFtpList(right))
+    if (limitedListing(left) || limitedListing(right))
       result.error = "Only entries shown by the FTP server were compared. "
-                     "Its LIST response may omit hidden entries.";
+                     "Its directory listings may omit readable entries.";
     else if (result.unverified)
       result.error = "Some entries could not be verified. See the result rows.";
     result.complete = result.error.empty();

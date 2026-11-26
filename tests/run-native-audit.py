@@ -93,19 +93,40 @@ def run_tar_edit_ownership(binary):
     with tempfile.TemporaryDirectory(prefix="listi-tar-owner-") as folder:
         path = Path(folder) / "owners.tar.gz"
         with tarfile.open(path, "w:gz") as archive:
-            for name in ("keep", "remove"):
+            directory = tarfile.TarInfo("shared")
+            directory.type = tarfile.DIRTYPE
+            directory.mode = 0o1777
+            directory.mtime = 1700000000.125
+            archive.addfile(directory)
+            for name in ("keep", "remove", "old-name"):
                 header = tarfile.TarInfo(name)
+                if name == "keep":
+                    header.mode = 0o4750
+                    header.mtime = 1700000001.375
                 header.uid, header.gid = 1001, 2002
                 header.uname, header.gname = "original-owner", "original-group"
                 header.size = len(name)
                 archive.addfile(header, io.BytesIO(name.encode()))
         subprocess.run([binary, path], cwd=ROOT, check=True, timeout=90)
         with tarfile.open(path, "r:gz") as archive:
-            assert archive.getnames() == ["keep"]
+            assert sorted(archive.getnames()) == ["keep", "new-name", "shared"]
+            directory = archive.getmember("shared")
+            assert directory.isdir() and directory.mode == 0o1777
+            assert directory.mtime == 1700000000.125
+            assert archive.extractfile("new-name").read() == b"old-name"
             member = archive.getmember("keep")
             assert (member.uid, member.gid) == (1001, 2002)
             assert (member.uname, member.gname) == ("original-owner", "original-group")
+            assert member.mode == 0o4750 and member.mtime == 1700000001.375
             assert archive.extractfile(member).read() == b"keep"
+
+        with tarfile.open(path, "w:gz") as archive:
+            header = tarfile.TarInfo("old-name")
+            header.pax_headers["SCHILY.xattr.user.provenance"] = "preserve-me"
+            archive.addfile(header)
+        original = path.read_bytes()
+        subprocess.run([binary, path, "unsupported"], cwd=ROOT, check=True, timeout=90)
+        assert path.read_bytes() == original
 
 
 def run_tar_move_ownership(binary):
@@ -125,6 +146,10 @@ def run_tar_move_ownership(binary):
                 header.uname, header.gname = f"owner{owner}", f"group{owner}"
                 header.type = tarfile.DIRTYPE if data is None else tarfile.REGTYPE
                 header.mode = 0o755 if data is None else 0o644
+                if name == "recv/local-item":
+                    # Damage only numeric ownership, not content, names, mode or time.
+                    header.uname = header.gname = ""
+                    header.mode, header.mtime = 0o640, 1700000000.125
                 header.size = len(data) if data is not None else 0
                 archive.addfile(header, io.BytesIO(data) if data is not None else None)
 
@@ -158,6 +183,53 @@ def run_tar_move_ownership(binary):
             else:
                 verify(dst, moved)
                 verify(src, {"box": source["box"], "keep": source["keep"]})
+
+    for damage in (False, True):
+        with tempfile.TemporaryDirectory(prefix="listi-local-tar-owner-") as folder:
+            src = Path(folder) / "local-item"
+            src.write_bytes(b"original bytes")
+            os.chown(src, 1003, 2003)
+            os.chmod(src, 0o640)
+            timestamp = 1700000000125000000
+            os.utime(src, ns=(timestamp, timestamp))
+            assert (src.stat().st_uid, src.stat().st_gid) == (1003, 2003)
+            dst = Path(folder) / "target.tar"
+            write(dst, target)
+            command = [binary, src, dst]
+            if damage:
+                substitute = Path(folder) / "changed.tar"
+                write(substitute, {**target, "recv/local-item": (9, b"original bytes")})
+                command.append(substitute)
+            subprocess.run(command, cwd=ROOT, check=True, timeout=90)
+            with tarfile.open(dst) as archive:
+                header = archive.getmember("recv/local-item")
+                assert (header.uid, header.gid) == ((1009, 2009) if damage else (1003, 2003))
+                assert archive.extractfile(header).read() == b"original bytes"
+                assert header.mode == 0o640 and header.mtime == 1700000000.125
+            if damage:
+                assert src.read_bytes() == b"original bytes"
+                assert (src.stat().st_uid, src.stat().st_gid) == (1003, 2003)
+            else:
+                assert not src.exists()
+
+    with tempfile.TemporaryDirectory(prefix="listi-tar-portable-") as folder:
+        from zipfile import ZipFile
+        src, dst, local = (Path(folder) / leaf for leaf in ("source.tar", "target.zip", "local"))
+        write(src, source)
+        original = src.read_bytes()
+        local.mkdir()
+        with ZipFile(dst, "w") as archive:
+            archive.writestr("recv/", "")
+        prior_zip = dst.read_bytes()
+        for target_path in (local, dst):
+            subprocess.run([binary, src, target_path, "unsupported"], cwd=ROOT, check=True, timeout=90)
+            assert src.read_bytes() == original and dst.read_bytes() == prior_zip
+            assert list(local.iterdir()) == []
+        local_file = Path(folder) / "local-item"
+        local_file.write_bytes(b"original bytes")
+        os.chown(local_file, 1003, 2003)
+        subprocess.run([binary, local_file, dst, "unsupported"], cwd=ROOT, check=True, timeout=90)
+        assert local_file.read_bytes() == b"original bytes" and dst.read_bytes() == prior_zip
 
 
 def build_configuration():
