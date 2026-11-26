@@ -293,7 +293,12 @@ static void CheckFloatingInspector(BApplication &app) {
     return window.Bounds().Width() == 640 && window.Bounds().Height() == 460;
   }));
   assert(owner.SendMessage(kQuickView) == B_OK);
-  assert(workspace() == WorkspaceName(Workspace::tviskipt));
+  std::string observedWorkspace;
+  wait([&] {
+    observedWorkspace = workspace();
+    return !observedWorkspace.empty();
+  }, "owner answers the workspace query after Quick view");
+  assert(observedWorkspace == WorkspaceName(Workspace::tviskipt));
   wait([&] { return with(owner, [&](BWindow &window) {
     auto *right = window.FindView("second panel tools");
     return right && !right->IsHidden() && !window.FindView("inspector");

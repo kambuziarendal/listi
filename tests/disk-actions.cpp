@@ -6,7 +6,9 @@
 #include <DiskDevice.h>
 #include <DiskDeviceRoster.h>
 #include <Entry.h>
+#include <Looper.h>
 #include <Message.h>
+#include <OS.h>
 #include <Path.h>
 #include <Volume.h>
 #include <VolumeRoster.h>
@@ -53,13 +55,58 @@ status_t UnmountWhenIdle(const DiskListing &disk, const BPath &path,
   return B_BUSY;
 }
 
+class DiskUpdates : public BLooper {
+public:
+  explicit DiskUpdates(int32 partition)
+      : BLooper("disk update test"), partition(partition),
+        mounted(create_sem(0, "partition mounted")),
+        unmounted(create_sem(0, "partition unmounted")) {
+    assert(mounted >= 0 && unmounted >= 0);
+  }
+
+  ~DiskUpdates() override {
+    delete_sem(mounted);
+    delete_sem(unmounted);
+  }
+
+  void MessageReceived(BMessage *message) override {
+    if (message->what != kDiskDeviceUpdate ||
+        message->GetInt32("id", -1) != partition) {
+      BLooper::MessageReceived(message);
+      return;
+    }
+    const auto event = message->GetInt32("event", -1);
+    if (event == B_DEVICE_PARTITION_MOUNTED)
+      release_sem(mounted);
+    if (event == B_DEVICE_PARTITION_UNMOUNTED)
+      release_sem(unmounted);
+  }
+
+  void Expect(int32 event) const {
+    const auto sem = event == B_DEVICE_PARTITION_MOUNTED ? mounted : unmounted;
+    assert(acquire_sem_etc(sem, 1, B_RELATIVE_TIMEOUT, 5000000) == B_OK);
+  }
+
+private:
+  int32 partition;
+  sem_id mounted, unmounted;
+};
+
 void VerifyRoundTrip(const char *devicePath) {
   const auto first = FindFixture(devicePath);
   assert(first.mountedDevice < 0);
+  auto *updates = new DiskUpdates(first.partition.id);
+  assert(updates->Run() >= 0);
+  const BMessenger updateTarget(updates);
+  assert(WatchDiskPartitions(updateTarget) == B_OK);
   auto stale = first.partition;
   ++stale.offset;
   assert(MountDisk(stale) == B_ENTRY_NOT_FOUND);
+  auto differentContent = first.partition;
+  differentContent.contentName = "Different disk";
+  assert(MountDisk(differentContent) == B_ENTRY_NOT_FOUND);
   assert(MountDisk(first.partition) == B_OK);
+  updates->Expect(B_DEVICE_PARTITION_MOUNTED);
 
   const auto mounted = FindFixture(devicePath);
   assert(mounted.mountedDevice >= 0 && !mounted.protectedVolume);
@@ -84,6 +131,7 @@ void VerifyRoundTrip(const char *devicePath) {
   assert(FindFixture(devicePath).mountedDevice == info.st_dev);
   assert(close(fd) == 0);
   assert(UnmountWhenIdle(mounted, path, info) == B_OK);
+  updates->Expect(B_DEVICE_PARTITION_UNMOUNTED);
   assert(FindFixture(devicePath).mountedDevice < 0);
 
   const auto second = FindFixture(devicePath);
@@ -102,14 +150,17 @@ void VerifyRoundTrip(const char *devicePath) {
   assert(lstat(path.Path(), &info) == 0);
   assert(UnmountWhenIdle(remounted, path, info) == B_OK);
   assert(FindFixture(devicePath).mountedDevice < 0);
-  puts("File-backed BFS: stale, busy, unmount, remount and data verified");
+  StopWatchingDiskPartitions(updateTarget);
+  assert(updates->Lock());
+  updates->Quit();
+  puts("File-backed BFS: stale, busy, mount notifications, remount and data verified");
 }
 
 } // namespace
 
 int main() {
   BApplication app("application/x-vnd.Listi-DiskActionsTest");
-  DiskPartition partition{42, "/dev/disk/test", "bfs", 100, 1024};
+  DiskPartition partition{42, "/dev/disk/test", "bfs", 100, 1024, "Label"};
   BMessage message;
   partition.WriteTo(message);
   assert(DiskPartition::ReadFrom(message) == partition);

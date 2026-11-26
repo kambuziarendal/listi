@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.38.0-41 (private alpha candidate)
+
+- Disks also listens for Haiku's final partition mount and unmount notifications, so it can refresh after another application changes a volume.
+- Mount and unmount actions recheck the filesystem label as well as the selected partition's location and geometry. A different label requires a fresh selection. Identical labels and geometry do not identify a physical disk uniquely.
+
 ## 0.38.0-40 (private alpha candidate)
 
 - In Disks, right-click a recognized unmounted volume to mount it, or a mounted volume to unmount it. The boot volume cannot be unmounted from Listi. This does not change the known FAT disconnect limitation.

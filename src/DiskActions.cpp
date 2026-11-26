@@ -24,8 +24,9 @@ DiskPartition Identify(BPartition &partition) {
   if (!partition.ContainsFileSystem() || partition.GetPath(&path) != B_OK ||
       !partition.ContentType())
     return {};
+  const char *name = partition.RawContentName();
   return {partition.ID(), path.Path(), partition.ContentType(),
-          partition.Offset(), partition.Size()};
+          partition.Offset(), partition.Size(), name ? name : ""};
 }
 
 // Fail closed if the boot volume cannot be identified. The synthetic root
@@ -42,8 +43,9 @@ bool ProtectedVolume(dev_t device, const char *path) {
 } // namespace
 
 bool DiskPartition::operator==(const DiskPartition &other) const {
-  return std::tie(id, devicePath, type, offset, size) ==
-         std::tie(other.id, other.devicePath, other.type, other.offset, other.size);
+  return std::tie(id, devicePath, type, offset, size, contentName) ==
+         std::tie(other.id, other.devicePath, other.type, other.offset, other.size,
+                  other.contentName);
 }
 
 void DiskPartition::WriteTo(BMessage &message) const {
@@ -52,6 +54,7 @@ void DiskPartition::WriteTo(BMessage &message) const {
   message.AddString("partitionType", type.c_str());
   message.AddInt64("partitionOffset", offset);
   message.AddInt64("partitionSize", size);
+  message.AddString("partitionContentName", contentName.c_str());
 }
 
 DiskPartition DiskPartition::ReadFrom(const BMessage &message) {
@@ -59,7 +62,8 @@ DiskPartition DiskPartition::ReadFrom(const BMessage &message) {
           message.GetString("partitionPath", ""),
           message.GetString("partitionType", ""),
           message.GetInt64("partitionOffset", -1),
-          message.GetInt64("partitionSize", -1)};
+          message.GetInt64("partitionSize", -1),
+          message.GetString("partitionContentName", "")};
 }
 
 void VisitDiskPartitions(const std::function<bool(const DiskListing &)> &visit) {
@@ -101,9 +105,11 @@ void VisitDiskPartitions(const std::function<bool(const DiskListing &)> &visit) 
 }
 
 status_t WatchDiskPartitions(const BMessenger &target) {
+  // VFS broadcasts unmount before clearing the partition's mounted state.
+  // The disk manager publishes a second event once its inventory is current.
   return BDiskDeviceRoster().StartWatching(
-      target, B_DEVICE_REQUEST_PARTITION | B_DEVICE_REQUEST_DEVICE |
-                  B_DEVICE_REQUEST_DEVICE_LIST);
+      target, B_DEVICE_REQUEST_MOUNTING | B_DEVICE_REQUEST_PARTITION |
+                  B_DEVICE_REQUEST_DEVICE | B_DEVICE_REQUEST_DEVICE_LIST);
 }
 
 void StopWatchingDiskPartitions(const BMessenger &target) {

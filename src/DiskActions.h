@@ -18,6 +18,8 @@ struct DiskPartition {
   int32 id = -1;
   std::string devicePath, type;
   int64 offset = -1, size = -1;
+  // The raw device ID can survive a removable media change.
+  std::string contentName;
 
   bool operator==(const DiskPartition &other) const;
   void WriteTo(BMessage &message) const;
