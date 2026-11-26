@@ -54,6 +54,7 @@ WRAPS = {
     "archive-move-scaling": ['lstat', 'realpath'],
     "terminal-delivery": ["_ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl",
                           "_ZN5BView10DrawBitmapEPK7BBitmap5BRectS3_"],
+    "application-services": ['fsync', '_Z14find_directory15directory_whichP5BPathbP7BVolume'],
     "directory-delivery": ['opendir', 'readdir', '_ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl'],
     "operation-queue": ['_ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl', 'opendir'],
     "flat-view": ['_ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl', 'opendir'],

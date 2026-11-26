@@ -27,6 +27,28 @@ BString SettingsPath(const char *name) {
   return p.Path();
 }
 namespace {
+template<class Store>
+void SaveNavigationEdit(const char *name, const BMessage &edit, BMessage &reply) {
+  const auto path = SettingsPath(name);
+  try {
+    auto current = Store::Load(path.String());
+    current.ApplyEdit(edit);
+    current.Save(path.String());
+    const auto snapshot = current.Message();
+    reply.AddMessage("snapshot", &snapshot);
+  } catch (const Listi::SettingsReplacedError &e) {
+    std::string warning = e.what();
+    try {
+      const auto observed = Store::Load(path.String()).Message();
+      reply.AddMessage("snapshot", &observed);
+    } catch (const std::exception &readError) {
+      warning += std::string(" Could not reload the current list: ") + readError.what();
+    }
+    reply.AddString("error", warning.c_str());
+  } catch (const std::exception &e) {
+    reply.AddString("error", e.what());
+  }
+}
 class Services : public BLooper {
   BMessenger app;
   const bool preferencesWritable;
@@ -74,19 +96,7 @@ public:
       BMessenger origin;
       if (m->FindMessenger("origin", &origin) == B_OK)
         reply.AddMessenger("origin", origin);
-      try {
-        auto file = SettingsPath("Lister_searches");
-        auto current = Listi::SavedSearches::Load(file.String());
-        current.ApplyEdit(*m);
-        auto snapshot = current.Message();
-        current.Save(file.String());
-        reply.AddMessage("snapshot", &snapshot);
-      } catch (const std::exception &e) {
-        std::string error =
-            "Could not save search criteria. The previous list is unchanged. ";
-        error += e.what();
-        reply.AddString("error", error.c_str());
-      }
+      SaveNavigationEdit<Listi::SavedSearches>("Lister_searches", *m, reply);
       app.SendMessage(&reply);
       return;
     }
@@ -96,19 +106,7 @@ public:
       BMessenger origin;
       if (m->FindMessenger("origin", &origin) == B_OK)
         reply.AddMessenger("origin", origin);
-      try {
-        auto file = SettingsPath("Lister_places");
-        auto current = Listi::SavedPlaces::Load(file.String());
-        current.ApplyEdit(*m);
-        auto snapshot = current.Message();
-        current.Save(file.String());
-        reply.AddMessage("snapshot", &snapshot);
-      } catch (const std::exception &e) {
-        std::string error =
-            "Could not save places. The previous list is unchanged. ";
-        error += e.what();
-        reply.AddString("error", error.c_str());
-      }
+      SaveNavigationEdit<Listi::SavedPlaces>("Lister_places", *m, reply);
       app.SendMessage(&reply);
       return;
     }
