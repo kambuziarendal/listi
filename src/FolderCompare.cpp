@@ -117,11 +117,7 @@ bool UncertainAbsence(const Tree &tree, std::string name) {
 bool Same(const Item &a, const Item &b) {
   if (a.local && b.local)
     return Stable(a.native, b.native) && a.link == b.link;
-  auto &x = a.entry;
-  auto &y = b.entry;
-  return x.directory == y.directory && x.link == y.link &&
-         x.sizeKnown == y.sizeKnown && (!x.sizeKnown || x.size == y.size) &&
-         x.SameModification(y);
+  return a.entry.SameRevision(b.entry);
 }
 void Validate(const Tree &before, const Tree &after) {
   Need(before.size() == after.size(),
