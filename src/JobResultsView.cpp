@@ -18,22 +18,7 @@ constexpr uint32 kSelectReport = 'jslr', kPreviousPage = 'jprp',
 constexpr size_t kPageSize = Listi::JobReportStore::kPageSize;
 constexpr size_t kActivityBytes = 65536;
 
-std::string Label(const std::string &status) {
-  if (status == "source-retained")
-    return "Copied; source retained";
-  if (status == "published-flush-failed")
-    return "Published; directory flush failed";
-  if (status == "partial")
-    return "Partially completed";
-  if (status == "unprocessed")
-    return "Not processed";
-  if (status.empty())
-    return "Unknown";
-  std::string label(status);
-  if (label.front() >= 'a' && label.front() <= 'z')
-    label.front() -= 'a' - 'A';
-  return label;
-}
+
 }
 
 JobResultsView::JobResultsView(OperationQueue *owner)
@@ -190,7 +175,7 @@ void JobResultsView::Display() {
     for (const auto &error : details.errors)
       page += "\nError: " + error + "\n";
     for (const auto &e : details.outcomes) {
-      page += "\n" + Label(e.status) + ": " + e.source;
+      page += "\n" + Listi::OutcomeLabel(e.status) + ": " + e.source;
       if (!e.destination.empty())
         page += "\n  Destination: " + e.destination;
       if (!e.detail.empty())

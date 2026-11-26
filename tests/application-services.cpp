@@ -4,8 +4,39 @@
 #include "SavedSearches.h"
 #include <Application.h>
 #include <OS.h>
+#include "SavedPlaces.h"
+#include <FindDirectory.h>
+#include <Path.h>
+#include <atomic>
 #include <cassert>
+#include <cerrno>
+#include <cstdlib>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <string>
+
+namespace {
+char settings[] = "/tmp/listi-navigation-XXXXXX";
+std::atomic<bool> failDirectorySync{false};
+}
+
+extern "C" status_t __real__Z14find_directory15directory_whichP5BPathbP7BVolume(
+    directory_which, BPath *, bool, BVolume *);
+extern "C" status_t __wrap__Z14find_directory15directory_whichP5BPathbP7BVolume(
+    directory_which which, BPath *path, bool create, BVolume *volume) {
+  if (which == B_USER_SETTINGS_DIRECTORY)
+    return path->SetTo(settings);
+  return __real__Z14find_directory15directory_whichP5BPathbP7BVolume(which, path, create, volume);
+}
+extern "C" int __real_fsync(int);
+extern "C" int __wrap_fsync(int fd) {
+  struct stat st;
+  if (failDirectorySync && fstat(fd, &st) == 0 && S_ISDIR(st.st_mode)) {
+    errno = EIO;
+    return -1;
+  }
+  return __real_fsync(fd);
+}
 
 class Receiver : public BLooper {
 public:
@@ -31,6 +62,7 @@ private:
 };
 
 int main() {
+  assert(mkdtemp(settings));
   BApplication app("application/x-vnd.Listi-ApplicationServicesTest");
   auto *notices = new Receiver;
   auto *pane = new Receiver;
@@ -67,6 +99,34 @@ int main() {
   const auto rejected = notices->Next();
   assert(rejected.what == kSearchesSaved && rejected.HasString("error"));
   assert(rejected.GetInt64("revision", -1) == 4 && rejected.GetInt64("serial", -1) == 12);
+
+  for (const auto kind : {uint32(kSavePlaces), kSaveSearches}) {
+    BMessage request(kind), edit;
+    edit.AddString("name", "Work");
+    edit.AddInt32("action", 0);
+    edit.AddString("path", "/work");
+    edit.AddString("root", "/work");
+    edit.AddString("expression", "note");
+    request.AddMessage("edit", &edit);
+    failDirectorySync = true;
+    assert(worker->PostMessage(&request) == B_OK);
+    auto result = notices->Next();
+    failDirectorySync = false;
+    BMessage snapshot;
+    assert(result.FindMessage("snapshot", &snapshot) == B_OK);
+    assert(std::string(result.GetString("error", "")).find("were replaced") != std::string::npos);
+    if (kind == kSavePlaces)
+      assert(Listi::SavedPlaces::FromMessage(snapshot).Find("/work"));
+    else
+      assert(Listi::SavedSearches::FromMessage(snapshot).Find("Work"));
+
+    // Retrying the same add is a conflict, not a second insertion.
+    assert(worker->PostMessage(&request) == B_OK);
+    result = notices->Next();
+    assert(result.HasString("error") && !result.HasMessage("snapshot"));
+    assert(unlink(SettingsPath(kind == kSavePlaces ? "Lister_places" : "Lister_searches").String()) == 0);
+  }
+  assert(rmdir(settings) == 0);
 
   const auto stop = [](BLooper *looper) {
     assert(looper->Lock());

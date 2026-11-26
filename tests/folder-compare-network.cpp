@@ -2,24 +2,60 @@
 // Optional integration lane. Requires task-owned SMB/FTP/SFTP fixtures.
 #include "FolderCompare.h"
 #include <Application.h>
-#include <iostream>
+#include <filesystem>
 #include <fstream>
-#include <sys/stat.h>
+#include <iostream>
 #include <unistd.h>
-int main(){
- BApplication app("application/x-vnd.Listi-compare-network");using namespace Listi;
- char pattern[]="/tmp/Listi-compare-network-XXXXXX";auto made=mkdtemp(pattern);if(!made)return 2;std::string local=made;
- mkdir((local+"/folder").c_str(),0700);
- std::ofstream(local+"/hello world.txt")<<"Listi network fixture\n";std::ofstream(local+"/Årsrapport.txt")<<"UTF-8 test\n";std::ofstream(local+"/folder/nested.txt")<<"nested\n";
- int failed=0;
- for(auto url:{"smb://127.0.0.1:1545/files","ftp://127.0.0.1:2221/","sftp://127.0.0.1:2322/"}){
-  Connection c;c.username="listitest";c.password="fixture-only";c.knownHosts="/boot/home/listi-compare-known-hosts";SetConnection(url,c);
-  auto result=CompareFolders({local,url,true});bool ok=result.complete&&result.different==0&&result.verified==3;
-  std::cout<<(ok?"PASS ":"FAIL ")<<url<<" SHA-256 identical tree: "<<result.error<<std::endl;failed+=!ok;
-  for(auto&e:result.entries)if(!CompareMatch(e.state))std::cout<<e.relative<<" "<<CompareLabel(e.state)<<" "<<e.detail<<std::endl;
-  std::ofstream(local+"/hello world.txt")<<"Xisti network fixture\n";
-  auto changed=CompareFolders({local,url,true});ok=changed.complete&&changed.different==1;std::cout<<(ok?"PASS ":"FAIL ")<<url<<" same-size content mismatch"<<std::endl;failed+=!ok;
-  std::ofstream(local+"/hello world.txt")<<"Listi network fixture\n";
- }
- for(auto p:{"/hello world.txt","/Årsrapport.txt","/folder/nested.txt"})unlink((local+p).c_str());rmdir((local+"/folder").c_str());rmdir(local.c_str());return failed?1:0;
+
+using namespace Listi;
+
+static bool ExpectedCoverage(const CompareResult &result, bool ftp) {
+  if (result.unverified != 0 || result.cancelled)
+    return false;
+  if (ftp)
+    return !result.complete && result.error.find("Only entries shown by the FTP server") != std::string::npos;
+  return result.complete && result.error.empty();
+}
+
+int main(int argc, char **argv) {
+  BApplication app("application/x-vnd.Listi-compare-network");
+  if (argc != 1 && argc != 5) {
+    std::cerr << "Usage: folder-compare-network [known_hosts smb_url ftp_url sftp_url]\n";
+    return 2;
+  }
+  char pattern[] = "/tmp/Listi-compare-network-XXXXXX";
+  if (!mkdtemp(pattern))
+    return 2;
+  const std::string local = pattern;
+  std::filesystem::create_directory(local + "/folder");
+  std::ofstream(local + "/Årsrapport.txt") << "UTF-8 test\n";
+  std::ofstream(local + "/folder/nested.txt") << "nested\n";
+  Connection connection;
+  connection.username = "listitest";
+  connection.password = "fixture-only";
+  connection.knownHosts = argc == 5 ? argv[1] : "/boot/home/listi-compare-known-hosts";
+  const std::vector<std::string> urls = argc == 5
+      ? std::vector<std::string>{argv[2], argv[3], argv[4]}
+      : std::vector<std::string>{"smb://127.0.0.1:1545/files", "ftp://127.0.0.1:2221/", "sftp://127.0.0.1:2322/"};
+  int failures = 0;
+  for (const auto &url : urls) {
+    const bool ftp = ParseLocation(url).scheme == "ftp";
+    SetConnection(url, connection);
+    for (const bool changed : {false, true}) {
+      std::ofstream(local + "/hello world.txt") << (changed ? "Xisti" : "Listi") << " network fixture\n";
+      const auto result = CompareFolders({local, url, true});
+      const bool ok = ExpectedCoverage(result, ftp) &&
+                      result.different == (changed ? 1u : 0u) &&
+                      result.verified == (changed ? 2u : 3u);
+      std::cout << (ok ? "PASS " : "FAIL ") << url
+                << (changed ? " same-size content mismatch" : " matching file hashes")
+                << ": " << result.error << std::endl;
+      failures += !ok;
+      if (!ok)
+        for (const auto &entry : result.entries)
+          std::cout << entry.relative << " " << CompareLabel(entry.state) << " " << entry.detail << std::endl;
+    }
+  }
+  std::filesystem::remove_all(local);
+  return failures ? 1 : 0;
 }

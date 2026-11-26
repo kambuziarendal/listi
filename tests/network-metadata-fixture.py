@@ -203,6 +203,16 @@ class MetadataSFTP(paramiko.SFTPServerInterface):
             return paramiko.SFTPServer.convert_errno(error.errno)
 
     def rename(self, oldpath, newpath):
+        old, new = self.resolve(oldpath), self.resolve(newpath)
+        control = self.root / "rename-control"
+        if old.parent == new.parent == control and {old.name, new.name} == {"original", "renamed"}:
+            try:
+                if new.exists():
+                    return paramiko.SFTP_FAILURE
+                old.rename(new)
+                return paramiko.SFTP_OK
+            except OSError as error:
+                return paramiko.SFTPServer.convert_errno(error.errno)
         (self.root / "sftp-rename-seen").touch()
         return paramiko.SFTP_PERMISSION_DENIED
 
@@ -278,6 +288,8 @@ def main():
     sftp_root = staging / "sftp"
     (sftp_root / "signals").mkdir(parents=True)
     MetadataFTP.cancel_signal = sftp_root / "signals" / "checking-upload"
+    (sftp_root / "rename-control").mkdir()
+    (sftp_root / "rename-control" / "original").write_bytes(b"control")
     (sftp_root / "aliases").mkdir()
     (sftp_root / "aliases" / "Report").write_bytes(b"original")
     (sftp_root / "aliases" / "third").write_bytes(b"third")

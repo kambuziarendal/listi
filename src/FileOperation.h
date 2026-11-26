@@ -85,7 +85,7 @@ struct Job {
   // For confirmed Trash restores, bind the previewed original paths as well as the entries.
   std::map<std::string, std::string> restoreTargets;
   // Metadata from the selected pane row, not a later lookup at the same URL.
-  std::map<std::string, FileEntry> expectedRemoteDeletes;
+  std::map<std::string, FileEntry> expectedRemoteSources;
 };
 class JobReportStore;
 struct Hooks {

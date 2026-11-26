@@ -2,8 +2,13 @@
 #pragma once
 #include <Message.h>
 #include <string>
+#include <stdexcept>
 #include <sys/stat.h>
 namespace Listi {
+class SettingsReplacedError : public std::runtime_error {
+public:
+  using std::runtime_error::runtime_error;
+};
 // Bounded regular-file read. Missing file returns an empty message.
 BMessage LoadMessageStore(const std::string &file, bool noFollow = false);
 // Failures before rename leave the previous file untouched. A later directory

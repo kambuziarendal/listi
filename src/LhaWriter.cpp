@@ -7,6 +7,7 @@
 #include "ArchiveTextLocale.h"
 #include "DynamicLibrary.h"
 #include "LocalMoveTree.h"
+#include <set>
 
 #include <archive.h>
 #include <archive_entry.h>

@@ -33,12 +33,14 @@ std::string Detail(const EntryOutcome &entry) {
   if (entry.upload) {
     const auto &upload = *entry.upload;
     if (upload.bytesWritten)
-      detail += "\n  Uploaded bytes: " + std::to_string(*upload.bytesWritten);
+      detail += "\n  Bytes acknowledged by transport: " + std::to_string(*upload.bytesWritten);
     if (upload.destinationSizeChecked)
-      detail += "\n  Destination size checked.";
+      detail += "\n  Staged file size checked.";
     if (upload.contentVerified)
-      detail += "\n  Uploaded contents verified.";
-    if (upload.publication == Publication::Unknown)
+      detail += "\n  Staged contents verified.";
+    if (upload.publication == Publication::NotAttempted)
+      detail += "\n  Final name not published.";
+    else if (upload.publication == Publication::Unknown)
       detail += "\n  Destination publication not confirmed.";
     else if (upload.publication == Publication::Published)
       detail += "\n  Destination published.";
@@ -51,6 +53,23 @@ std::string Detail(const EntryOutcome &entry) {
 }
 constexpr size_t kEmergencyRows = 16;
 } // namespace
+
+std::string OutcomeLabel(const std::string &status) {
+  if (status == "source-retained")
+    return "Copied; source retained";
+  if (status == "published-flush-failed")
+    return "Published; directory flush failed";
+  if (status == "partial")
+    return "Partially completed";
+  if (status == "unprocessed")
+    return "Not processed";
+  if (status.empty())
+    return "Unknown";
+  std::string label(status);
+  if (label.front() >= 'a' && label.front() <= 'z')
+    label.front() -= 'a' - 'A';
+  return label;
+}
 
 struct JobReportStore::State {
   sqlite3 *db = nullptr;

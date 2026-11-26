@@ -330,6 +330,8 @@ TarMemberMap MovedTarMetadata(const Job &remove, const std::string &targetFolder
 // before publishing anything, and check the actual destination before cleanup.
 void RequirePortableTarMove(const TarMemberMap &members, bool toLocal) {
   for (const auto &[name, member] : members) {
+    Require(!member.accessed && !member.changed && !member.created,
+            "Cannot preserve additional TAR timestamps for " + name + ". Use Copy; source retained.");
     Require(!(member.mode & 07000) && member.user.empty() && member.group.empty() &&
                 (toLocal || (member.uid == 0 && member.gid == 0)),
             "Cannot preserve selected permissions or ownership for " + name + ". Use Copy; source retained.");
@@ -562,6 +564,9 @@ Result RunArchiveEdit(const Job &job, const Hooks &hooks,
           struct stat st;
           Require(!lstat(destination.c_str(), &st) && S_ISREG(st.st_mode),
                   "Cannot verify replacement TAR member: " + name);
+          replaced->second.accessed.reset();
+          replaced->second.changed.reset();
+          replaced->second.created.reset();
           replaced->second.mode = st.st_mode & 0777;
           replaced->second.modified = st.st_mtim.tv_sec;
           replaced->second.nanoseconds = st.st_mtim.tv_nsec;

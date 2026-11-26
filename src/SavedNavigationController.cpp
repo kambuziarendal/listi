@@ -93,7 +93,7 @@ bool SavedNavigationController::FinishPlaceSave(const BMessage &reply) {
   }
   if (!pendingPlaces || reply.GetInt64("serial", -1) != placesSerial)
     return false;
-  if (!reply.HasString("error"))
+  if (refreshed || !reply.HasString("error"))
     places = refreshed ? SavedPlaces::FromMessage(snapshot) : std::move(*pendingPlaces);
   pendingPlaces.reset();
   return true;
@@ -182,7 +182,7 @@ SavedNavigationController::FinishSearchSave(const BMessage &result) {
 
   auto saved = std::move(*pendingSearch);
   pendingSearch.reset();
-  if (!result.HasString("error")) {
+  if (refreshed || !result.HasString("error")) {
     searches = refreshed ? SavedSearches::FromMessage(snapshot) : std::move(saved.next);
     ++searchesRevision;
   }

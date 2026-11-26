@@ -263,6 +263,16 @@ struct Runner {
   }
   using DirectoryStack = std::vector<std::pair<std::string, struct stat>>;
   DirectoryStack copyDirectories;
+  // The active stack protects ancestors; claims also survive returning from
+  // a sibling or starting the next selected root.
+  std::map<std::pair<dev_t, ino_t>, std::string> directoryClaims;
+  void ClaimDirectory(const struct stat &node, const std::string &source,
+                      const std::string &destination) {
+    auto claim = directoryClaims.emplace(std::make_pair(node.st_dev, node.st_ino), source);
+    if (!claim.second && claim.first->second != source)
+      throw std::runtime_error(destination + ": already used by source folder " +
+                               claim.first->second + "; not merged with " + source);
+  }
   void GuardDirectories() const {
     for (const auto &[path, expected] : copyDirectories) {
       struct stat now;
@@ -306,7 +316,7 @@ struct Runner {
     return a.st_uid == b.st_uid && a.st_gid == b.st_gid;
   }
   void SetMoveOwner(int fd, const struct stat &source, const std::string &path) {
-    if (!UnlinksMoveSource())
+    if (!UnlinksMoveSource() && !(deferCompletion && S_ISDIR(source.st_mode)))
       return;
     struct stat current;
     if (fstat(fd, &current) ||
@@ -315,10 +325,17 @@ struct Runner {
   }
   void VerifyMoveMetadata(const struct stat &source, const struct stat &target,
                           const std::string &path) {
-    if (UnlinksMoveSource() &&
-        (!SameOwner(source, target) || ((source.st_mode ^ target.st_mode) & 07000)))
-      throw std::runtime_error(path +
-          ": move ownership or special permissions differ; source retained");
+    if (!UnlinksMoveSource() && !(deferCompletion && S_ISDIR(source.st_mode)))
+      return;
+    if (!SameOwner(source, target))
+      throw std::runtime_error(path + ": move ownership differs; source retained");
+    if ((source.st_mode ^ target.st_mode) & 07777) {
+      char modes[64];
+      snprintf(modes, sizeof(modes), "source %04o, destination %04o",
+               unsigned(source.st_mode & 07777), unsigned(target.st_mode & 07777));
+      throw std::runtime_error(path + ": move permissions differ (" + modes +
+                               "); source retained");
+    }
   }
   struct CopiedEntry {
     std::string destination;
@@ -568,27 +585,6 @@ struct Runner {
       replaceAll = true;
     return true;
   }
-  bool Remove(const std::string &p) {
-    Check();
-    struct stat st;
-    if (lstat(p.c_str(), &st) != 0)
-      Fail(p);
-    if (S_ISDIR(st.st_mode)) {
-      Dir dir(opendir(p.c_str()), closedir);
-      if (!dir)
-        Fail(p);
-      while (auto e = NextEntry(dir.get(), p)) {
-        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
-          continue;
-        Remove(Join(p, e->d_name));
-      }
-      if (rmdir(p.c_str()) != 0)
-        Fail(p);
-    } else if (unlink(p.c_str()) != 0)
-      Fail(p);
-    Tick(p);
-    return true;
-  }
   using Snapshot = std::map<std::string, struct stat>;
   void SnapshotTree(const std::string &path, Snapshot &entries, dev_t volume,
                     unsigned depth = 0) {
@@ -616,6 +612,30 @@ struct Runner {
       if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
         continue;
       SnapshotTree(Join(path, e->d_name), entries, volume, depth + 1);
+    }
+  }
+  // Find existing nested directory conflicts before any sibling is delivered.
+  // CopyEntry checks again through pinned parents before using each merge.
+  void CheckMoveMerges(const std::string &source, const std::string &destination,
+                       const Snapshot &tree) {
+    for (const auto &[path, selected] : tree) {
+      if (!S_ISDIR(selected.st_mode))
+        continue;
+      Check();
+      const auto target = destination + path.substr(source.size());
+      struct stat existing;
+      if (!Exists(target, &existing))
+        continue;
+      if (!S_ISDIR(existing.st_mode))
+        throw std::runtime_error(target + ": destination is not a directory; not replaced");
+      RequireSameMoveVolume(guardedJob->expectedDestination.device, existing.st_dev);
+      try {
+        VerifyMoveMetadata(selected, existing, target);
+      } catch (const std::runtime_error &error) {
+        Outcome(path, target);
+        Problem(path, error.what());
+        throw;
+      }
     }
   }
   bool SameEntry(const struct stat &a, const struct stat &b) {
@@ -754,20 +774,23 @@ struct Runner {
     if ((ntfs && fsync(fd)) || futimens(fd, times) || fsync(fd))
       Fail(path);
   }
-  void Commit(const std::string &tmp, const std::string &dst, bool replace,
-              const struct stat &original) {
+  void CommitUnusedName(const std::string &source, const std::string &dst,
+                        const struct stat &selected, const PinnedDirectory &parent) {
     Guard();
-    struct stat now;
-    bool exists = Exists(dst, &now);
-    if (exists != replace || (exists && !SameEntry(now, original)))
-      throw std::runtime_error(
-          dst + ": destination changed during operation; left untouched");
-    BEntry e(tmp.c_str());
-    std::string parent = dst.substr(0, dst.find_last_of('/'));
-    if (parent.empty())
-      parent = "/";
-    BDirectory directory(parent.c_str());
-    status_t status = e.MoveTo(&directory, Leaf(dst).c_str(), replace);
+    parent.Verify();
+    if (Exists(dst))
+      throw std::runtime_error(dst + ": already exists; not replaced");
+    BDirectory directory(ParentLocation(dst).c_str());
+    struct stat opened, pinned;
+    if (directory.GetStat(&opened) != B_OK || fstat(parent.Descriptor(), &pinned) ||
+        opened.st_dev != pinned.st_dev || opened.st_ino != pinned.st_ino)
+      throw std::runtime_error(dst + ": destination folder changed; left untouched");
+    BEntry entry(source.c_str(), false);
+    if (entry.GetStat(&opened) != B_OK || opened.st_dev != selected.st_dev ||
+        opened.st_ino != selected.st_ino)
+      throw std::runtime_error(source + ": entry changed; left untouched");
+    // Haiku's native no-replace option is not atomic against concurrent writers.
+    const status_t status = entry.MoveTo(&directory, Leaf(dst).c_str(), false);
     if (status != B_OK)
       throw std::runtime_error(dst + ": " + strerror(status));
   }
@@ -853,26 +876,35 @@ struct Runner {
             unsigned depth = 0) {
     Outcome(src, dst);
     const size_t before = mutations;
+    bool folder = false;
+    auto recordPartial = [&] {
+      if (before == mutations)
+        return false;
+      if (folder && !depth && !deferCompletion)
+        ++result.partialCopies;
+      if (Outcome(src).status == "unprocessed")
+        Outcome(src).status = "partial";
+      return true;
+    };
     try {
-      const bool complete = CopyEntry(src, dst, depth);
-      if (!complete)
-        Outcome(src).status = before == mutations ? "skipped" : "partial";
+      const bool complete = CopyEntry(src, dst, depth, folder);
+      if (!complete && !recordPartial())
+        Outcome(src).status = "skipped";
       return complete;
     } catch (const Cancelled &) {
+      recordPartial();
       auto &row = Outcome(src);
-      if (before != mutations && row.status == "unprocessed")
-        row.status = "partial";
       if (row.status == "unprocessed")
         row.detail = "Cancelled before commit.";
       throw;
     } catch (const std::runtime_error &error) {
-      if (before != mutations && Outcome(src).status == "unprocessed")
-        Outcome(src).status = "partial";
+      recordPartial();
       Problem(src, error.what());
       throw;
     }
   }
-  bool CopyEntry(const std::string &src, std::string &dst, unsigned depth) {
+  bool CopyEntry(const std::string &src, std::string &dst, unsigned depth,
+                 bool &folder) {
     Check();
     if (depth > 64)
       throw std::runtime_error("Folder tree exceeds the safe copy depth");
@@ -880,6 +912,7 @@ struct Runner {
     struct stat st;
     if (lstat(src.c_str(), &st) != 0)
       Fail(src);
+    folder = S_ISDIR(st.st_mode);
     if (h.fileSize && S_ISREG(st.st_mode))
       h.fileSize(src, st.st_size);
     struct stat before {};
@@ -918,6 +951,7 @@ struct Runner {
       CheckDestinationDevice(parentIdentity.st_dev);
       const bool ntfsDirectory = NtfsCopy(before.st_dev);
       const bool ntfsParent = NtfsCopy(parentIdentity.st_dev);
+      ClaimDirectory(before, src, dst);
       copyDirectories.emplace_back(dst, before);
       struct DirectoryScope {
         DirectoryStack &stack;
@@ -1182,7 +1216,7 @@ struct Runner {
         if (renameat(parent, leaf.c_str(), parent, target.c_str()))
           Fail(dst);
       } else {
-        Commit(tmp, dst, false, before);
+        CommitUnusedName(tmp, dst, staged, parentDirectory);
       }
       published = true;
       bool flushed = false;
@@ -1272,6 +1306,48 @@ struct Runner {
     }
     return true;
   }
+  PinnedDirectory PinParent(const std::string &folder, NodeIdentity expected = {}) {
+    if (expected.device < 0) {
+      struct stat current;
+      if (stat(folder.c_str(), &current))
+        Fail(folder);
+      return PinnedDirectory(folder, current.st_dev, current.st_ino, true);
+    }
+    return PinnedDirectory(folder, expected.device, expected.inode, true);
+  }
+  void FlushPublishedName(const std::string &source, const std::string &destination,
+                          const PinnedDirectory &parent,
+                          const PinnedDirectory *oldParent = nullptr) {
+    Outcome(source, destination).status = "published-flush-failed";
+    try {
+      parent.Flush();
+      if (oldParent)
+        oldParent->Flush();
+    } catch (const RemovableCopyInterrupted &error) {
+      Outcome(source).detail = error.what();
+      InterruptedVolumes().Block(error.folder);
+      result.interruptedCopyFolder = error.folder;
+      throw;
+    } catch (const std::runtime_error &error) {
+      const std::string message = destination + ": name change already applied; check the "
+                                  "destination before retrying. " + error.what();
+      Outcome(source).detail = message;
+      throw std::runtime_error(message);
+    }
+  }
+  void MoveName(const Job &job, const std::string &source,
+                const std::string &destination, const struct stat &original) {
+    const auto folder = ParentLocation(destination);
+    auto parent = PinParent(folder, job.expectedDestination);
+    const auto fromFolder = ParentLocation(source);
+    auto oldParent = PinParent(fromFolder);
+    oldParent.Verify();
+    CommitUnusedName(source, destination, original, parent);
+    if (S_ISDIR(original.st_mode))
+      ClaimDirectory(original, source, destination);
+    FlushPublishedName(source, destination, parent, fromFolder == folder ? nullptr : &oldParent);
+    Outcome(source, destination).status = "moved";
+  }
   void Execute(const Job &job) {
     guardedJob = &job;
     const bool named =
@@ -1293,33 +1369,29 @@ struct Runner {
             "Named entry operations require one guarded local source and destination.");
       ValidateNewEntryName(job.destination, job.entryName);
     }
-    if (job.action == Action::MakeFile) {
-      const auto &folder = job.destinationFolder;
+    if (job.action == Action::MakeFile || job.action == Action::MakeDirectory) {
+      const auto folder = job.destinationFolder.empty() ? ParentLocation(job.destination)
+                                                        : job.destinationFolder;
       const auto leaf = Leaf(job.destination);
-      if (job.expectedDestination.device < 0 || folder.empty() || leaf.empty() ||
-          job.destination != Join(folder, leaf) || leaf == "." || leaf == "..")
-        throw std::runtime_error("Choose an available local folder and one filename.");
-      Check();
-      PinnedDirectory directory(folder, job.expectedDestination.device,
-                                job.expectedDestination.inode, true);
-      FD created(openat(directory.Descriptor(), leaf.c_str(),
-                        O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0666));
-      if (created.n < 0)
-        Fail(job.destination);
-      Outcome("", job.destination).status = "created";
-      if (fsync(created.n))
-        Fail(job.destination + " created but not flushed");
-      directory.Flush();
-      result.completed++;
-      Outcome("").status = "completed";
-      return;
-    }
-    if (job.action == Action::MakeDirectory) {
+      ValidateEntryLeaf(leaf);
+      if (folder.empty() || job.destination != Join(folder, leaf) ||
+          (job.action == Action::MakeFile && job.expectedDestination.device < 0))
+        throw std::runtime_error("Choose an available local folder and one entry name.");
       Outcome("", job.destination);
       Check();
       Guard();
-      if (mkdir(job.destination.c_str(), 0755))
+      auto parent = PinParent(folder, job.expectedDestination);
+      if (job.action == Action::MakeFile) {
+        FD created(openat(parent.Descriptor(), leaf.c_str(),
+                          O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0666));
+        if (created.n < 0)
+          Fail(job.destination);
+        Outcome("").status = "created";
+        if (fsync(created.n))
+          Fail(job.destination + " created but not flushed");
+      } else if (mkdirat(parent.Descriptor(), leaf.c_str(), 0755))
         Fail(job.destination);
+      FlushPublishedName("", job.destination, parent);
       result.completed++;
       Outcome("").status = "completed";
       return;
@@ -1354,22 +1426,12 @@ struct Runner {
         if (job.action == Action::Link) {
           Check();
           Guard();
-          BDirectory directory(job.destination.c_str());
-          node_ref node;
-          if (directory.GetNodeRef(&node) != B_OK ||
-              node.device != job.expectedDestination.device ||
-              node.node != job.expectedDestination.inode)
-            throw std::runtime_error(
-                "The link destination changed; nothing was created.");
-          // One native exclusive create: existing files, folders and broken
-          // symlinks are never replaced. No shell or source dereferencing.
+          auto directory = PinParent(job.destination, job.expectedDestination);
           const auto text = LinkText(job);
-          status_t status = directory.CreateSymLink(job.entryName.c_str(),
-                                                    text.c_str(), nullptr);
-          if (status != B_OK)
-            throw std::runtime_error("Could not create link: " +
-                                     std::string(strerror(status)));
           const auto destination = Join(job.destination, job.entryName);
+          if (symlinkat(text.c_str(), directory.Descriptor(), job.entryName.c_str()))
+            Fail(destination);
+          FlushPublishedName(source, destination, directory);
           Outcome(source, destination).status = "completed";
           result.completedRoots.emplace_back(source, destination);
           ++result.completed;
@@ -1445,9 +1507,7 @@ struct Runner {
           if (Exists(destination))
             throw std::runtime_error(
                 destination + ": already exists; rename does not overwrite");
-          struct stat empty {};
-          Commit(source, destination, false, empty);
-          Outcome(source, destination).status = "moved";
+          MoveName(job, source, destination, sourceStat);
           if (h.fileDone)
             h.fileDone(source, destination);
           result.completed++;
@@ -1462,26 +1522,19 @@ struct Runner {
         }
         if (job.action == Action::Move && !recoverableMove &&
             !Exists(destination)) {
-          Guard();
-          BEntry e(source.c_str());
-          BDirectory dir(job.destination.c_str());
-          status_t s = e.MoveTo(&dir, leaf.c_str(), false);
-          if (s == B_OK) {
-            Outcome(source, destination).status = "moved";
-            result.completedRoots.emplace_back(source, destination);
-            ++result.completed;
-            if (h.fileDone)
-              h.fileDone(source, destination);
-            if (h.progress)
-              h.progress(source, 0);
-            continue;
-          }
-          // Do not fall back to copy-and-delete if the mount changed after preflight.
-          throw std::runtime_error(source + ": " + strerror(s));
+          MoveName(job, source, destination, sourceStat);
+          result.completedRoots.emplace_back(source, destination);
+          ++result.completed;
+          if (h.fileDone)
+            h.fileDone(source, destination);
+          if (h.progress)
+            h.progress(source, 0);
+          continue;
         }
         Snapshot beforeMove;
         if (job.action == Action::Move) {
           SnapshotTree(source, beforeMove, sourceStat.st_dev);
+          CheckMoveMerges(source, destination, beforeMove);
           for (const auto &entry : beforeMove)
             Outcome(entry.first, destination + entry.first.substr(source.size()));
         }

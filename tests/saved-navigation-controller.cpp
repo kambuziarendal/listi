@@ -177,6 +177,7 @@ int main() {
   } catch (const std::runtime_error &) {}
   snapshot = merged.Message();
   own.AddMessage("snapshot", &snapshot);
+  own.AddString("error", "Settings were replaced; directory flush failed.");
   assert(other.FinishPlaceSave(own) && !other.Saving());
   assert(other.Places().Items().size() == 2);
 
@@ -205,6 +206,7 @@ int main() {
   own.ReplaceMessage("snapshot", &snapshot);
   auto accepted = other.FinishSearchSave(own);
   assert(accepted && accepted->author == author && !other.Saving());
+  assert(accepted->message.HasString("error") && !accepted->message.GetBool("committed", false));
   assert(SavedSearches::FromMessage(accepted->message).Items().size() == 2);
 
   BMessage unrelated(search);

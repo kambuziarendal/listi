@@ -3,6 +3,8 @@
 #include "ArchivePasswords.h"
 #include <cstdint>
 #include <map>
+#include <optional>
+#include <utility>
 #include <tuple>
 #include <string>
 #include <vector>
@@ -16,10 +18,14 @@ struct TarMemberMetadata {
   unsigned mode;
   int64_t modified;
   long nanoseconds;
+  // Empty means the source header had no such timestamp.
+  using Timestamp = std::pair<int64_t, long>;
+  std::optional<Timestamp> accessed{}, changed{}, created{};
   bool operator==(const TarMemberMetadata &other) const {
-    return std::tie(uid, gid, user, group, directory, mode, modified, nanoseconds) ==
+    return std::tie(uid, gid, user, group, directory, mode, modified, nanoseconds,
+                    accessed, changed, created) ==
            std::tie(other.uid, other.gid, other.user, other.group, other.directory,
-                    other.mode, other.modified, other.nanoseconds);
+                    other.mode, other.modified, other.nanoseconds, other.accessed, other.changed, other.created);
   }
 };
 using TarMemberMap = std::map<std::string, TarMemberMetadata>;

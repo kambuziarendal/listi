@@ -68,10 +68,20 @@ void CheckVisibleOnlyWindow(const std::string &remote, const std::string &local)
   target.SendMessage(B_QUIT_REQUESTED);
   Expect(rendered, "MLSD comparison window scopes its verified match: " + text);
 }
+// Use the revision available in the displayed listing, not a later (potentially
+// richer) stat. Round-trip it as the rename question does.
+Job SelectedRename(const std::string &source, const std::string &target) {
+  Job job{Action::Rename, {source}, target};
+  for (const auto &entry : ListFiles(ParentLocation(source)))
+    if (entry.path == source)
+      job.expectedRemoteSources.emplace(source, entry);
+  Expect(job.expectedRemoteSources.size() == 1, "captured selection: " + source);
+  return DecodeJob(EncodeJob(job, 'test'));
+}
 void CheckUncertainOperations(const std::string &ftp, const std::string &local) {
   const auto source = ChildLocation(ChildLocation(ftp, "guarded-rename"), "visible");
   const auto target = ChildLocation(ParentLocation(source), ".settings");
-  auto rename = Run(Job{Action::Rename, {source}, target}, {});
+  auto rename = Run(SelectedRename(source, target), {});
   FileEntry marker;
   Expect(!rename.completed && !rename.errors.empty() &&
              !StatFile(ChildLocation(ftp, "rename-command-seen"), marker) &&
@@ -86,7 +96,7 @@ void CheckUncertainOperations(const std::string &ftp, const std::string &local) 
     Expect(StatFile(alias, marker) == insensitive &&
                (!insensitive || RemoteBytes(alias) == "original"),
            mode + ": named FTP lookup distinguishes alias from missing file");
-    const auto result = Run(Job{Action::Rename, {third}, alias}, {});
+    const auto result = Run(SelectedRename(third, alias), {});
     Expect(!result.completed && !result.errors.empty() && RemoteBytes(third) == "third" &&
                RemoteBytes(ChildLocation(folder, "Report")) == "original" &&
                !StatFile(ChildLocation(ftp, "rename-command-seen"), marker),
@@ -132,12 +142,21 @@ void CheckSftpAlias(const std::string &sftp) {
   const auto third = ChildLocation(folder, "third");
   const auto alias = ChildLocation(folder, "report");
   FileEntry marker;
-  const auto result = Run(Job{Action::Rename, {third}, alias}, {});
+  const auto result = Run(SelectedRename(third, alias), {});
   Expect(!result.completed && !result.errors.empty() &&
              !StatFile(ChildLocation(sftp, "sftp-rename-seen"), marker) &&
              !StatFile(ChildLocation(folder, "absent"), marker) &&
              RemoteBytes(alias) == "original" && RemoteBytes(third) == "third",
          "SFTP name alias blocks rename without conflating a truly missing name");
+  const auto scope = ChildLocation(sftp, "rename-control");
+  const auto original = ChildLocation(scope, "original");
+  const auto renamed = ChildLocation(scope, "renamed");
+  auto control = Run(SelectedRename(original, renamed), {});
+  Expect(control.completed == 1 && control.errors.empty() && RemoteBytes(renamed) == "control" &&
+             !StatFile(original, marker), "unchanged SFTP selection renames to its new name");
+  control = Run(SelectedRename(renamed, original), {});
+  Expect(control.completed == 1 && control.errors.empty() && RemoteBytes(original) == "control" &&
+             !StatFile(renamed, marker), "fresh SFTP selection renames back without leaving a duplicate");
 }
 void CheckIdentity(const std::string &ftp, const std::string &local) {
   const auto folder = local + "/identity";

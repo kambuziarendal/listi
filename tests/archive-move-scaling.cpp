@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "ArchiveJobs.h"
+#include "LocalMoveTree.h"
 #include "VirtualFile.h"
 #include <Application.h>
 #include <Directory.h>
@@ -14,6 +15,44 @@ using namespace Listi;
 static uint64 calls=0;static bool counting=false;
 extern "C" int __real_lstat(const char*,struct stat*);
 extern "C" int __wrap_lstat(const char* p,struct stat* st){if(counting)++calls;return __real_lstat(p,st);}
+static size_t resolutions = 0;
+extern "C" char *__real_realpath(const char *, char *);
+extern "C" char *__wrap_realpath(const char *path, char *buffer) {
+  if (counting)
+    ++resolutions;
+  return __real_realpath(path, buffer);
+}
+
+// Measure the destructive phase alone: unrelated selected roots must not be
+// scanned for each unlink. A single directory still checks its entire tree.
+bool checkLocalCleanup(const std::string &parent, int count, bool selectDirectory) {
+  const auto tree = parent + (selectDirectory ? "/one-root" : "/loose-roots");
+  if (mkdir(tree.c_str(), 0700))
+    return false;
+  std::vector<std::string> roots;
+  for (int i = 0; i < count; ++i) {
+    const auto path = tree + "/entry" + std::to_string(i);
+    if (!(std::ofstream(path) << "test"))
+      return false;
+    roots.push_back(path);
+  }
+  if (selectDirectory)
+    roots = {tree};
+
+  LocalMoveTree captured(roots, {}, false);
+  calls = resolutions = 0;
+  counting = true;
+  for (const auto &root : roots)
+    captured.Remove(root, {});
+  counting = false;
+  std::cout << "local_cleanup selected=" << roots.size()
+            << " files=" << count << " realpath_calls=" << resolutions
+            << " lstat_calls=" << calls << std::endl;
+  const auto entries = size_t(count) + (selectDirectory ? 1 : 0);
+  if (resolutions > entries || calls > 20 * entries)
+    return false;
+  return selectDirectory ? access(tree.c_str(), F_OK) != 0 : rmdir(tree.c_str()) == 0;
+}
 void clean(const std::string &p){BDirectory d(p.c_str());BEntry e;while(d.GetNextEntry(&e,false)==B_OK){struct stat s;e.GetStat(&s);if(S_ISDIR(s.st_mode)){BPath path;e.GetPath(&path);clean(path.Path());}e.Remove();}rmdir(p.c_str());}
 int main(){BApplication app("application/x-vnd.Listi-AuditScaleProbe");char base[]="/boot/home/Listi-scale-probe-XXXXXX";if(!mkdtemp(base))return 2;
  std::vector<int> sizes{64,128};
@@ -26,6 +65,8 @@ int main(){BApplication app("application/x-vnd.Listi-AuditScaleProbe");char base
  try{for(int count:sizes){
  std::string root=std::string(base)+"/case"+std::to_string(count),tree=root+"/tree",out=root+"/out";
  mkdir(root.c_str(),0700);mkdir(tree.c_str(),0700);mkdir(out.c_str(),0700);
+ if (!checkLocalCleanup(root, count, false) || !checkLocalCleanup(root, count, true))
+   return 8;
  for(int i=0;i<count;++i)std::ofstream(tree+"/item"+std::to_string(i))<<payload;
  auto create=PrepareArchiveJob(false,{tree});create.archiveFormat=format;SetArchiveDestination(create,root,"fixture");auto made=Run(create,{});if(made.completed!=1||!made.errors.empty())return 3;
  auto archive=OpenArchive(create.destination);auto job=PrepareArchiveMove(Job{Action::Move,{ChildLocation(archive,"tree")},out});

@@ -113,7 +113,7 @@ std::string RemoteDigest(const std::string &path, const TransferControl &control
   }, control);
   return hash.Finish();
 }
-bool MatchesDeleteSelection(const FileEntry &selected, const FileEntry &current) {
+bool MatchesRemoteSelection(const FileEntry &selected, const FileEntry &current) {
   return selected.directory == current.directory && selected.link == current.link &&
          (!selected.sizeKnown || (current.sizeKnown && selected.size == current.size)) &&
          (!selected.modifiedKnown || selected.SameModification(current)) &&
@@ -314,6 +314,11 @@ struct Runner {
     FileEntry source, target;
     if (!StatFile(src, source, control, discovered))
       throw std::runtime_error("Source no longer exists");
+    if (depth == 0) {
+      const auto selected = job.expectedRemoteSources.find(src);
+      if (selected != job.expectedRemoteSources.end() && !MatchesRemoteSelection(selected->second, source))
+        throw std::runtime_error("Selected network entry changed before copying: " + src);
+    }
     if (hooks.fileSize && !source.directory && !source.link &&
         source.sizeKnown && source.size >= 0)
       hooks.fileSize(src, source.size);
@@ -511,7 +516,7 @@ struct Runner {
     TempFile temp(LocationLeaf(dst), src, dst);
     Sha256 expected;
     const auto stagedBytes = Stage(src, source, temp, Control(src, false), &expected);
-    EntryOutcome entry{src, dst, "unprocessed", "", UploadVerification{}};
+    EntryOutcome entry{src, dst, "upload not published", "", UploadVerification{}};
     try {
       PublishUpload(src, dst, target, exists, temp, expected, stagedBytes,
                     control, entry);
@@ -659,7 +664,10 @@ struct Runner {
           result.cancelled = true;
         } catch (...) {
         }
-      entry.status = committed ? "partial" : commitAttempted ? "outcome unknown" : "source-retained";
+      if (committed)
+        entry.status = "published; cleanup incomplete";
+      else if (commitAttempted)
+        entry.status = "outcome unknown";
       if (stagedExists)
         receipt.recoveryPaths.push_back(staged);
       if (backupExists)
@@ -697,7 +705,7 @@ struct Runner {
     FileEntry e;
     if (!StatFile(p, e, c))
       throw std::runtime_error("Entry no longer exists");
-    if (!MatchesDeleteSelection(expected, e))
+    if (!MatchesRemoteSelection(expected, e))
       throw std::runtime_error("Entry changed before deletion: " + p);
     const bool directory = expected.directory && !expected.link;
     if (directory)
@@ -757,8 +765,8 @@ Result RunVirtual(const Job &job, const Hooks &hooks) {
           if (ParseLocation(source).Archive())
             throw std::runtime_error(
                 "Use Delete from archive to remove entries from a writable archive");
-          const auto expected = job.expectedRemoteDeletes.find(source);
-          if (expected == job.expectedRemoteDeletes.end())
+          const auto expected = job.expectedRemoteSources.find(source);
+          if (expected == job.expectedRemoteSources.end())
             throw std::runtime_error("No confirmed network entry. Refresh and select it again.");
           const auto deletedBefore = runner.deletedEntries;
           try {
@@ -790,6 +798,12 @@ Result RunVirtual(const Job &job, const Hooks &hooks) {
             throw std::runtime_error(
                 "FTP cannot rename without risking replacement of a concurrently created target. "
                 "The source was retained.");
+          const auto selected = job.expectedRemoteSources.find(source);
+          if (selected == job.expectedRemoteSources.end())
+            throw std::runtime_error("No confirmed network entry. Refresh and select it again.");
+          FileEntry current;
+          if (!StatFile(source, current, control) || !MatchesRemoteSelection(selected->second, current))
+            throw std::runtime_error("Selected network entry changed or disappeared: " + source);
           RenameFile(source, dst, control);
           if (hooks.fileDone)
             hooks.fileDone(source, dst);

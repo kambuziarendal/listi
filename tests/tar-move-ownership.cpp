@@ -33,6 +33,7 @@ int main(int argc, char **argv) {
     return 2;
   const bool expectRefusal = argc == 4 && !strcmp(argv[3], "unsupported");
   const bool directoryConflict = argc == 4 && !strcmp(argv[3], "directory-conflict");
+  const bool extraTime = argc == 4 && !strcmp(argv[3], "extra-time");
   const bool timeMismatch = argc == 4 && !strcmp(argv[3], "time-mismatch");
   const auto target = S_ISDIR(destination.st_mode)
                           ? std::string(argv[2]) : ChildLocation(OpenArchive(argv[2]), "recv");
@@ -41,12 +42,14 @@ int main(int argc, char **argv) {
     const auto source = OpenArchive(input);
     sources = {ChildLocation(ChildLocation(source, "box"), "tree"), ChildLocation(source, "loose")};
   }
-  if (argc == 4 && !expectRefusal && !directoryConflict && !timeMismatch)
+  if (argc == 4 && !expectRefusal && !directoryConflict && !timeMismatch && !extraTime)
     changedArchive = argv[3];
   auto result = Run(PrepareArchiveMove(Job{Action::Move, sources, target}), {});
   bool mismatch = false;
   for (const auto &error : result.errors) {
     std::cerr << error << std::endl;
+    if (extraTime && error.find("Cannot preserve additional TAR timestamps") != std::string::npos)
+      return result.completed == 0 && result.completedRoots.empty() ? 0 : 1;
     if (timeMismatch && error.find("Destination timestamp or ownership differs") != std::string::npos)
       return result.completed == 0 && result.completedRoots.empty() ? 0 : 1;
     if (directoryConflict && error.find("conflicting TAR metadata") != std::string::npos)
@@ -55,7 +58,7 @@ int main(int argc, char **argv) {
       return result.completed == 0 && result.completedRoots.empty() ? 0 : 1;
     mismatch |= error.find("ownership differs") != std::string::npos;
   }
-  if (expectRefusal || directoryConflict || timeMismatch) return 1;
+  if (expectRefusal || directoryConflict || timeMismatch || extraTime) return 1;
   if (changedArchive)
     return substituted && mismatch && result.completed == 0 && result.completedRoots.empty() ? 0 : 1;
   return result.completed == int(sources.size()) && result.errors.empty() ? 0 : 1;

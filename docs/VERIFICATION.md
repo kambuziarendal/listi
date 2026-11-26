@@ -4,6 +4,22 @@ Listi is alpha software that works directly on files. Tests provide evidence for
 specific cases, not proof that every filesystem, server or archive variant is
 safe. Use disposable fixtures and independent backups.
 
+## What the evidence covers
+
+Listi has been used and tested repeatedly on a physical ThinkPad X1 Carbon
+(6th Gen) running Haiku R1/beta6. Reports from hands-on use have led to fixes,
+including the [revision 22 examples](#hands-on-testing-on-physical-hardware).
+The [physical media reports](#physical-usb-field-report-0380-30-2026-11-25)
+record specific incidents and an ext4 retest, not a count of testing sessions.
+
+Automated Haiku tests also run in GitHub Actions, using QEMU. For example,
+the [revision 46 merge run](https://github.com/kambuziarendal/listi/actions/runs/45904527947)
+passed Portable and Haiku native: 91 native cases, 58 built-in checks in the
+build tree and again in the installed package, and the installed multiwindow
+test. [PR #7](https://github.com/kambuziarendal/listi/pull/7) records separate
+network and hard-link checks outside that default inventory. These results are
+version-specific; they do not establish physical power-loss durability.
+
 ## Private revision 39: terminal startup
 
 In one Haiku R1/beta6 hrev59866+79 VM run, the terminal-dock test timed out.

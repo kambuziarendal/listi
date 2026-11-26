@@ -205,6 +205,9 @@ void FileOperationFlow::BeginOperation(Action action, const Pane &source,
   if (!create) {
     job.sources = source.Selected();
     job.expectedSources = source.SelectedLocalIdentities();
+    if (!job.sources.empty() && IsVirtual(job.sources.front()) &&
+        !ParseLocation(job.sources.front()).Archive())
+      job.expectedRemoteSources = source.ExportModel().SelectedRemoteEntries();
   }
   if (isTransfer)
     job.destination = target.Path();
@@ -259,7 +262,6 @@ void FileOperationFlow::BeginOperation(Action action, const Pane &source,
     }
     return;
   }
-  job.expectedRemoteDeletes = source.ExportModel().SelectedRemoteEntries();
   auto accepted = EncodeJob(job, kConfirm);
   const auto text = "Permanently delete " + SelectedLabel(job) + "?\nThis cannot be undone.";
   AskInline(text.c_str(), "Delete permanently", accepted);

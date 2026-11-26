@@ -147,7 +147,7 @@ void SaveMessageStore(const std::string &file, const BMessage &message,
   if (stored)
     *stored = opened;
   if (fsync(parent.fd))
-    throw std::runtime_error(
+    throw SettingsReplacedError(
         std::string("Settings were replaced, but their directory could not be flushed: ") +
         strerror(errno));
 }

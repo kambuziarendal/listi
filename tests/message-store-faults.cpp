@@ -80,7 +80,7 @@ int main() {
   try {
     Listi::SaveMessageStore(destination, update);
     return 1;
-  } catch (const std::runtime_error &error) {
+  } catch (const Listi::SettingsReplacedError &error) {
     if (std::string(error.what()).find("were replaced") == std::string::npos ||
         Listi::LoadMessageStore(destination).what != update.what)
       return 1;

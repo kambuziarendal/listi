@@ -508,6 +508,31 @@ int main() {
   check(!r.completed && !done && !r.errors.empty() && files.size() == 2 && has(".part") && errorHas(r, ".part") &&
         files.at(destination).data == "old contents",
         "acknowledged short upload cannot replace the original");
+  for (const auto publication : {Publication::NotAttempted, Publication::Unknown, Publication::Published}) {
+    reset();
+    truncateUpload = publication == Publication::NotAttempted;
+    loseCommitReply = publication == Publication::Unknown;
+    auto reporting = hooks;
+    reporting.report = std::make_shared<JobReportStore>();
+    r = RunVirtual(job, reporting);
+    const auto page = reporting.report->Page(0, 10);
+    const bool published = publication == Publication::Published;
+    const bool attempted = publication != Publication::NotAttempted;
+    const auto &expectedLabel = !attempted ? "Upload not published" :
+                                published ? "Completed" : "Outcome unknown";
+    const auto &expectedDetail = !attempted ? "Final name not published." :
+                                 published ? "Destination published." : "Destination publication not confirmed.";
+    check(page.outcomes.size() == 1 && r.completed == int(published) &&
+              files.at(destination).data == (attempted ? "new contents" : "old contents") &&
+              OutcomeLabel(page.outcomes[0].status) == expectedLabel &&
+              page.outcomes[0].detail.find(expectedDetail) != std::string::npos &&
+              page.outcomes[0].detail.find("Bytes acknowledged by transport: 12") != std::string::npos &&
+              (page.outcomes[0].detail.find("Staged contents verified.") != std::string::npos) == attempted &&
+              (published || page.outcomes[0].detail.find("Recovery path: ") != std::string::npos),
+          "Job Details distinguishes an acknowledged upload from publication at the final name");
+  }
+  check(OutcomeLabel("source-retained") == "Copied; source retained",
+        "local move receipt still identifies a delivered copy when the original remains");
   reset(); omitStageSize = true; r = RunVirtual(job, hooks);
   check(r.completed == 1 && done == 1 && r.errors.empty() && files.size() == 1 &&
         files.at(destination).data == "new contents",
@@ -695,7 +720,7 @@ int main() {
             uploadReport.outcomes[0].status == "unprocessed" &&
             uploadReport.outcomes[1].source == sibling &&
             uploadReport.outcomes[1].status == "completed" &&
-            uploadReport.outcomes[1].detail.find("Uploaded contents verified.") != std::string::npos &&
+            uploadReport.outcomes[1].detail.find("Staged contents verified.") != std::string::npos &&
             uploadReport.outcomes[1].detail.find("Destination published.") != std::string::npos &&
             uploadReport.outcomes[2].source == folder &&
             uploadReport.outcomes[2].status == "partial",
@@ -729,6 +754,58 @@ int main() {
         "concurrent source addition retains delivered child but suppresses root completion");
   unlink(arrived.c_str());
 
+  for (const std::string server : {"sftp://fixture", "smb://fixture"}) {
+    const auto picked = server + "/in/selected";
+    const auto other = server + "/in/other";
+    const auto newName = server + "/out/renamed";
+    reset();
+    files[picked] = {"before", 1, 0, false, "object-A"};
+    Job rename{Action::Rename, {picked}, newName};
+    StatFile(picked, rename.expectedRemoteSources[picked]);
+    files[picked].identity = "object-B";
+    r = RunVirtual(rename, hooks);
+    check(!r.completed && !done && errorHas(r, "changed or disappeared") &&
+              files.count(picked) && !files.count(newName),
+          "rename rejects replacement with matching size/time but different server identity");
+    Job copySelected{Action::Copy, {picked}, server + "/out"};
+    copySelected.expectedRemoteSources = rename.expectedRemoteSources;
+    r = RunVirtual(copySelected, hooks);
+    check(!r.completed && !done && errorHas(r, "changed before copying") &&
+              files.count(picked) && !files.count(server + "/out/selected"),
+          "queued panel copy refuses to publish a replacement for its selected source");
+    rename.expectedRemoteSources[picked].providerIdentity.clear();
+    files[picked].data = "longer replacement";
+    r = RunVirtual(rename, hooks);
+    check(!r.completed && !done && errorHas(r, "changed or disappeared") &&
+              files.at(picked).data == "longer replacement" && !files.count(newName),
+          "rename rejects changed size without a stable provider ID");
+    files.erase(picked);
+    r = RunVirtual(rename, hooks);
+    check(!r.completed && !done && errorHas(r, "changed or disappeared") && !files.count(newName),
+          "rename rejects a vanished selection");
+
+    files[picked] = {"selected", 1, 0, false, "id-1"};
+    files[other] = {"other", 1, 0, false, "id-2"};
+    Job move{Action::Move, {picked, other}, server + "/out"};
+    StatFile(picked, move.expectedRemoteSources[picked]);
+    StatFile(other, move.expectedRemoteSources[other]);
+    files[other].identity = "changed";
+    r = RunVirtual(move, hooks);
+    check(r.completed == 1 && done == 1 && errorHas(r, "changed or disappeared") &&
+              files.at(server + "/out/selected").data == "selected" && !files.count(picked) &&
+              files.count(other) && !files.count(server + "/out/other"),
+          "queued multi-selection move checks each source against its own captured revision");
+    Job retry{Action::Rename, {other}, newName};
+    r = RunVirtual(retry, hooks);
+    check(!r.completed && errorHas(r, "No confirmed network entry") && files.count(other),
+          "remote rename cannot substitute a fresh lookup for a missing selection");
+    StatFile(other, retry.expectedRemoteSources[other]);
+    r = RunVirtual(retry, hooks);
+    check(r.completed == 1 && r.errors.empty() && !files.count(other) &&
+              files.at(newName).data == "other" && files.at(server + "/out/selected").data == "selected",
+          "rename after fresh selection succeeds without changing the earlier delivered entry");
+  }
+
   const std::string tree = "sftp://fixture/in/selection";
   const auto first = tree + "/a";
   const auto second = tree + "/b";
@@ -738,7 +815,7 @@ int main() {
   FileEntry selected;
   if (!StatFile(tree, selected))
     return 1;
-  deletion.expectedRemoteDeletes[tree] = selected;
+  deletion.expectedRemoteSources[tree] = selected;
   files[tree].nanoseconds = 500;
   r = RunVirtual(deletion, hooks);
   check(!r.completed && errorHas(r, "changed before deletion") && files.count(tree) &&
@@ -755,7 +832,7 @@ int main() {
   check(!r.completed && !r.errors.empty() && r.outcomes.empty() && files.count(tree) &&
             files.count(first) && files.count(second),
         "a network delete missing its confirmed selection fails closed");
-  if (!StatFile(tree, deletion.expectedRemoteDeletes.at(tree)))
+  if (!StatFile(tree, deletion.expectedRemoteSources.at(tree)))
     return 1;
   for (bool cancel : {true, false}) {
     files[first] = {"remove first"};
