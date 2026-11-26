@@ -167,6 +167,15 @@ void ReadTarMetadata(DynamicLibrary &lib, archive *reader, archive_entry *entry,
                              unsigned(LIBCALL(lib, archive_entry_perm)(entry)) & 07777,
                              LIBCALL(lib, archive_entry_mtime)(entry),
                              LIBCALL(lib, archive_entry_mtime_nsec)(entry)};
+    if (LIBCALL(lib, archive_entry_atime_is_set)(entry))
+      member.accessed.emplace(LIBCALL(lib, archive_entry_atime)(entry),
+                              LIBCALL(lib, archive_entry_atime_nsec)(entry));
+    if (LIBCALL(lib, archive_entry_ctime_is_set)(entry))
+      member.changed.emplace(LIBCALL(lib, archive_entry_ctime)(entry),
+                             LIBCALL(lib, archive_entry_ctime_nsec)(entry));
+    if (LIBCALL(lib, archive_entry_birthtime_is_set)(entry))
+      member.created.emplace(LIBCALL(lib, archive_entry_birthtime)(entry),
+                             LIBCALL(lib, archive_entry_birthtime_nsec)(entry));
     Require(metadata.emplace(std::move(name), std::move(member)).second,
             "Ambiguous TAR member ownership. Original archive retained.");
   }
@@ -235,6 +244,12 @@ struct Pack {
         Require(bool(S_ISDIR(before.st_mode)) == saved.directory, "TAR member type changed: " + name);
         LIBCALL(writer.lib, archive_entry_set_perm)(entry, saved.mode);
         LIBCALL(writer.lib, archive_entry_set_mtime)(entry, saved.modified, saved.nanoseconds);
+        if (saved.accessed)
+          LIBCALL(writer.lib, archive_entry_set_atime)(entry, saved.accessed->first, saved.accessed->second);
+        if (saved.changed)
+          LIBCALL(writer.lib, archive_entry_set_ctime)(entry, saved.changed->first, saved.changed->second);
+        if (saved.created)
+          LIBCALL(writer.lib, archive_entry_set_birthtime)(entry, saved.created->first, saved.created->second);
         LIBCALL(writer.lib, archive_entry_set_uname)(entry, member->second.user.c_str());
         LIBCALL(writer.lib, archive_entry_set_gname)(entry, member->second.group.c_str());
       }

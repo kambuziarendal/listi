@@ -565,7 +565,11 @@ capabilities. A successful listing does not establish member-data integrity.
   files and some hard-link cases. Use Copy to retain originals. TAR moves check numeric ownership, mode and
   modification time before removing selected members. A move can leave a
   verified content copy and retain the source when the destination cannot
-  represent its metadata. Editing a TAR with recognized extended ACLs,
+  represent its metadata. TAR rewrites also retain access, metadata-change
+  and creation timestamps when present in the original header, and verify
+  them before publication. A move out of TAR refuses these extra timestamps
+  when their preservation at the destination is not supported.
+  Editing a TAR with recognized extended ACLs,
   xattrs, sparse records or file flags is refused; a rebuild is not a
   bit-for-bit preservation of arbitrary vendor-specific PAX headers.
   When moving local files into other formats, Listi checks the permissions

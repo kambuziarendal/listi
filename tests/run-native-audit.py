@@ -97,10 +97,14 @@ def run_tar_edit_ownership(binary):
             directory.type = tarfile.DIRTYPE
             directory.mode = 0o1777
             directory.mtime = 1700000000.125
+            directory.pax_headers["ctime"] = "1710000000.123456789"
             archive.addfile(directory)
             for name in ("keep", "remove", "old-name"):
                 header = tarfile.TarInfo(name)
                 if name == "keep":
+                    header.pax_headers["LIBARCHIVE.creationtime"] = "1690000000.987654321"
+                    header.pax_headers["atime"] = "1710000001.987654321"
+                    header.pax_headers["ctime"] = "1710000002.123456789"
                     header.mode = 0o4750
                     header.mtime = 1700000001.375
                 header.uid, header.gid = 1001, 2002
@@ -112,11 +116,18 @@ def run_tar_edit_ownership(binary):
             assert sorted(archive.getnames()) == ["keep", "new-name", "shared"]
             directory = archive.getmember("shared")
             assert directory.isdir() and directory.mode == 0o1777
+            assert directory.pax_headers["ctime"] == "1710000000.123456789"
+            assert "atime" not in directory.pax_headers
+            renamed = archive.getmember("new-name")
+            assert all(key not in renamed.pax_headers for key in ("atime", "ctime", "LIBARCHIVE.creationtime"))
             assert directory.mtime == 1700000000.125
             assert archive.extractfile("new-name").read() == b"old-name"
             member = archive.getmember("keep")
             assert (member.uid, member.gid) == (1001, 2002)
             assert (member.uname, member.gname) == ("original-owner", "original-group")
+            assert member.pax_headers["LIBARCHIVE.creationtime"] == "1690000000.987654321"
+            assert member.pax_headers["atime"] == "1710000001.987654321"
+            assert member.pax_headers["ctime"] == "1710000002.123456789"
             assert member.mode == 0o4750 and member.mtime == 1700000001.375
             assert archive.extractfile(member).read() == b"keep"
 
@@ -257,6 +268,21 @@ def run_tar_move_ownership(binary):
         prior_zip = dst.read_bytes()
         for target_path in (local, dst):
             subprocess.run([binary, src, target_path, "unsupported"], cwd=ROOT, check=True, timeout=90)
+            assert src.read_bytes() == original and dst.read_bytes() == prior_zip
+            assert list(local.iterdir()) == []
+        # An otherwise portable tree with just a recorded PAX access time
+        # cannot be destructively converted using the generic local/ZIP path.
+        with tarfile.open(src, "w") as archive:
+            for name in ("box/tree", "loose"):
+                header = tarfile.TarInfo(name)
+                if name == "box/tree":
+                    header.type, header.mode = tarfile.DIRTYPE, 0o755
+                else:
+                    header.pax_headers["atime"] = "1710000001.123456789"
+                archive.addfile(header)
+        original = src.read_bytes()
+        for target_path in (local, dst):
+            subprocess.run([binary, src, target_path, "extra-time"], cwd=ROOT, check=True, timeout=90)
             assert src.read_bytes() == original and dst.read_bytes() == prior_zip
             assert list(local.iterdir()) == []
         # ZIP stores full seconds here; keep the source TAR when a selected file
