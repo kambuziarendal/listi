@@ -122,6 +122,10 @@ int main() {
   attr(source/"dir/note","Count",B_INT32_TYPE,&answer,sizeof(answer));
   attr(source/"dir/note","Bytes",B_RAW_TYPE,binary,sizeof(binary));
   const std::string firstChunk(16 * 1024, 'a'), secondChunk(16 * 1024, 'b');
+  attr(source/"dir/note", "Empty", B_RAW_TYPE, firstChunk.data(), firstChunk.size());
+  const int emptyAttr = fs_open_attr((source/"dir/note").c_str(), "Empty", B_RAW_TYPE,
+                                     O_WRONLY | O_TRUNC | O_CREAT);
+  assert(emptyAttr >= 0 && fs_close_attr(emptyAttr) == 0);
   const std::string chunkedAttribute = firstChunk + secondChunk + "tail";
   {
     const int fd = open((source/"dir/note").c_str(), O_RDONLY);
@@ -177,6 +181,7 @@ int main() {
     }
     assert(false);
   };
+  checkAttr(source/"dir/note", "Empty", B_RAW_TYPE, "", 0);
   assert(count()==0 && fs::is_empty(store));
   history.Save(cancel);
   std::string first=latest();
@@ -223,6 +228,7 @@ int main() {
          lstat((base/"last/pointer").c_str(), &restoredLink) == 0 &&
          restoredLink.st_mtim.tv_sec == originalLink.st_mtim.tv_sec &&
          restoredLink.st_mtim.tv_nsec == originalLink.st_mtim.tv_nsec);
+  checkAttr(base/"one/dir/note", "Empty", B_RAW_TYPE, "", 0);
   checkAttr(base/"one/dir/note","Count",B_INT32_TYPE,&answer,sizeof(answer));
   checkAttr(base/"one/dir/note","Bytes",B_RAW_TYPE,binary,sizeof(binary));
   checkAttr(base/"one/dir/note", "Chunked", B_RAW_TYPE,
@@ -238,6 +244,7 @@ int main() {
   std::string recovered;
   std::ifstream(base/"picked/note") >> recovered;
   assert(recovered == "original" && std::distance(fs::directory_iterator(base/"picked"), {}) == 1);
+  checkAttr(base/"picked/note", "Empty", B_RAW_TYPE, "", 0);
   checkAttr(base/"picked/note", "Count", B_INT32_TYPE, &answer, sizeof(answer));
   reject([&] { history.Restore(first, base/"picked/note", cancel, "dir/note"); }, "file destination exists");
   reject([&] { history.Restore(first, base/"invalid", cancel, "../same"); }, "invalid selected file");
