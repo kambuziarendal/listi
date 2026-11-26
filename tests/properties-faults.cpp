@@ -64,15 +64,18 @@ int main(){BApplication app("application/x-vnd.Kambuzi-PropertiesFaults");try{
  constexpr const char *emptyName = "test:zero-length";
  BNode raw(p);
  const std::string large(150000, 'x');
- auto createEmpty = [&] {
-   if (raw.WriteAttr(emptyName, B_STRING_TYPE, 0, large.data(), large.size()) !=
+ auto createEmpty = [&](const char *name) {
+   if (raw.WriteAttr(name, B_STRING_TYPE, 0, large.data(), large.size()) !=
        ssize_t(large.size()))
      return false;
-   const int fd = fs_open_attr(p, emptyName, B_STRING_TYPE,
+   const int fd = fs_open_attr(p, name, B_STRING_TYPE,
                                O_WRONLY | O_TRUNC | O_CREAT);
-   return fd >= 0 && fs_close_attr(fd) == 0;
+   attr_info info;
+   return fd >= 0 && fs_close_attr(fd) == 0 &&
+          raw.GetAttrInfo(name, &info) == B_OK && info.size == 0 &&
+          info.type == B_STRING_TYPE;
  };
- Check(createEmpty(), "create a native zero-length string attribute");
+ Check(createEmpty(emptyName), "create a native zero-length string attribute");
  auto empty = Get(session, emptyName);
  Check(empty.editable && empty.size == 0 && empty.bytes.empty(),
        "zero-length string remains an editable existing value");
@@ -96,15 +99,19 @@ int main(){BApplication app("application/x-vnd.Kambuzi-PropertiesFaults");try{
            !record.HasData("bytes", B_RAW_TYPE),
        "recovery record represents an existing, typed, zero-byte value");
  unlink(recovery.c_str());
- Check(createEmpty(), "recreate the zero-length attribute");
- empty = Get(session, emptyName);
- session.Save(&empty, empty.name, empty.type, "restored text");
- const auto repaired = Get(session, emptyName);
+ constexpr const char *editName = "test:zero-length-edit";
+ Check(createEmpty(editName), "create a zero-length attribute for editing");
+ PropertySession editSession(p);
+ empty = Get(editSession, editName);
+ editSession.Save(&empty, empty.name, empty.type, "restored text");
+ const auto repaired = Get(editSession, editName);
  Check(repaired.text == "restored text", "edit an existing zero-length string");
- Check(createEmpty(), "recreate the zero-length attribute for removal");
- session.Remove(Get(session, emptyName));
+ constexpr const char *removeName = "test:zero-length-remove";
+ Check(createEmpty(removeName), "create a zero-length attribute for removal");
+ PropertySession removeSession(p);
+ removeSession.Remove(Get(removeSession, removeName));
  attr_info info;
- Check(raw.GetAttrInfo(emptyName, &info) == B_ENTRY_NOT_FOUND,
+ Check(raw.GetAttrInfo(removeName, &info) == B_ENTRY_NOT_FOUND,
        "remove an existing zero-length string");
  std::ifstream f(p);std::string content((std::istreambuf_iterator<char>(f)),{});Check(content=="payload","all injected failures preserve file contents");unlink(p);
  std::cout<<"TOTAL "<<passed<<" passed"<<std::endl;return 0;
