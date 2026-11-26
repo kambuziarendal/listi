@@ -177,6 +177,8 @@ void PublishNewArchive(Stage &stage, const Job &job, BEntry &published,
   struct stat reserved;
   Require(!fstat(out.n, &reserved), "Cannot identify the new file. Check the destination and recovery stage.");
   try {
+    if (job.archiveFormat == "iso")
+      CopyDataIsoSeal(source.n, out.n);
     WriteRemovableStagingFile(std::exchange(source.n, -1), std::exchange(out.n, -1),
                               staged, [&](size_t) { check(); }, true,
                               StagingPermissions::KeepCreationMode);

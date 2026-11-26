@@ -53,6 +53,20 @@ void SealDataIso(int fd, const Hooks &hooks) {
           "Cannot store data ISO verification on this filesystem.");
 }
 
+void CopyDataIsoSeal(int source, int destination) {
+  // Copy the digest of the verified stage, not a new digest of whatever the
+  // visible output happens to contain. Subsequent edits verify it again.
+  char recorded[64];
+  attr_info info;
+  Require(fs_stat_attr(source, IsoDigestAttr, &info) == 0 &&
+              info.type == B_STRING_TYPE && info.size == sizeof(recorded) &&
+              fs_read_attr(source, IsoDigestAttr, B_STRING_TYPE, 0, recorded,
+                           sizeof(recorded)) == sizeof(recorded) &&
+              fs_write_attr(destination, IsoDigestAttr, B_STRING_TYPE, 0, recorded,
+                            sizeof(recorded)) == sizeof(recorded),
+          "Cannot preserve the verified data ISO digest.");
+}
+
 void VerifyDataIsoOutput(DynamicLibrary &lib, int output,
                          std::map<std::string, std::string> members,
                          const Hooks &hooks) {
