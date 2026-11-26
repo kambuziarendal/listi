@@ -39,6 +39,20 @@ DiskListing FindFixture(const char *devicePath) {
   return result;
 }
 
+// Tracker may briefly open the volume in response to its mount notification.
+// Only the fixture retries; the application reports B_BUSY to the user.
+status_t UnmountWhenIdle(const DiskListing &disk, const BPath &path,
+                         const struct stat &info) {
+  status_t result;
+  for (int attempt = 0; attempt < 50; ++attempt) {
+    result = UnmountDisk(disk.partition, path.Path(), info.st_dev, info.st_ino);
+    if (result != B_BUSY)
+      return result;
+    usleep(100000);
+  }
+  return B_BUSY;
+}
+
 void VerifyRoundTrip(const char *devicePath) {
   const auto first = FindFixture(devicePath);
   assert(first.mountedDevice < 0);
@@ -69,7 +83,7 @@ void VerifyRoundTrip(const char *devicePath) {
   assert(UnmountDisk(mounted.partition, path.Path(), info.st_dev, info.st_ino) == B_BUSY);
   assert(FindFixture(devicePath).mountedDevice == info.st_dev);
   assert(close(fd) == 0);
-  assert(UnmountDisk(mounted.partition, path.Path(), info.st_dev, info.st_ino) == B_OK);
+  assert(UnmountWhenIdle(mounted, path, info) == B_OK);
   assert(FindFixture(devicePath).mountedDevice < 0);
 
   const auto second = FindFixture(devicePath);
@@ -86,7 +100,7 @@ void VerifyRoundTrip(const char *devicePath) {
   assert(fd >= 0 && read(fd, contents, 4) == 4 && std::string(contents) == "test");
   assert(close(fd) == 0 && unlink(remountedFile.c_str()) == 0);
   assert(lstat(path.Path(), &info) == 0);
-  assert(UnmountDisk(remounted.partition, path.Path(), info.st_dev, info.st_ino) == B_OK);
+  assert(UnmountWhenIdle(remounted, path, info) == B_OK);
   assert(FindFixture(devicePath).mountedDevice < 0);
   puts("File-backed BFS: stale, busy, unmount, remount and data verified");
 }
