@@ -138,6 +138,29 @@ la_ssize_t BudgetArchiveWrite(archive *archive, void *opaque,
   }
   return size;
 }
+// Read the original logical headers, not the ownership of extracted scratch files.
+void ReadTarOwners(DynamicLibrary &lib, archive *reader, archive_entry *entry,
+                   int status, const Hooks &hooks, TarOwners &owners) {
+  ArchiveMetadataBudget budget;
+  for (; status != ARCHIVE_EOF;
+       status = LIBCALL(lib, archive_read_next_header)(reader, &entry)) {
+    Require(status == ARCHIVE_OK, "Cannot read TAR ownership. Original archive retained.");
+    if (hooks.proceed && !hooks.proceed())
+      throw Cancelled();
+    Require(owners.size() < 200000, "Archive has too many entries.");
+    auto name = SafeArchivePath(LIBCALL(lib, archive_entry_pathname)(entry));
+    Require(!name.empty(), "Cannot preserve an explicit TAR root entry. Original archive retained.");
+    const char *user = LIBCALL(lib, archive_entry_uname)(entry);
+    const char *group = LIBCALL(lib, archive_entry_gname)(entry);
+    budget.Charge(sizeof(TarOwners::value_type) + ArchiveMetadataBudget::NodeOverhead +
+                  name.size() + (user ? strlen(user) : 0) + (group ? strlen(group) : 0));
+    TarOwner owner{LIBCALL(lib, archive_entry_uid)(entry),
+                   LIBCALL(lib, archive_entry_gid)(entry),
+                   user ? user : "", group ? group : ""};
+    Require(owners.emplace(std::move(name), std::move(owner)).second,
+            "Ambiguous TAR member ownership. Original archive retained.");
+  }
+}
 struct Pack {
   Writer &writer;
   const Hooks &hooks;
@@ -352,25 +375,8 @@ std::string DetectArchiveEditFormat(const std::string &path,
           "Archive is damaged or cannot be inspected for editing.");
   const int detected =
       LIBCALL(lib, archive_format)(reader.value) & ARCHIVE_FORMAT_BASE_MASK;
-  if (owners && detected == ARCHIVE_FORMAT_TAR) {
-    ArchiveMetadataBudget budget;
-    for (int next = status; next != ARCHIVE_EOF;
-         next = LIBCALL(lib, archive_read_next_header)(reader.value, &entry)) {
-      Require(next == ARCHIVE_OK, "Cannot read TAR ownership. Original archive retained.");
-      if (hooks.proceed && !hooks.proceed())
-        throw Cancelled();
-      auto name = SafeArchivePath(LIBCALL(lib, archive_entry_pathname)(entry));
-      Require(!name.empty(), "Cannot preserve an explicit TAR root entry. Original archive retained.");
-      const char *user = LIBCALL(lib, archive_entry_uname)(entry);
-      const char *group = LIBCALL(lib, archive_entry_gname)(entry);
-      budget.Charge(sizeof(TarOwners::value_type) + ArchiveMetadataBudget::NodeOverhead +
-                    name.size() + (user ? strlen(user) : 0) + (group ? strlen(group) : 0));
-      Require(owners->emplace(std::move(name), TarOwner{
-                LIBCALL(lib, archive_entry_uid)(entry), LIBCALL(lib, archive_entry_gid)(entry),
-                user ? user : "", group ? group : ""}).second,
-              "Ambiguous TAR member ownership. Original archive retained.");
-    }
-  }
+  if (owners && detected == ARCHIVE_FORMAT_TAR)
+    ReadTarOwners(lib, reader.value, entry, status, hooks, *owners);
   if (detected == ARCHIVE_FORMAT_CAB)
     CabValidateEdit(fd.n);
   if (detected == ARCHIVE_FORMAT_LHA)
