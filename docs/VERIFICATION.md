@@ -4,6 +4,14 @@ Listi is alpha software that works directly on files. Tests provide evidence for
 specific cases, not proof that every filesystem, server or archive variant is
 safe. Use disposable fixtures and independent backups.
 
+## Private revision 39: terminal startup
+
+In one Haiku R1/beta6 hrev59866+79 VM run, the terminal-dock test timed out.
+The guest debugger logged a libroot mutex assertion inside `fork()`, called
+from Listi’s terminal startup. The unchanged test passed on retry. This was
+not a FAT or physical USB test. Intermittent terminal startup remains open;
+the retry is not evidence of a fix.
+
 ## 0.38.0-37 alpha
 
 The Haiku x86_64 package self-test passed (58 checks). In a Haiku VM, after a clean BFS unmount and remount, switching to the former background tab showed Disks instead of reopening the old path. Native folder-tabs, main-window-routing, removable-copy and operation-queue cases exited successfully. These results do not establish safe removal during writes. See the [FAT incident record](#physical-usb-disconnect-during-copy).
