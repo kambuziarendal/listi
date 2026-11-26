@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.38.0-47 (private alpha candidate)
+
+- Local transfers refuse to merge distinct source directories into one destination directory. A move into an existing directory checks access permissions and ownership before copying its children.
+- When a new name is already visible but the directory flush fails, Job Details reports that distinction. New folders, links, and same-volume moves use this check.
+- Network jobs recheck the selected source before rename or move. Upload receipts distinguish an acknowledged transfer from publication at the final name.
+- Local listings keep readable rows and identify incomplete scans. Saved places and searches reload the observed list after replacement even if its directory flush failed.
+- TAR edits retain available access, change and creation timestamps. Cleanup after moving many separate files into an archive checks each selected path and its ancestors rather than rescanning all selections.
+
 ## 0.38.0-46 (private alpha candidate)
 
 - FTP folder receipts and SHA-256 comparisons describe visible entries only. Direct FTP rename/move is refused because the protocol lacks a no-replace guarantee. Uncertain upload stages and backups remain identifiable for recovery.
