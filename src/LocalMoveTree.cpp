@@ -23,10 +23,11 @@ void Check(const Hooks &hooks) {
     throw Cancelled();
 }
 bool Identity(const struct stat &a, const struct stat &b) {
-  return a.st_dev == b.st_dev && a.st_ino == b.st_ino && a.st_mode == b.st_mode;
+  return a.st_dev == b.st_dev && a.st_ino == b.st_ino && a.st_mode == b.st_mode &&
+         a.st_uid == b.st_uid && a.st_gid == b.st_gid;
 }
 bool Same(const struct stat &a, const struct stat &b) {
-  return Identity(a, b) && a.st_uid == b.st_uid && a.st_gid == b.st_gid && a.st_nlink == b.st_nlink && a.st_size == b.st_size &&
+  return Identity(a, b) && a.st_nlink == b.st_nlink && a.st_size == b.st_size &&
          a.st_mtim.tv_sec == b.st_mtim.tv_sec &&
          a.st_mtim.tv_nsec == b.st_mtim.tv_nsec &&
          a.st_ctim.tv_sec == b.st_ctim.tv_sec &&
@@ -114,25 +115,22 @@ void LocalMoveTree::Capture(const std::string &path, dev_t volume,
     Capture(Join(path, child->d_name), volume, hooks, depth + 1);
   }
 }
-void LocalMoveTree::GuardParents() const {
-  for (const auto &alias : aliases) {
-    if (removed.count(alias.first))
-      continue;
-    char *resolved = realpath(alias.first.c_str(), nullptr);
-    const std::string actual = resolved ? resolved : "";
-    free(resolved);
-    Require(actual == alias.second,
-            "Move path changed during operation: " + alias.first);
-  }
-  for (const auto &entry : parents) {
-    struct stat now;
-    Require(!lstat(entry.first.c_str(), &now) && Identity(entry.second, now),
-            "A move parent folder changed. Source cleanup stopped: " +
-                entry.first);
-  }
+static void GuardAlias(const std::string &selected, const std::string &expected) {
+  char *resolved = realpath(selected.c_str(), nullptr);
+  const std::string actual = resolved ? resolved : "";
+  free(resolved);
+  Require(actual == expected, "Move path changed during operation: " + selected);
+}
+static void GuardDirectory(const std::string &path, const struct stat &saved) {
+  struct stat now;
+  Require(!lstat(path.c_str(), &now) && Identity(saved, now),
+          "A move parent folder changed. Source cleanup stopped: " + path);
 }
 void LocalMoveTree::Verify() const {
-  GuardParents();
+  for (const auto &[selected, root] : aliases)
+    GuardAlias(selected, root);
+  for (const auto &[path, saved] : parents)
+    GuardDirectory(path, saved);
   for (const auto &entry : entries) {
     struct stat now;
     Require(!lstat(entry.first.c_str(), &now) && Same(entry.second, now),
@@ -165,32 +163,43 @@ TarMemberMap LocalMoveTree::TarMetadata(const std::string &targetFolder) const {
 }
 void LocalMoveTree::Remove(const std::string &selected, const Hooks &hooks) {
   const auto &root = aliases.at(selected);
-  // Verify all roots before the caller starts cleanup. During cleanup, parent
-  // timestamps legitimately change. Still guard every inode and regular file.
-  for (auto it = entries.rbegin(); it != entries.rend(); ++it) {
-    const auto &path = it->first;
-    if (path != root && path.compare(0, root.size() + 1, root + "/") != 0)
-      continue;
+  // Verify() checked the full batch before cleanup. For each deletion,
+  // recheck the selected alias and every ancestor of this entry, not the
+  // other selected roots (which may already have been safely removed).
+  auto remove = [&](const std::string &path, const struct stat &saved) {
     Check(hooks);
-    GuardParents();
-    for (auto parent = ParentLocation(path); entries.count(parent);
-         parent = ParentLocation(parent)) {
-      struct stat now;
-      Require(!lstat(parent.c_str(), &now) && Identity(entries.at(parent), now),
-              "Source parent changed during cleanup: " + parent);
+    GuardAlias(selected, root);
+    for (auto parent = ParentLocation(path);; parent = ParentLocation(parent)) {
+      auto captured = entries.find(parent);
+      GuardDirectory(parent, captured != entries.end() ? captured->second : parents.at(parent));
+      if (parent == "/")
+        break;
     }
     struct stat now;
-    const bool directory = S_ISDIR(it->second.st_mode);
+    const bool directory = S_ISDIR(saved.st_mode);
     Require(!lstat(path.c_str(), &now) &&
-                (directory ? Identity(it->second, now) : Same(it->second, now)),
+                (directory ? Identity(saved, now) : Same(saved, now)),
             "Source changed during cleanup: " + path);
     if (portable)
       Portable(path, now);
     Require(!(directory ? rmdir(path.c_str()) : unlink(path.c_str())),
             "Source cleanup was incomplete. Verified destination retained: " +
                 path);
+  };
+  // Descendants are contiguous in the sorted snapshot. Reverse order
+  // removes each child before its parent without listing the live tree.
+  if (S_ISDIR(entries.at(root).st_mode)) {
+    const auto prefix = root + "/";
+    const auto begin = entries.lower_bound(prefix);
+    auto end = begin;
+    while (end != entries.end() && end->first.compare(0, prefix.size(), prefix) == 0)
+      ++end;
+    while (end != begin) {
+      --end;
+      remove(end->first, end->second);
+    }
   }
-  removed.insert(selected);
+  remove(root, entries.at(root));
   FlushPath(ParentLocation(root));
 }
 } // namespace Listi

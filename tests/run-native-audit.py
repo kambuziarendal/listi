@@ -51,7 +51,7 @@ WRAPS = {
     "inspector-document": ['fsync'],
     "bulk-rename": ['renameat', 'fstatat'],
     "clipboard-text-file": ['write', 'close', 'fsync'],
-    "archive-move-scaling": ['lstat'],
+    "archive-move-scaling": ['lstat', 'realpath'],
     "terminal-delivery": ["_ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl",
                           "_ZN5BView10DrawBitmapEPK7BBitmap5BRectS3_"],
     "directory-delivery": ['opendir', 'readdir', '_ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl'],

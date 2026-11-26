@@ -2,7 +2,6 @@
 #pragma once
 #include "FileOperation.h"
 #include "ArchiveWriting.h"
-#include <set>
 #include <sys/stat.h>
 
 namespace Listi {
@@ -20,8 +19,6 @@ private:
   std::map<std::string, struct stat> entries, parents;
   bool portable;
   std::map<std::string, std::string> aliases;
-  std::set<std::string> removed;
   void Capture(const std::string &, dev_t, const Hooks &, unsigned);
-  void GuardParents() const;
 };
 } // namespace Listi
