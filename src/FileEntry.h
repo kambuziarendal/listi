@@ -23,6 +23,12 @@ struct FileEntry {
            modifiedFraction == other.modifiedFraction;
   }
 
+  bool SameRevision(const FileEntry &other) const {
+    return directory == other.directory && link == other.link &&
+           sizeKnown == other.sizeKnown && (!sizeKnown || size == other.size) &&
+           SameModification(other) && providerIdentity == other.providerIdentity;
+  }
+
   void SetModification(int64_t seconds, long nanoseconds) {
     modified = seconds;
     modifiedKnown = true;

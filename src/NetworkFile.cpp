@@ -628,13 +628,17 @@ bool StatNetwork(const Location &l, FileEntry &e, const TransferControl &c,
     // The post-read check still obtains the size, type, and time afresh.
     entry = *discovered;
   } else {
-    auto items = ListNetwork(ParseLocation(ParentLocation(url)), c);
+    ListingMethod method;
+    auto items = ListNetwork(ParseLocation(ParentLocation(url)), c, &method);
     const auto name = LocationLeaf(url);
     auto item = std::find_if(items.begin(), items.end(), [&](const FileEntry &entry) {
       return entry.name == name;
     });
-    if (item == items.end())
+    if (item == items.end()) {
+      if (method == ListingMethod::FtpList)
+        throw std::runtime_error("FTP LIST did not show this name and cannot confirm its absence: " + url);
       return false;
+    }
     entry = std::move(*item);
   }
   if (l.scheme == "sftp" && !entry.directory && !entry.link) {

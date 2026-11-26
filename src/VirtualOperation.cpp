@@ -113,10 +113,6 @@ std::string RemoteDigest(const std::string &path, const TransferControl &control
   }, control);
   return hash.Finish();
 }
-bool Same(const FileEntry &a, const FileEntry &b) {
-  return a.directory == b.directory && a.link == b.link && a.size == b.size &&
-         a.sizeKnown == b.sizeKnown && a.SameModification(b);
-}
 bool MatchesDeleteSelection(const FileEntry &selected, const FileEntry &current) {
   return selected.directory == current.directory && selected.link == current.link &&
          (!selected.sizeKnown || (current.sizeKnown && selected.size == current.size)) &&
@@ -131,8 +127,7 @@ bool SameListing(std::vector<FileEntry> &before, std::vector<FileEntry> &after) 
   std::sort(after.begin(), after.end(), byName);
   return std::equal(before.begin(), before.end(), after.begin(), after.end(),
                     [](const FileEntry &a, const FileEntry &b) {
-                      return a.name == b.name && Same(a, b) &&
-                             a.providerIdentity == b.providerIdentity;
+                      return a.name == b.name && a.SameRevision(b);
                     });
 }
 std::string TransferIdentity(const std::string &path) {
@@ -207,8 +202,17 @@ struct Runner {
   bool selectedDirectory = false;
   size_t visited = 0;
   size_t deletedEntries = 0;
-  size_t publishedEntries = 0, omittedEntries = 0;
+  size_t publishedEntries = 0, omissions = 0;
   std::string firstOmission;
+  void NoteOmission(const std::string &error) {
+    ++omissions;
+    if (firstOmission.empty())
+      firstOmission = error;
+    AddError(error);
+  }
+  void NoteLimitedListing(const std::string &path) {
+    NoteOmission(path + ": FTP LIST may omit entries; a complete folder copy cannot be verified.");
+  }
   void RecordPartialRoot(const std::string &dst, size_t publishedBefore,
                          const std::string &detail) {
     if (!selectedDirectory || publishedEntries == publishedBefore)
@@ -251,7 +255,7 @@ struct Runner {
     // Remote metadata is not a transactional snapshot. Reject observable
     // changes; never claim this detects same-size edits on servers without
     // timestamps.
-    if (!StatFile(src, after, control) || !Same(expected, after) ||
+    if (!StatFile(src, after, control) || !expected.SameRevision(after) ||
         (expected.sizeKnown && bytes != uint64_t(expected.size)))
       throw std::runtime_error(
           "Source changed during transfer; destination was not committed");
@@ -321,20 +325,19 @@ struct Runner {
       if (exists && !target.directory)
         throw std::runtime_error("Destination is not a folder");
       std::vector<std::string> omitted;
-      auto entries = ListFiles(src, control, &omitted);
+      ListingMethod initialMethod;
+      auto entries = ListFiles(src, control, &omitted, &initialMethod);
       // Track completeness for this subtree independently of earlier siblings.
-      const size_t omittedBefore = omittedEntries;
-      omittedEntries += omitted.size();
+      const size_t omittedBefore = omissions;
+      if (initialMethod == ListingMethod::FtpList)
+        NoteLimitedListing(src);
       for (const auto &path : omitted) {
-        auto error = path + ": " + kUnavailableVolumeText;
-        if (firstOmission.empty())
-          firstOmission = error;
-        AddError(error);
+        NoteOmission(path + ": " + kUnavailableVolumeText);
         if (!hooks.privateStaging)
           RecordOutcome({path, ChildLocation(dst, LocationLeaf(path)),
                          "unprocessed", kUnavailableVolumeText});
       }
-      if (entries.empty() && !omitted.empty())
+      if (entries.empty() && omissions != omittedBefore)
         return;
       std::optional<PinnedDirectory> localParent, directory;
       if (!IsVirtual(dst)) {
@@ -388,12 +391,15 @@ struct Runner {
         RecordOutcome({src, dst, "filesystem limitations", std::move(limitations)});
       }
       std::vector<std::string> nowOmitted;
-      auto current = ListFiles(src, control, &nowOmitted);
+      ListingMethod finalMethod;
+      auto current = ListFiles(src, control, &nowOmitted, &finalMethod);
+      if (initialMethod != ListingMethod::FtpList && finalMethod == ListingMethod::FtpList)
+        NoteLimitedListing(src);
       std::sort(omitted.begin(), omitted.end());
       std::sort(nowOmitted.begin(), nowOmitted.end());
       if (omitted != nowOmitted || !SameListing(entries, current))
         throw std::runtime_error("Source folder changed during transfer: " + src);
-      if (result.skipped == skippedBefore && omittedEntries == omittedBefore) {
+      if (result.skipped == skippedBefore && omissions == omittedBefore) {
         if (hooks.fileDone)
           hooks.fileDone(src, dst);
       }
@@ -496,6 +502,7 @@ struct Runner {
     const auto &backup = recovery.Backup();
     const auto expectedDigest = expected.Finish();
     std::string originalDigest;
+    FileEntry stagedRevision;
     bool stagedExists = false, backupExists = false, committed = false,
          commitAttempted = false;
     try {
@@ -511,11 +518,12 @@ struct Runner {
       UploadFile(temp.path, staged, control);
       receipt.bytesWritten = stagedBytes;
       control.Check();
-      if (!StatFile(staged, check, control) || check.directory || check.link ||
-          (check.sizeKnown && (check.size < 0 || uint64_t(check.size) != stagedBytes)))
+      if (!StatFile(staged, stagedRevision, control) || stagedRevision.directory || stagedRevision.link ||
+          (stagedRevision.sizeKnown && (stagedRevision.size < 0 ||
+                                        uint64_t(stagedRevision.size) != stagedBytes)))
         throw std::runtime_error(
             "Uploaded file is missing or incomplete; destination was not replaced");
-      receipt.destinationSizeChecked = check.sizeKnown;
+      receipt.destinationSizeChecked = stagedRevision.sizeKnown;
       uint64_t received = 0;
       Sha256 actual;
       ReadFile(staged, [&](const char *data, size_t n) {
@@ -527,10 +535,13 @@ struct Runner {
       if (received != stagedBytes || actual.Finish() != expectedDigest)
         throw std::runtime_error(
             "Uploaded content differs from the source; destination was not replaced.");
+      if (!StatFile(staged, check, control) || !stagedRevision.SameRevision(check))
+        throw std::runtime_error(
+            "Staged upload changed during verification; destination was not replaced.");
       receipt.contentVerified = true;
       recovery.Advance(RecoveryPhase::Ready);
       bool now = StatFile(dst, check, control);
-      if (now != exists || (now && (!Same(target, check) ||
+      if (now != exists || (now && (!target.SameRevision(check) ||
                                     RemoteDigest(dst, control) != originalDigest)))
         throw std::runtime_error(
             "Destination changed during transfer; it was left untouched");
@@ -590,7 +601,7 @@ struct Runner {
           FileEntry current, saved;
           if (!StatFile(backup, saved, cleanup)) {
             backupExists = false;
-          } else if (Same(target, saved) && matches(backup, saved, originalDigest) &&
+          } else if (target.SameRevision(saved) && matches(backup, saved, originalDigest) &&
                      !StatFile(dst, current, cleanup)) {
             RenameFile(backup, dst, cleanup);
             backupExists = false;
@@ -604,9 +615,10 @@ struct Runner {
           FileEntry remote;
           if (!StatFile(staged, remote, cleanup))
             stagedExists = false;
-          else if (receipt.contentVerified && matches(staged, remote, expectedDigest)) {
+          else if (receipt.contentVerified && stagedRevision.SameRevision(remote) &&
+                   matches(staged, remote, expectedDigest)) {
             RemoveFile(staged, false, cleanup);
-            stagedExists = false;
+            stagedExists = StatFile(staged, remote, cleanup);
           }
         } catch (const Cancelled &) {
           result.cancelled = true;

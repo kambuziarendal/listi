@@ -44,10 +44,14 @@ struct Remote {
   int64_t modified = 1;
   long nanoseconds = 0;
   bool directory = false;
+  std::string identity;
 };
 std::map<std::string, Remote> files;
 bool corruptUpload = false, denyReadback = false, cancelReadback = false;
-bool cancelAtReadyCheck = false;
+bool cancelAtReadyCheck = false, cancelAfterStore = false, hideStoredPart = false;
+bool uncertainRollback = false, replaceStageOnRead = false;
+std::string changeIdentityOnRead, downgradeListing;
+unsigned folderReads = 0;
 unsigned postCancelReadCalls = 0;
 bool commitFailed = false, expireDuringCleanup = false;
 size_t cleanupReadBytes = 0;
@@ -130,10 +134,14 @@ bool StatNetwork(const Location &l, FileEntry &entry, const TransferControl &c,
   if (cancelAtReadyCheck && l.URL() == destination && files.size() == 2)
     cancelled = true;
   c.Check();
+  if ((hideStoredPart && suffix(l.URL(), ".part") && files.count(l.URL())) ||
+      (uncertainRollback && commitFailed && c.cleanup && l.URL() == destination))
+    throw std::runtime_error("FTP LIST cannot confirm absence");
   auto it = files.find(l.URL());
   if (it == files.end()) return false;
   entry.path = l.URL(); entry.name = LocationLeaf(entry.path);
   entry.directory = it->second.directory;
+  entry.providerIdentity = it->second.identity;
   entry.sizeKnown = !omitStageSize || !suffix(l.URL(), ".part");
   entry.size = it->second.data.size();
   entry.SetModification(it->second.modified, it->second.nanoseconds);
@@ -142,7 +150,8 @@ bool StatNetwork(const Location &l, FileEntry &entry, const TransferControl &c,
 std::vector<FileEntry> ListNetwork(const Location &l, const TransferControl &c,
                                    ListingMethod *method) {
   if (method)
-    *method = ListingMethod::Provider;
+    *method = l.URL() == downgradeListing && ++folderReads > 1
+                  ? ListingMethod::FtpList : ListingMethod::Provider;
   std::vector<FileEntry> out;
   for (auto &item : files) {
     if (ParentLocation(item.first) == l.URL()) {
@@ -173,6 +182,8 @@ void ReadNetwork(const Location &l, const DataSink &sink, const TransferControl 
   } else {
     sink(data.data(), data.size());
   }
+  if (l.URL() == changeIdentityOnRead || (replaceStageOnRead && suffix(l.URL(), ".part")))
+    files.at(l.URL()).identity = "replaced";
   if (editSmbSourceOnRead && l.scheme == "smb") {
     data = "changed";
     files.at(l.URL()).nanoseconds = 654000000;
@@ -186,6 +197,8 @@ void UploadNetwork(const std::string &local, const Location &l, const TransferCo
   files[l.URL()] = {truncateUpload ? data.substr(0, data.size() / 2) : data, 1};
   if (mutateDestination) files[destination] = {"concurrent edit", 2};
   c.Tick(data.size());
+  if (cancelAfterStore)
+    cancelled = true;
 }
 void ChangeNetwork(const Location &l, const char *action,
                    const std::string &target, const TransferControl &c) {
@@ -246,7 +259,10 @@ int main() {
     postCancelReadCalls = 0;
     commitFailed = expireDuringCleanup = false;
     cleanupReadBytes = 0;
-    cancelAtReadyCheck = false;
+    cancelAtReadyCheck = cancelAfterStore = hideStoredPart = uncertainRollback = replaceStageOnRead = false;
+    changeIdentityOnRead.clear();
+    downgradeListing.clear();
+    folderReads = 0;
     cancelReadback = corruptUpload = denyReadback = truncateUpload = omitStageSize = false;
     files = {{destination, {"old contents", 1}}}; done = 0;
     failCommit = failRollback = failPartCleanup = failBackupCleanup = false;
@@ -283,6 +299,32 @@ int main() {
         r.outcomes.front().upload->contentVerified &&
         r.outcomes.front().upload->publication == Publication::Published,
         "successful replacement commits once and removes its backup");
+  reset();
+  replaceStageOnRead = true;
+  r = RunVirtual(job, hooks);
+  check(!r.completed && !done && !r.errors.empty() && files.at(destination).data == "old contents" &&
+            reportedCopy(r, ".part", "new contents") && !r.outcomes.front().upload->contentVerified,
+        "staged upload replaced during readback cannot be published or silently removed");
+  for (bool cancel : {false, true}) {
+    reset();
+    hideStoredPart = true;
+    cancelAfterStore = cancel;
+    r = RunVirtual(job, hooks);
+    check(!r.completed && !done && r.cancelled == cancel &&
+              r.outcomes.size() == 1 && r.outcomes.front().upload &&
+              r.outcomes.front().upload->bytesWritten == 12 &&
+              r.outcomes.front().upload->publication == Publication::NotAttempted &&
+              reportedCopy(r, ".part", "new contents") && errorHas(r, ".part") &&
+              files.at(destination).data == "old contents" && !postCancelReadCalls,
+          cancel ? "cancel after acknowledged STOR retains the exact hidden recovery name"
+                 : "unknown stage lookup after acknowledged STOR retains the exact recovery name");
+  }
+  reset();
+  failCommit = uncertainRollback = true;
+  r = RunVirtual(job, hooks);
+  check(!r.completed && !done && !files.count(destination) &&
+            reportedCopy(r, ".previous", "old contents") && errorHas(r, ".previous"),
+        "unknown final name during rollback prevents restoring over it and reports the backup");
   reset(); growSourceOnRead = true;
   const std::string remote = "sftp://fixture/in/input";
   files[remote] = {"initial", 1};
@@ -293,6 +335,19 @@ int main() {
         files.at(destination).data == "old contents",
         "staging rejects actual bytes beyond the declared source size before upload");
   growSourceOnRead = false;
+  for (bool replaced : {false, true}) {
+    reset();
+    files[remote] = {"stable bytes", 1, 0, false, "selected"};
+    if (replaced)
+      changeIdentityOnRead = remote;
+    r = RunVirtual({Action::Copy, {remote}, "sftp://fixture/out"}, hooks);
+    check(replaced ? (!r.completed && !done && errorHas(r, "Source changed") &&
+                      files.at(destination).data == "old contents")
+                   : (r.completed == 1 && done == 1 && r.errors.empty() &&
+                      files.at(destination).data == "stable bytes"),
+          replaced ? "changed provider identity with equal size and time stops transfer"
+                   : "stable provider identity permits transfer");
+  }
   const std::string smb = "smb://fixture/in/edited";
   const std::string downloaded = std::string(dir) + "/edited";
   reset();
@@ -405,6 +460,25 @@ int main() {
             access((copiedFolder + "/z-unreadable").c_str(), F_OK),
         "folder download keeps the successful child receipt after a later read failure");
   unlink((copiedFolder + "/a-readable").c_str());
+  rmdir(copiedFolder.c_str());
+  reset();
+  const auto nestedRemote = sourceFolder + "/nested";
+  const auto delivered = nestedRemote + "/visible";
+  files[sourceFolder] = {"", 1, 0, true};
+  files[nestedRemote] = {"", 1, 0, true};
+  files[delivered] = {"visible bytes"};
+  downgradeListing = nestedRemote;
+  localPublish = LocalPublish::Limited;
+  partial = RunVirtual({Action::Copy, {sourceFolder}, downloadFolder}, hooks);
+  localPublish = LocalPublish::Unexpected;
+  check(!partial.completed && done == 1 && partial.partialCopies == 1 &&
+            errorHas(partial, nestedRemote.c_str()) && errorHas(partial, "FTP LIST") &&
+            partial.outcomes.size() == 2 && partial.outcomes.front().source == delivered &&
+            partial.outcomes.front().status == "copied" && partial.outcomes.back().source == sourceFolder &&
+            partial.outcomes.back().status == "partial",
+        "a nested FTP fallback on final listing retains the file receipt but not folder completion");
+  unlink((copiedFolder + "/nested/visible").c_str());
+  rmdir((copiedFolder + "/nested").c_str());
   rmdir(copiedFolder.c_str());
   rmdir(downloadFolder.c_str());
   const timespec referenceTime[] = {{0, UTIME_OMIT}, {1, 654000000}};
