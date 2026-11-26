@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.38.0-39 (private alpha candidate)
+
+- Archive edits stop before publication if a private copy fails. Creating an archive claims its new filename exclusively; allow space for the staged archive and its final copy. A failed final write can leave an incomplete file and a recovery stage.
+- Downloads and archive member copies use the final drive’s overwrite policy. Partial folder transfers keep their individual receipts.
+- Metadata edits require a complete recovery record. Clipboard saves, converted images and CSV exports check the destination directory before reporting success.
+- Reloading a folder preserves the selection and scroll position. Search results retain sorting by original folder.
+
+Concurrent naming remains a limitation for ordinary copy, rename, same-volume move and publication of an extracted folder. Do not have multiple jobs or programs create the same destination name. The interrupted FAT write issue remains open.
+
 ## 0.38.0-38 (private alpha candidate)
 
 - Correction for users of revision 37: do not follow the USB disconnect test in that package. A physical disconnect during copying was followed by a kernel panic. Finish the transfer and unmount before removal. This revision does not fix the FAT driver.
