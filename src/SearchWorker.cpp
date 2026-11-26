@@ -61,6 +61,7 @@ class SearchWorker : public Listi::ReadWorker {
       return ok;
     };
     SearchSummary summary;
+    size_t blockedHits = 0;
     if (Listi::InterruptedVolumes().Contains(request.root))
       summary.error = Listi::kUnavailableVolumeText;
     else if (!initial && !SameSearchEntry(root))
@@ -70,8 +71,10 @@ class SearchWorker : public Listi::ReadWorker {
       summary = SearchFiles(
           request, [&] { return Alive(); },
           [&](const SearchHit &hit) {
-            if (Listi::InterruptedVolumes().Contains(hit.path))
+            if (Listi::InterruptedVolumes().Contains(hit.path)) {
+              ++blockedHits;
               return true;
+            }
             BMessage item;
             if (paneRows) {
               struct stat st;
@@ -97,6 +100,7 @@ class SearchWorker : public Listi::ReadWorker {
             return ++count < 40 || flush();
           },
           initial ? query.get() : nullptr);
+    summary.skipped += blockedHits;
     if (!Alive()) {
       Stop();
       return;

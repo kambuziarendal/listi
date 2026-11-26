@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.38.0-43 (private alpha candidate)
+
+- When copying a regular file to an unused name, Listi claims that name exclusively. This also protects Duplicate and the copy step of a cross-volume move. The verified stage stays until the new file is flushed, so the destination needs space for both copies. Direct rename, same-volume move, symbolic links and publication of an extracted folder still have separate collision limitations.
+- Search and Flat View report skipped entries on known unavailable paths rather than reporting a complete scan.
+- Clipboard saves reject destinations that became unavailable after the name prompt opened. A rejected paste job no longer leaves Cut reserved while waiting for a job that never started.
+- TAR creation handles long UTF-8 member names in a worker using the C locale. New archive creation checks the output against the file actually written before publishing it.
+
+## 0.38.0-42 (private alpha candidate)
+
+- Folder history now records the order of new saves independently of the system clock. After a clock change, the timeline and automatic history use the last saved version, not the version with the latest date. Existing versions remain readable without a migration.
+
+## 0.38.0-41 (private alpha candidate)
+
+- Disks also listens for Haiku's final partition mount and unmount notifications, so it can refresh after another application changes a volume.
+- Mount and unmount actions recheck the filesystem label as well as the selected partition's location and geometry. A different label requires a fresh selection. Identical labels and geometry do not identify a physical disk uniquely.
+
+## 0.38.0-40 (private alpha candidate)
+
+- In Disks, right-click a recognized unmounted volume to mount it, or a mounted volume to unmount it. The boot volume cannot be unmounted from Listi. This does not change the known FAT disconnect limitation.
+
+## 0.38.0-39 (private alpha candidate)
+
+- Archive edits stop before publication if a private copy fails. Creating an archive claims its new filename exclusively; allow space for the staged archive and its final copy. A failed final write can leave an incomplete file and a recovery stage.
+- Downloads and archive member copies use the final drive’s overwrite policy. Partial folder transfers keep their individual receipts.
+- Metadata edits require a complete recovery record. Clipboard saves, converted images and CSV exports check the destination directory before reporting success.
+- Reloading a folder preserves the selection and scroll position. Search results retain sorting by original folder.
+
+Concurrent naming remains a limitation for ordinary copy, rename, same-volume move and publication of an extracted folder. Do not have multiple jobs or programs create the same destination name. The interrupted FAT write issue remains open.
+
+## 0.38.0-38 (private alpha candidate)
+
+- Correction for users of revision 37: do not follow the USB disconnect test in that package. A physical disconnect during copying was followed by a kernel panic. Finish the transfer and unmount before removal. This revision does not fix the FAT driver.
+- Folder comparison and upload report inaccessible paths instead of treating an incomplete folder as complete.
+
 ## [0.38.0-37 alpha](https://github.com/kambuziarendal/listi/releases/tag/v0.38.0-37)
 
 This public package includes the changes in revisions 24 through 37 listed below. Interrupted FAT writes can still crash Haiku; finish the copy and unmount before disconnecting the drive.

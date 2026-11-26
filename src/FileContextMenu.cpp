@@ -91,9 +91,15 @@ void FileActions(BMenu &menu, const ContextMenuOptions &options) {
     item->SetEnabled(enabled);
     menu.AddItem(item);
   };
+  if (options.diskAction == Listi::kMountDisk) {
+    add("Mount", Listi::kMountDisk);
+    return;
+  }
   add("Open", kInvoke, single);
   if (single && directory) {
     add("Open in new window", kSelectedBrowser);
+    if (options.diskAction == Listi::kUnmountDisk)
+      add("Unmount", Listi::kUnmountDisk);
     add("Detach to Einn", Listi::kTabDetach);
     add("Add to shortcuts…", kAddShortcut, options.addShortcut);
   }

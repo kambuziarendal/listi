@@ -537,6 +537,16 @@ int main(){
            access((blocked.destination + "/" + Leaf(one)).c_str(), F_OK) != 0 &&
            access(healthy.destination.c_str(), F_OK) == 0,
        "a waiting job cannot enter the interrupted volume; independent local work still runs");
+ check(wait([&] {
+         for (const auto &event : window->completed)
+           if (event.GetInt64("operation", 0) == blockedId) {
+             const std::string error = event.GetString("error", "");
+             return !event.HasString("compactResult") &&
+                    error.find(blocked.destination) != std::string::npos;
+           }
+         return false;
+       }),
+       "queue reports the exact unavailable endpoint and no compact success");
  check(window->queue->Enqueue(blocked) == 0,
        "a new job cannot be queued against the blocked volume");
 

@@ -69,6 +69,8 @@ public:
   size_t MatchPattern(const char *pattern, bool apply);
   std::string SelectedFileType() const { return entries.FocusedFileType(); }
   std::vector<std::string> Selected() const;
+  const PaneEntry *SelectedDisk() const;
+  void ChangeDiskMount(const PaneEntry &disk, bool mount);
   std::map<std::string, Listi::NodeIdentity> SelectedLocalIdentities(size_t limit = SIZE_MAX) const {
     return entries.SelectedLocalIdentities(limit);
   }
@@ -78,7 +80,7 @@ public:
   }
   std::string SelectedPath() const {
     const auto *entry = entries.OnlySelected();
-    return entry ? entry->path : "";
+    return entry && !entry->unmountedDisk ? entry->path : "";
   }
   const char *Path() const { return path.String(); }
   const PaneModel &ExportModel() const { return entries; }
@@ -156,14 +158,15 @@ private:
   bool HandleQueryReply(BMessage &);
   BPoint ScrollPosition();
   PaneEntry *ScrollRow(const std::string *, float &);
-  Listi::VisitPosition CaptureVisit();
+  Listi::VisitPosition CaptureVisit(
+      size_t selectionLimit = Listi::VisitPosition::SelectionLimit);
   void RestoreVisit();
   std::optional<Listi::VisitPosition> pendingVisit;
   Listi::VisitPosition::Identity folderIdentity{-1, -1};
   void RestoreScroll(BPoint);
 
   void StartNavigation(const std::string &, int target = -1,
-                       bool trash = false, bool restore = false);
+                       bool trash = false, bool restore = false, bool refresh = false);
   void UpdateNavigation();
   BTextControl *filter;
   BButton *clearFilter, *clearEmptyFilter;

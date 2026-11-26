@@ -7,6 +7,7 @@
 #include "SearchWindow.h"
 #include "SavedSearches.h"
 #include "Shelf.h"
+#include "UnavailableVolume.h"
 #include <Application.h>
 #include <LayoutBuilder.h>
 #include <Button.h>
@@ -464,6 +465,32 @@ int main() {
   Check(Await([&] { return !lost.IsValid(); }), "close after lost completion");
   delete_sem(openedRoot);
   delete_sem(resumeRoot);
+
+  const auto blocked = nested + "/unavailable";
+  const auto blockedFile = blocked + "/third.txt";
+  mkdir(blocked.c_str(), 0700);
+  std::ofstream(blockedFile) << "unavailable";
+  auto refreshed = HostFlatView(shelf, nested.c_str());
+  auto scanShows = [&](int32 count, const char *status) {
+    return Await([&] {
+      return Inspect(refreshed, [&](BWindow &window) {
+        auto *rows = Results(window);
+        return rows && rows->CountRows() == count &&
+               TextContains(window, "flat status", status);
+      });
+    });
+  };
+  Check(scanShows(3, "Scan complete"), "Flat View initially scans the whole folder");
+  InterruptedVolumes().Block(blocked);
+  const bool refreshPosted = Inspect(refreshed, [](BWindow &window) {
+    return window.PostMessage(kRefresh, window.FindView("flat view")) == B_OK;
+  });
+  Check(refreshPosted && scanShows(2, "Incomplete: 1"),
+        "Flat View refresh keeps healthy files and reports the unavailable branch");
+  refreshed.SendMessage(B_QUIT_REQUESTED);
+  Check(Await([&] { return !refreshed.IsValid(); }), "close after incomplete refresh");
+  unlink(blockedFile.c_str());
+  rmdir(blocked.c_str());
 
   for (const auto &path : {first, second, second + ".old", nested + "/cycle",
                            root + "/file-link", denied + "/unreadable.txt"})

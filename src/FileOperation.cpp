@@ -363,7 +363,7 @@ struct Runner {
   }
   void Attributes(const std::string &src, const std::string &dst,
                   bool verifyMerge = false, int destinationFD = -1,
-                  dev_t destinationVolume = -1) {
+                  dev_t destinationVolume = -1, BNode *pinnedSource = nullptr) {
     const bool destinationAttributesUnavailable = destinationFD >= 0 &&
         destinationVolume >= 0 &&
         NtfsAttributesUnavailable(destinationFD, destinationVolume, dst);
@@ -372,7 +372,10 @@ struct Runner {
     const dev_t fatVolume = fatDestination ? destinationVolume : -1;
     const bool allowExtOmission = destinationVolume >= 0 && PlainCopy() &&
         backingDevices.at(destinationVolume).writableExt;
-    BNode from(src.c_str()), to;
+    BNode localSource, to;
+    if (!pinnedSource)
+      localSource.SetTo(src.c_str());
+    BNode &from = pinnedSource ? *pinnedSource : localSource;
     if (destinationFD < 0)
       to.SetTo(dst.c_str());
     char name[B_ATTR_NAME_LENGTH];
@@ -480,10 +483,10 @@ struct Runner {
     return false;
   }
   void PermissionNotice(const std::string &src) {
-    CopyNotice(src, "Haiku cannot set these permissions on NTFS; destination permissions were not preserved.");
+    CopyNotice(src, kNtfsPermissionNotice);
   }
   void DurabilityNotice(const std::string &src) {
-    CopyNotice(src, "Published with source retained. Haiku cannot flush this NTFS directory; safe eject and verify after reconnecting. Crash durability was not confirmed.");
+    CopyNotice(src, kNtfsDurabilityNotice);
   }
   bool Allow(std::string &dst, const std::string &src, const struct stat &incoming,
              const struct stat &existing, bool &keepBoth) {
@@ -694,6 +697,38 @@ struct Runner {
         h.progress(it->first, 0);
     }
   }
+  void CopyBytes(int input, int output, const std::string &src,
+                 const std::string &dst, bool reportProgress) {
+    std::vector<char> buffer(131072);
+    for (;;) {
+      Check();
+      const auto count = read(input, buffer.data(), buffer.size());
+      if (!count)
+        return;
+      if (count < 0) {
+        if (errno == EINTR)
+          continue;
+        Fail(src);
+      }
+      for (ssize_t offset = 0; offset < count;) {
+        const auto written = WriteStaging(output, buffer.data() + offset, count - offset);
+        if (written < 0 && errno == EINTR)
+          continue;
+        if (written <= 0)
+          throw FilesystemError(dst, written == 0 ? EIO : errno);
+        offset += written;
+      }
+      if (reportProgress)
+        Tick(src, count);
+    }
+  }
+  void SyncCopiedFile(int fd, const struct stat &source,
+                      const std::string &path, bool ntfs) {
+    const struct timespec times[2] = {source.st_atim, source.st_mtim};
+    // NTFS updates mtime when flushed file pages reach the driver.
+    if ((ntfs && fsync(fd)) || futimens(fd, times) || fsync(fd))
+      Fail(path);
+  }
   void Commit(const std::string &tmp, const std::string &dst, bool replace,
               const struct stat &original) {
     Guard();
@@ -711,25 +746,29 @@ struct Runner {
     if (status != B_OK)
       throw std::runtime_error(dst + ": " + strerror(status));
   }
-  struct stat PublishKeepBoth(const std::string &src, const std::string &dst,
-                              const std::string &tmp, PinnedDirectory &parentDirectory,
-                              const struct stat &staged, bool &published) {
+  struct stat PublishNewFile(const std::string &src, const std::string &dst,
+                             const std::string &tmp, PinnedDirectory &parentDirectory,
+                             FD &input, BNode &metadata, const struct stat &staged,
+                             bool &published, bool ntfsTarget) {
     const int parent = parentDirectory.Descriptor();
     const auto leaf = Leaf(tmp);
     // BFS does not support hard links, and BEntry::MoveTo(false) checks
     // existence separately from rename. Claim the new leaf exclusively
     // and never reopen it by name for writing. Keep the verified stage
     // and publishing journal until the new inode has been flushed.
-    FD input(openat(parent, leaf.c_str(), O_RDONLY | O_NOFOLLOW));
     struct stat opened;
     if (input.n < 0 || fstat(input.n, &opened) || !SameEntry(opened, staged))
       throw std::runtime_error(tmp + ": staging changed before publication");
     if (!StagingSpaceAvailable(parent, staged.st_size))
       Fail(dst);
+    parentDirectory.Verify();
     FD final(openat(parent, Leaf(dst).c_str(), O_RDWR | O_CREAT | O_EXCL |
                     O_NOFOLLOW | O_CLOEXEC, 0600));
-    if (final.n < 0)
+    if (final.n < 0) {
+      if (errno == EEXIST)
+        throw std::runtime_error(dst + ": new destination already exists; no file was replaced");
       Fail(dst);
+    }
     published = true;
     ++mutations;
     Outcome(src, dst).status = "partial";
@@ -738,20 +777,30 @@ struct Runner {
     FD verify(dup(final.n));
     if (verify.n < 0)
       Fail(dst);
-    // FAT stages have no stored Haiku attributes. They may expose a
-    // synthetic MIME type derived from the temporary filename.
-    if (!FatCopy(staged.st_dev))
-      Attributes(tmp, dst, false, final.n);
-    try {
-      WriteRemovableStagingFile(std::exchange(input.n, -1),
-                                std::exchange(final.n, -1), staged,
-                                [&](size_t) {
-                                  Check();
-                                  CheckDestinationDevice(staged.st_dev);
-                                }, true);
-    } catch (const RemovableCopyInterrupted &) {
-      throw RemovableCopyInterrupted(dst + ": publication interrupted; "
-          "inspect the incomplete file and recovery stage.", ParentLocation(dst));
+    if (metadata.InitCheck() == B_OK)
+      Attributes(tmp, dst, false, final.n, staged.st_dev, &metadata);
+    const auto &backing = backingDevices.at(staged.st_dev);
+    if (backing.removable) {
+      const auto permissions = ntfsTarget ? StagingPermissions::PreserveIfSupported
+                                          : StagingPermissions::Preserve;
+      try {
+        WriteRemovableStagingFile(std::exchange(input.n, -1),
+                                  std::exchange(final.n, -1), staged,
+                                  [&](size_t) {
+                                    Check();
+                                    CheckDestinationDevice(staged.st_dev);
+                                  }, true, permissions, ntfsTarget);
+      } catch (const RemovableCopyInterrupted &) {
+        throw RemovableCopyInterrupted(dst + ": publication interrupted; "
+            "inspect the incomplete file and recovery stage.",
+            backing.mount.empty() ? ParentLocation(dst) : backing.mount);
+      }
+    } else {
+      CopyBytes(input.n, final.n, tmp, dst, false);
+      SetCopyMode(final.n, staged.st_mode, staged.st_dev, dst);
+      SyncCopiedFile(final.n, staged, dst, ntfsTarget);
+      if (close(std::exchange(final.n, -1)))
+        Fail(dst);
     }
     struct stat finalStat;
     if (fstat(verify.n, &finalStat) || finalStat.st_size != staged.st_size ||
@@ -764,7 +813,7 @@ struct Runner {
     if (fstatat(parent, leaf.c_str(), &opened, AT_SYMLINK_NOFOLLOW) ||
         !SameEntry(opened, staged))
       throw std::runtime_error(tmp + ": staging changed during publication");
-    FlushDestination(parentDirectory, staged.st_dev);
+    FlushDestination(parentDirectory, staged.st_dev, false, ntfsTarget);
     Outcome(src).detail = stagingDetail;
     if (unlinkat(parent, leaf.c_str(), 0)) {
       ++mutations;
@@ -935,7 +984,10 @@ struct Runner {
     RecoveryRecord recovery("copy", parentPath, ".listi-copy-", src, dst);
     const auto &tmp = recovery.Stage();
     const auto leaf = Leaf(tmp);
-    FD out(-1);
+    const bool publishNewFile =
+        S_ISREG(st.st_mode) && (keepBoth || (!existed && !h.privateStaging));
+    FD out(-1), stagedInput(-1);
+    BNode stagedMetadata;
     struct stat stagingIdentity{};
     bool bound = false, published = false;
     try {
@@ -957,6 +1009,22 @@ struct Runner {
       bound = true;
       recovery.Advance(RecoveryPhase::Writing, &stagingIdentity);
       CheckDestinationDevice(stagingIdentity.st_dev);
+      if (publishNewFile) {
+        // Keep an independent read descriptor before copying source permissions
+        // onto the stage; those permissions may prevent a later open.
+        stagedInput.n = openat(parent, leaf.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+        struct stat pinned;
+        if (stagedInput.n < 0 || fstat(stagedInput.n, &pinned) ||
+            pinned.st_dev != stagingIdentity.st_dev || pinned.st_ino != stagingIdentity.st_ino)
+          throw std::runtime_error(tmp + ": could not pin staging file");
+        // FAT only synthesizes attributes from the stage's temporary name.
+        if (!FatCopy(pinned.st_dev) &&
+            !NtfsAttributesUnavailable(stagedInput.n, pinned.st_dev, tmp) &&
+            (stagedMetadata.SetTo(tmp.c_str()) != B_OK ||
+             stagedMetadata.GetStat(&pinned) != B_OK ||
+             pinned.st_dev != stagingIdentity.st_dev || pinned.st_ino != stagingIdentity.st_ino))
+          throw std::runtime_error(tmp + ": could not pin staging attributes");
+      }
       const bool ntfsTarget = S_ISREG(st.st_mode) && NtfsCopy(stagingIdentity.st_dev);
       if (deferCompletion || guardedJob->copyForArchiveMove)
         RequireSameMoveVolume(guardedJob->expectedDestination.device,
@@ -1030,38 +1098,14 @@ struct Runner {
           if (!modeSet)
             PermissionNotice(src);
         } else {
-          std::vector<char> buf(131072);
-          for (;;) {
-            Check();
-            ssize_t n = read(in.n, buf.data(), buf.size());
-            if (n == 0)
-              break;
-            if (n < 0) {
-              if (errno == EINTR)
-                continue;
-              Fail(src);
-            }
-            ssize_t at = 0;
-            while (at < n) {
-              const auto w = WriteStaging(out.n, buf.data() + at, n - at);
-              if (w < 0 && errno == EINTR)
-                continue;
-              if (w <= 0)
-                Fail(dst);
-              at += w;
-            }
-            Tick(src, n);
-          }
+          CopyBytes(in.n, out.n, src, dst, true);
           struct stat after;
           if (fstat(in.n, &after) || !SameEntry(after, st))
             throw std::runtime_error(src + ": source changed while copying");
           if (copyAttributes() && !SetCopyMode(out.n, st.st_mode, stagingIdentity.st_dev, tmp))
             PermissionNotice(src);
-          struct timespec times[2] = {st.st_atim, st.st_mtim};
           CheckDestinationDevice(stagingIdentity.st_dev);
-          // NTFS updates mtime when flushed file pages reach the driver.
-          if ((ntfsTarget && fsync(out.n)) || futimens(out.n, times) || fsync(out.n))
-            Fail(tmp);
+          SyncCopiedFile(out.n, st, tmp, ntfsTarget);
         }
       }
       Check();
@@ -1069,7 +1113,8 @@ struct Runner {
       if (lstat(src.c_str(), &current) || !SameEntry(current, st))
         throw std::runtime_error(src + ": source changed before commit");
       struct stat staged;
-      if (lstat(tmp.c_str(), &staged) || staged.st_dev != stagingIdentity.st_dev ||
+      if (fstatat(parent, leaf.c_str(), &staged, AT_SYMLINK_NOFOLLOW) ||
+          staged.st_dev != stagingIdentity.st_dev ||
           staged.st_ino != stagingIdentity.st_ino)
         throw std::runtime_error(tmp + ": staging file changed");
       if (S_ISREG(st.st_mode) && staged.st_size != st.st_size)
@@ -1089,8 +1134,9 @@ struct Runner {
           currentTarget.st_dev != stagingIdentity.st_dev ||
           currentTarget.st_ino != stagingIdentity.st_ino)
         throw std::runtime_error(tmp + ": staging identity changed before publication");
-      if (keepBoth) {
-        staged = PublishKeepBoth(src, dst, tmp, parentDirectory, staged, published);
+      if (publishNewFile) {
+        staged = PublishNewFile(src, dst, tmp, parentDirectory, stagedInput,
+                                stagedMetadata, staged, published, ntfsTarget);
       } else if (existed) {
         const auto target = Leaf(dst);
         if (fstatat(parent, target.c_str(), &currentTarget, AT_SYMLINK_NOFOLLOW) ||

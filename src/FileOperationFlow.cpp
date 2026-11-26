@@ -284,9 +284,10 @@ bool FileOperationFlow::Handle(const BMessage &message, const Pane &source,
       if (!job || message.GetInt32("which", 0) != 1)
         break;
       const std::string lease = message.GetString("clipboardLease", "");
-      if (!lease.empty() && !clipboard.AcceptArchivePaste(*job, lease))
-        break;
-      queue.Enqueue(*job);
+      if (lease.empty())
+        queue.Enqueue(*job);
+      else
+        clipboard.SubmitArchivePaste(*job, lease);
       break;
     }
     case kArchiveAccepted: {

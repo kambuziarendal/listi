@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: MIT
 // Compile on POSIX: c++ -std=c++17 -Isrc tests/virtual-operation-faults.cpp
 // src/JobReportStore.cpp src/DirectoryFinalization.cpp src/VirtualOperation.cpp
-// src/VirtualFile.cpp src/VirtualLocation.cpp src/Sha256.cpp -lsqlite3 -o /tmp/listi-faults
+// src/VirtualFile.cpp src/VirtualLocation.cpp src/Sha256.cpp src/RemovableCopy.cpp
+// -pthread -lsqlite3 -o /tmp/listi-faults
 // Real staging/dispatch code, deterministic fake network commit failures.
 #include "FileOperation.h"
 #include "JobReportStore.h"
 #include "VirtualFile.h"
+#include "UnavailableVolume.h"
 #include <fcntl.h>
 #include <fstream>
 #include <iostream>
@@ -37,7 +39,12 @@ void RecoveryRecord::NoteFailure(bool) noexcept {}
 }
 #endif
 namespace {
-struct Remote { std::string data; int64_t modified = 1; long nanoseconds = 0; };
+struct Remote {
+  std::string data;
+  int64_t modified = 1;
+  long nanoseconds = 0;
+  bool directory = false;
+};
 std::map<std::string, Remote> files;
 bool corruptUpload = false, denyReadback = false, cancelReadback = false;
 bool cancelAtReadyCheck = false;
@@ -50,8 +57,10 @@ bool failCommit = false, failRollback = false, failPartCleanup = false,
      failBackupCleanup = false, cancelAfterBackup = false, cancelled = false,
      mutateDestination = false, loseBackupReply = false, loseCommitReply = false;
 const std::string destination = "sftp://fixture/out/input";
+std::string unreadableSource;
 enum class LocalPublish { Unexpected, Limited, FlushFailure, CancelAfterPublish };
 LocalPublish localPublish = LocalPublish::Unexpected;
+bool expectPrivatePublication = false;
 bool suffix(const std::string &path, const char *part) {
   return path.find(part) != std::string::npos;
 }
@@ -59,8 +68,9 @@ bool suffix(const std::string &path, const char *part) {
 namespace Listi {
 Result RunVirtual(const Job &, const Hooks &);
 Result Run(const Job &job, const Hooks &hooks) {
-  if (localPublish == LocalPublish::Unexpected || !hooks.privateStaging ||
-      hooks.report || job.sources.size() != 1)
+  if (localPublish == LocalPublish::Unexpected ||
+      hooks.privateStaging != expectPrivatePublication ||
+      hooks.report || hooks.copyConflict || job.sources.size() != 1)
     throw std::runtime_error("Unexpected local dispatch");
   const auto &source = job.sources.front();
   const auto target = ChildLocation(job.destination, LocationLeaf(source));
@@ -123,6 +133,7 @@ bool StatNetwork(const Location &l, FileEntry &entry, const TransferControl &c,
   auto it = files.find(l.URL());
   if (it == files.end()) return false;
   entry.path = l.URL(); entry.name = LocationLeaf(entry.path);
+  entry.directory = it->second.directory;
   entry.sizeKnown = !omitStageSize || !suffix(l.URL(), ".part");
   entry.size = it->second.data.size();
   entry.SetModification(it->second.modified, it->second.nanoseconds);
@@ -143,6 +154,8 @@ void ReadNetwork(const Location &l, const DataSink &sink, const TransferControl 
   if (cancelled)
     ++postCancelReadCalls;
   c.Check();
+  if (l.URL() == unreadableSource)
+    throw std::runtime_error("Source read denied");
   if (cancelReadback && suffix(l.URL(), ".part")) {
     cancelled = true;
     c.Check();
@@ -175,6 +188,10 @@ void ChangeNetwork(const Location &l, const char *action,
                    const std::string &target, const TransferControl &c) {
   c.Check();
   std::string source = l.URL();
+  if (std::string(action) == "mkdir") {
+    files.emplace(source, Remote{"", 1, 0, true});
+    return;
+  }
   if (std::string(action) == "remove") {
     if ((suffix(source, ".part") && failPartCleanup) ||
         (suffix(source, ".previous") && failBackupCleanup))
@@ -275,11 +292,18 @@ int main() {
   if (mkdir(downloadFolder.c_str(), 0700)) return 1;
   const auto localTarget = downloadFolder + "/input";
   const Job downloadJob{Action::Copy, {remote}, downloadFolder};
-  auto download = [&](LocalPublish publication, Decision decision, bool report) {
+  auto download = [&](LocalPublish publication, Decision decision, bool report,
+                      bool privateStaging = false) {
     reset();
     localPublish = publication;
+    expectPrivatePublication = privateStaging;
     files[remote] = {"downloaded payload", 1};
     Hooks local = hooks;
+    local.privateStaging = privateStaging;
+    local.copyConflict = [](const CopyConflict &) {
+      throw std::runtime_error("Synthetic file should not reach user conflict preview");
+      return Decision::Abort;
+    };
     local.conflict = [=](const std::string &target) {
       if (target != localTarget)
         throw std::runtime_error("Wrong conflict target");
@@ -292,6 +316,7 @@ int main() {
     if (report)
       local.report = std::make_shared<JobReportStore>();
     auto result = RunVirtual(downloadJob, local);
+    expectPrivatePublication = false;
     localPublish = LocalPublish::Unexpected;
     return std::make_pair(std::move(result), local.report);
   };
@@ -337,7 +362,36 @@ int main() {
             cancelledPublish.outcomes.front().detail.find("durability is unknown") != std::string::npos &&
             localContents() == "downloaded payload",
         "download cancelled after publish retains the durability outcome without claiming completion");
+  auto privatePublish = download(LocalPublish::Limited, Decision::Replace, false, true).first;
+  check(privatePublish.completed == 1 && privatePublish.errors.empty() &&
+            privatePublish.outcomes.empty() && done == 1,
+        "archive staging keeps strict local publication policy and hides internal receipts");
   unlink(localTarget.c_str());
+
+  const std::string sourceFolder = "sftp://fixture/in/folder";
+  const std::string healthy = sourceFolder + "/a-readable";
+  const std::string denied = sourceFolder + "/z-unreadable";
+  files[sourceFolder] = {"", 1, 0, true};
+  files[healthy] = {"healthy payload", 1};
+  files[denied] = {"not readable", 1};
+  localPublish = LocalPublish::Limited;
+  unreadableSource = denied;
+  auto partial = RunVirtual({Action::Copy, {sourceFolder}, downloadFolder}, {});
+  unreadableSource.clear();
+  localPublish = LocalPublish::Unexpected;
+  const auto copiedFolder = downloadFolder + "/folder";
+  check(!partial.completed && partial.partialCopies == 1 &&
+            errorHas(partial, "Source read denied") && partial.outcomes.size() == 2 &&
+            partial.outcomes.front().source == healthy &&
+            partial.outcomes.front().status == "copied" &&
+            partial.outcomes.back().source == sourceFolder &&
+            partial.outcomes.back().destination == copiedFolder &&
+            partial.outcomes.back().status == "partial" &&
+            !access((copiedFolder + "/a-readable").c_str(), F_OK) &&
+            access((copiedFolder + "/z-unreadable").c_str(), F_OK),
+        "folder download keeps the successful child receipt after a later read failure");
+  unlink((copiedFolder + "/a-readable").c_str());
+  rmdir(copiedFolder.c_str());
   rmdir(downloadFolder.c_str());
   const timespec referenceTime[] = {{0, UTIME_OMIT}, {1, 654000000}};
   FileEntry expected;
@@ -471,6 +525,74 @@ int main() {
   reset(); r = RunVirtual({Action::Copy, {"sftp://fixture:22/out/input"}, "sftp://fixture/out"}, hooks);
   check(!r.errors.empty() && !r.completed && files.at(destination).data == "old contents",
         "explicit default port cannot bypass self-copy rejection");
+  const auto folder = std::string(dir) + "/upload-folder";
+  const auto blocked = folder + "/unavailable";
+  const auto sibling = folder + "/sibling";
+  const std::string remoteFolder = "sftp://fixture/out/upload-folder";
+  const auto remoteSibling = remoteFolder + "/sibling";
+  if (mkdir(folder.c_str(), 0700) || mkdir(blocked.c_str(), 0700))
+    return 1;
+  InterruptedVolumes().Block(blocked);
+  reset();
+  r = RunVirtual({Action::Copy, {blocked}, "sftp://fixture/out"}, hooks);
+  check(!r.completed && !r.partialCopies && !done && files.size() == 1 &&
+            errorHas(r, blocked.c_str()),
+        "upload refuses a registered unavailable root without publishing anything");
+  const Job folderJob{Action::Copy, {folder}, "sftp://fixture/out"};
+  r = RunVirtual(folderJob, hooks);
+  check(!r.completed && !r.partialCopies && !done && files.size() == 1 &&
+            errorHas(r, blocked.c_str()),
+        "folder with only unavailable children is not uploaded as an empty success");
+  std::ofstream(sibling) << "healthy sibling";
+  r = RunVirtual(folderJob, hooks);
+  const auto hasReceipt = [&](const Result &result) {
+    for (const auto &entry : result.outcomes)
+      if (entry.source == sibling && entry.destination == remoteSibling &&
+          entry.status == "completed" && entry.upload &&
+          entry.upload->contentVerified &&
+          entry.upload->publication == Publication::Published)
+        return true;
+    return false;
+  };
+  check(!r.completed && r.partialCopies == 1 && !r.cancelled && done == 1 &&
+            errorHas(r, blocked.c_str()) && hasReceipt(r) &&
+            files.count(remoteSibling) && files.at(remoteSibling).data == "healthy sibling" &&
+            !files.count(remoteFolder + "/unavailable"),
+        "partial folder upload retains verified sibling receipts but never completes the root");
+  reset();
+  Hooks reporting = hooks;
+  reporting.report = std::make_shared<JobReportStore>();
+  r = RunVirtual(folderJob, reporting);
+  const auto uploadReport = reporting.report->Page(0, 10);
+  check(!r.completed && r.partialCopies == 1 && done == 1 &&
+            uploadReport.errors.size() == 1 &&
+            uploadReport.errors.front().find(blocked) != std::string::npos &&
+            uploadReport.outcomes.size() == 3 &&
+            uploadReport.outcomes[0].source == blocked &&
+            uploadReport.outcomes[0].status == "unprocessed" &&
+            uploadReport.outcomes[1].source == sibling &&
+            uploadReport.outcomes[1].status == "completed" &&
+            uploadReport.outcomes[1].detail.find("Uploaded contents verified.") != std::string::npos &&
+            uploadReport.outcomes[1].detail.find("Destination published.") != std::string::npos &&
+            uploadReport.outcomes[2].source == folder &&
+            uploadReport.outcomes[2].status == "partial",
+        "queue-style report distinguishes the omitted child, delivered sibling and partial root");
+  const auto nested = folder + "/nested";
+  const auto nestedBlocked = nested + "/other-unavailable";
+  if (rmdir(blocked.c_str()) || mkdir(nested.c_str(), 0700) ||
+      mkdir(nestedBlocked.c_str(), 0700))
+    return 1;
+  InterruptedVolumes().Block(nestedBlocked);
+  reset();
+  r = RunVirtual(folderJob, hooks);
+  check(!r.completed && r.partialCopies == 1 && done == 1 && hasReceipt(r) &&
+            errorHas(r, nestedBlocked.c_str()) &&
+            !files.count(remoteFolder + "/nested"),
+        "nested omissions propagate to the selected folder without hiding healthy receipts");
+  rmdir(nestedBlocked.c_str());
+  rmdir(nested.c_str());
+  unlink(sibling.c_str());
+  rmdir(folder.c_str());
   unlink(source.c_str()); rmdir(dir);
   std::cout << checks << " fault checks, " << failures << " failures\n";
   return failures ? 1 : 0;

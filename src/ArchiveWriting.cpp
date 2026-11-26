@@ -5,6 +5,7 @@
 #include "ArchiveBackend.h"
 #include "ArchiveJobChecks.h"
 #include "ArchiveJobs.h"
+#include "ArchiveTextLocale.h"
 #include "ArchiveVolumes.h"
 #include "ArWriter.h"
 #include "ArjWriter.h"
@@ -265,6 +266,9 @@ void CreateArchiveOutput(int output, const std::string &format,
   else if (secret && format == "7z")
     SevenZipCreate(output, sources, level, encryptNames, secret, hooks);
   else {
+    // PAX and other libarchive formats may transcode filesystem names even
+    // when the caller's worker is running in the C locale.
+    ArchiveTextLocale locale;
     Writer writer;
     writer.Configure(format, level, secret);
     writer.fd = output;

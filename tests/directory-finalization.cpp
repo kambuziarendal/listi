@@ -29,6 +29,7 @@ std::vector<fs::path> watched, flushed;
 bool failStageMember = false, failPublishedParent = false,
      failStageCleanup = false;
 bool simulateRemovable = false;
+bool simulateNtfs = false;
 std::mutex mutex;
 std::condition_variable changed;
 bool entered = false, release = false, returned = false;
@@ -65,6 +66,8 @@ extern "C" int __wrap_fs_stat_dev(dev_t volume, fs_info *info) {
   const int status = __real_fs_stat_dev(volume, info);
   if (!status && simulateRemovable)
     info->flags |= B_FS_IS_REMOVABLE;
+  if (!status && simulateNtfs)
+    strcpy(info->fsh_name, "ntfs");
   return status;
 }
 extern "C" int __real_fsync(int);
@@ -92,7 +95,7 @@ extern "C" int __wrap_fsync(int fd) {
       fail = !stageRemains;
     }
     if (fail) {
-      errno = EIO;
+      errno = simulateNtfs ? EINVAL : EIO;
       return -1;
     }
     if (simulateRemovable && Matches(destination / "tree", node)) {
@@ -209,6 +212,65 @@ int main() try {
   result = Run({Action::Copy, {virtualTree}, destination}, hooks);
   Pass(result.completed == 1 && done > 0 && fs::is_directory(copiedEmpty),
        "virtual archive member copy completes after finalizing nested folders");
+
+  fs::remove_all(target);
+  simulateNtfs = true;
+  fault = copiedEmpty;
+  done = 0;
+  result = Run({Action::Copy, {virtualTree}, destination}, hooks);
+  bool ntfsNotice = false;
+  for (const auto &entry : result.outcomes)
+    ntfsNotice |= entry.destination == copiedEmpty &&
+                  entry.detail.find("Crash durability was not confirmed") != std::string::npos;
+  Pass(result.completed == 1 && done > 0 && result.copyLimitations &&
+           result.errors.empty() && ntfsNotice && fs::is_directory(copiedEmpty),
+       "direct copy from an archive accepts only the known NTFS flush limitation and reports it");
+
+  fs::remove_all(target);
+  Hooks staging = hooks;
+  staging.privateStaging = true;
+  done = 0;
+  result = Run({Action::Copy, {virtualTree}, destination}, staging);
+  Pass(!result.completed && !done && !result.copyLimitations &&
+           DurabilityError(result) && result.outcomes.empty() && fs::exists(archive),
+       "private archive staging still requires a real NTFS directory flush");
+
+  simulateNtfs = false;
+  fault.clear();
+  const auto regular = root / "regular";
+  std::ofstream(regular) << "archive payload";
+  auto regularPack = PrepareArchiveJob(false, {regular});
+  regularPack.archiveFormat = "zip";
+  SetArchiveDestination(regularPack, root, "regular.zip");
+  Require(Run(regularPack, {}).completed == 1, "Create regular member ZIP fixture");
+  const auto member = ChildLocation(OpenArchive(regularPack.destination), "regular");
+  const auto regularTarget = destination / "regular";
+  auto readTarget = [&] {
+    std::ifstream input(regularTarget);
+    return std::string(std::istreambuf_iterator<char>(input), {});
+  };
+
+  simulateNtfs = true;
+  fault = destination;
+  done = 0;
+  result = Run({Action::Copy, {member}, destination}, hooks);
+  Pass(result.completed == 1 && done == 1 && result.copyLimitations &&
+           result.errors.empty() && readTarget() == "archive payload" &&
+           result.outcomes.size() == 1 && result.outcomes.front().source == member,
+       "direct regular file copy from an archive applies the ordinary NTFS new-name policy");
+
+  std::ofstream(regularTarget) << "existing file";
+  Hooks replace = hooks;
+  replace.conflict = [](const auto &) { return Decision::Replace; };
+  done = 0;
+  result = Run({Action::Copy, {member}, destination}, replace);
+  Pass(!result.completed && !done && !result.errors.empty() &&
+           result.errors.front().find("existing files were left untouched") != std::string::npos &&
+           readTarget() == "existing file",
+       "direct regular file copy from an archive cannot overwrite an existing NTFS target");
+  fs::remove(regularTarget);
+  simulateNtfs = false;
+  fault.clear();
 
   fs::remove_all(target);
   auto archiveMove =

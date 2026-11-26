@@ -35,7 +35,7 @@ PaneEntry *Pane::ScrollRow(const std::string *path, float &top) {
   return mode == MillerMode ? columns->ScrollRow(path, top) : grid->ScrollRow(path, top);
 }
 
-Listi::VisitPosition Pane::CaptureVisit() {
+Listi::VisitPosition Pane::CaptureVisit(size_t selectionLimit) {
   Listi::VisitPosition visit;
   auto scroll = ScrollPosition();
   visit.x = scroll.x;
@@ -53,7 +53,7 @@ Listi::VisitPosition Pane::CaptureVisit() {
       visit.selected.emplace(row->path, visit.focusId);
   }
   for (auto *row : entries.Visible()) {
-    if (visit.selected.size() == visit.SelectionLimit) break;
+    if (visit.selected.size() >= selectionLimit) break;
     if (entries.IsSelected(row->path))
       visit.selected.emplace(row->path, IdentityOf(*row));
   }

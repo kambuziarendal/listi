@@ -462,7 +462,7 @@ public:
     BMessage drag;
     try {
       drag = Listi::MakeFileDrag(
-          model->Selected(), model->SelectedLocalIdentities(Listi::kFileSelectionLimit));
+          model->SelectedFiles(), model->SelectedLocalIdentities(Listi::kFileSelectionLimit));
     } catch (const std::exception &e) {
       pane->ShowStatus(e.what());
       return false;
@@ -510,6 +510,9 @@ public:
     BColumn *column = value.column == 1   ? static_cast<BColumn *>(list->size)
                       : value.column == 2 ? static_cast<BColumn *>(list->date)
                                           : list->name;
+    const int32 attribute = value.column - 3;
+    if (attribute >= 0 && size_t(attribute) < attributes.size())
+      column = attributes[attribute];
     list->SetSortColumn(column, false, value.ascending);
     SyncSelection();
   }

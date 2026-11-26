@@ -193,6 +193,10 @@ metadata=$(awk '$1 == "version" {print $2}' PackageInfo)
 active=/boot/system/packages/listi-${metadata}-x86_64.hpkg
 cmp "$1" "$active"
 cmp src/objects.*-release/Listi /boot/system/apps/Listi
+for doc in README.md CHANGELOG.md docs/VERIFICATION.md docs/ROADMAP.md; do
+    cmp "$doc" "/boot/system/documentation/packages/listi/$doc"
+done
+echo "Installed release and safety documentation matches source."
 sha256sum "$1" "$active" /boot/system/apps/Listi
 echo "TEST installed Listi --self-test"
 /boot/system/apps/Listi --self-test

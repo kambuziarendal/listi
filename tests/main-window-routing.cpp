@@ -293,7 +293,12 @@ static void CheckFloatingInspector(BApplication &app) {
     return window.Bounds().Width() == 640 && window.Bounds().Height() == 460;
   }));
   assert(owner.SendMessage(kQuickView) == B_OK);
-  assert(workspace() == WorkspaceName(Workspace::tviskipt));
+  std::string observedWorkspace;
+  wait([&] {
+    observedWorkspace = workspace();
+    return !observedWorkspace.empty();
+  }, "owner answers the workspace query after Quick view");
+  assert(observedWorkspace == WorkspaceName(Workspace::tviskipt));
   wait([&] { return with(owner, [&](BWindow &window) {
     auto *right = window.FindView("second panel tools");
     return right && !right->IsHidden() && !window.FindView("inspector");
@@ -998,6 +1003,30 @@ int main(int argc, char **argv) {
     assert(promptButton("Save"));
     send(kInlineCancel);
     assert(!promptButton("Save"));
+    writeArchive();
+    const auto archiveRoot = "archive://" + marker + "!/";
+    pane->Navigate(archiveRoot.c_str());
+    waitFor([&] { return !pane->IsScanning(); });
+    Listi::PutFileClipboard({file}, true);
+    send(kClipboardPaste);
+    auto *move = promptButton("Move entries");
+    assert(move);
+    Listi::InterruptedVolumes().Block(marker);
+    assert(move->Invoke() == B_OK);
+    waitFor([&] {
+      assert(be_clipboard->Lock());
+      const bool released = !be_clipboard->Data()->HasString("listi:paste-lease");
+      be_clipboard->Unlock();
+      return released;
+    });
+    assert(access(file.c_str(), F_OK) == 0);
+    pane->Navigate(elsewhere.c_str());
+    waitFor([&] { return !pane->IsScanning(); });
+    Listi::PutPathsAsText({"retry"});
+    send(kClipboardPaste);
+    assert(promptButton("Save"));
+    send(kInlineCancel);
+    assert(unlink(marker.c_str()) == 0);
     assert(be_clipboard->Lock());
     *be_clipboard->Data() = savedClipboard;
     assert(be_clipboard->Commit(true) == B_OK);

@@ -12,12 +12,15 @@
 #include <unistd.h>
 #include <algorithm>
 #include <cerrno>
+#include <charconv>
 #include <cstring>
 #include <filesystem>
+#include <limits>
 #include <sys/file.h>
 #include <set>
 #include <stdexcept>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace Listi {
@@ -54,7 +57,6 @@ struct AutomaticBudget {
   unsigned points = 0;
   uint64 read = kAutomaticReadBytes;
   uint64 write = 0;
-  std::string latest;
   const bigtime_t deadline = system_time() + 90 * 1000000LL;
 
   void CheckTime(const std::atomic_bool &cancel) const {
@@ -113,13 +115,14 @@ bool Unchanged(const struct stat &before, const struct stat &after) {
       before.st_mtim.tv_nsec == after.st_mtim.tv_nsec;
 }
 
-std::vector<std::string> Names(int fd, size_t limit = SIZE_MAX, bool firstOnly = false) {
+template<typename Visitor>
+void VisitNames(int fd, size_t limit, Visitor visit) {
   int scan = openat(fd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
   Check(scan >= 0, "Open directory");
   DIR *stream = fdopendir(scan);
   if (!stream) close(scan);
   Directory dir(stream, "List directory");
-  std::vector<std::string> names;
+  size_t count = 0;
   while (true) {
     errno = 0;
     auto *entry = readdir(dir.stream);
@@ -128,11 +131,19 @@ std::vector<std::string> Names(int fd, size_t limit = SIZE_MAX, bool firstOnly =
       break;
     }
     if (strcmp(entry->d_name, ".") && strcmp(entry->d_name, "..")) {
-      Require(names.size() < limit, "Automatic history reached its folder entry limit.");
-      names.emplace_back(entry->d_name);
-      if (firstOnly) break;
+      if (count == limit) throw std::runtime_error("Automatic history reached its folder entry limit.");
+      ++count;
+      if (!visit(entry->d_name)) break;
     }
   }
+}
+
+std::vector<std::string> Names(int fd, size_t limit = SIZE_MAX, bool firstOnly = false) {
+  std::vector<std::string> names;
+  VisitNames(fd, limit, [&](const char *name) {
+    names.emplace_back(name);
+    return !firstOnly;
+  });
   std::sort(names.begin(), names.end());
   return names;
 }
@@ -229,14 +240,35 @@ std::string Digest(int fd, int copy, const std::atomic_bool &cancel,
   return sha.Finish();
 }
 
-bool Token(const std::string &token, const char *chars, size_t limit) {
+bool Token(std::string_view token, const char *chars, size_t limit) {
   return !token.empty() && token.size() <= limit &&
-      token.find_first_not_of(chars) == std::string::npos;
+      token.find_first_not_of(chars) == std::string_view::npos;
 }
-bool Point(const std::string &name) {
+bool Point(std::string_view name) {
   return name.compare(0, 6, "point-") == 0 &&
       Token(name.substr(6), "0123456789-", 80);
 }
+
+struct HistoryPoint {
+  explicit HistoryPoint(std::string name = {}) : name(std::move(name)) {
+    // A double dash separates the new save order from the displayed wall time.
+    // Legacy wall-time/PID/counter names retain their original relative order.
+    const auto separator = this->name.find("--", 6);
+    if (separator == std::string::npos) return;
+    const char *end = this->name.data() + this->name.size();
+    uint64 value = 0;
+    const auto parsed = std::from_chars(this->name.data() + separator + 2, end, value);
+    if (parsed.ec == std::errc{} && parsed.ptr == end) order = value;
+  }
+
+  bool operator<(const HistoryPoint &other) const {
+    if (order != other.order) return order < other.order;
+    return name < other.name;
+  }
+
+  std::string name;
+  uint64 order = 0;
+};
 
 void CollectAttributes(int fd, BMessage &entry, const std::atomic_bool &cancel,
                        AutomaticBudget *budget, ManifestBudget &manifest) {
@@ -531,9 +563,14 @@ const std::string &HistoryStore::SourcePath() const { return state->source; }
 BMessage HistoryStore::Points() const {
   BMessage points;
   if (state->Bound()) {
-    auto names = Names(state->store->Descriptor());
-    for (auto it = names.rbegin(); it != names.rend(); ++it)
-      if (Point(*it)) Message(points.AddString("point", it->c_str()));
+    std::vector<HistoryPoint> history;
+    VisitNames(state->store->Descriptor(), SIZE_MAX, [&](const char *name) {
+      if (Point(name)) history.emplace_back(name);
+      return true;
+    });
+    std::sort(history.rbegin(), history.rend());
+    for (const auto &point : history)
+      Message(points.AddString("point", point.name.c_str()));
   }
   state->store->Verify();
   return points;
@@ -592,20 +629,27 @@ bool HistoryStore::SaveInternal(const std::atomic_bool &cancel, bool automatic) 
   FD lock(openat(dir, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC), "Open history writer lock");
   Require(flock(lock.fd, LOCK_EX | LOCK_NB) == 0, "Another history writer is active or the store cannot be locked.");
   AutomaticBudget limits;
-  if (automatic) {
-    uint64 stored = kAutomaticStoreBytes;
-    for (const auto &name : Names(dir, kAutomaticStoreEntries)) {
+  HistoryPoint latest;
+  uint64 stored = kAutomaticStoreBytes;
+  VisitNames(dir, automatic ? kAutomaticStoreEntries : SIZE_MAX, [&](const char *name) {
+    if (automatic) {
       limits.CheckTime(cancel);
       struct stat item{};
-      Check(fstatat(dir, name.c_str(), &item, AT_SYMLINK_NOFOLLOW) == 0, "Check history size");
+      Check(fstatat(dir, name, &item, AT_SYMLINK_NOFOLLOW) == 0, "Check history size");
       Require(S_ISREG(item.st_mode) && item.st_size >= 0, "Use a dedicated automatic history folder.");
       // Count allocation/metadata conservatively, also for small or abandoned files.
       limits.Use(stored, uint64(item.st_size) + 4096);
-      if (Point(name)) {
-        ++limits.points;
-        limits.latest = name;
-      }
+    } else {
+      CheckCancel(cancel);
     }
+    if (Point(name)) {
+      ++limits.points;
+      HistoryPoint candidate{name};
+      if (latest < candidate) latest = std::move(candidate);
+    }
+    return true;
+  });
+  if (automatic) {
     Require(limits.points < kAutomaticPoints, "Automatic history has 24 saved points. No points were removed.");
     fs_info volume{};
     const auto device = Stat(dir).st_dev;
@@ -626,7 +670,7 @@ bool HistoryStore::SaveInternal(const std::atomic_bool &cancel, bool automatic) 
     marker.Publish(kBinding, store, cancel);
     store.Flush();
   }
-  const auto point = "point-" + Unique();
+  const auto savedAt = real_time_clock_usecs();
   BMessage node;
   std::set<std::string> verifiedObjects;
   ManifestBudget manifest(automatic);
@@ -639,15 +683,15 @@ bool HistoryStore::SaveInternal(const std::atomic_bool &cancel, bool automatic) 
   Message(node.Flatten(data.data(), size));
   if (automatic) {
     limits.CheckTime(cancel);
-    if (!limits.latest.empty()) {
-      FD latest(openat(dir, limits.latest.c_str(),
-                       O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC),
-                "Open latest history point");
-      const auto previous = Stat(latest.fd);
+    if (!latest.name.empty()) {
+      FD previousPoint(openat(dir, latest.name.c_str(),
+                              O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC),
+                       "Open latest history point");
+      const auto previous = Stat(previousPoint.fd);
       Require(S_ISREG(previous.st_mode), "Invalid latest history point.");
       if (previous.st_size == size) {
         limits.Use(limits.read, size);
-        if (Read(latest.fd, kAutomaticManifestBytes) == std::string_view(data.data(), data.size())) {
+        if (Read(previousPoint.fd, kAutomaticManifestBytes) == std::string_view(data.data(), data.size())) {
           limits.CheckTime(cancel);
           source.Verify();
           store.Verify();
@@ -657,6 +701,9 @@ bool HistoryStore::SaveInternal(const std::atomic_bool &cancel, bool automatic) 
     }
     limits.Use(limits.write, size);
   }
+  // The writer lock protects allocation until the manifest publishes this order.
+  Require(latest.order < std::numeric_limits<uint64>::max(), "History point order is exhausted.");
+  const auto point = "point-" + std::to_string(savedAt) + "--" + std::to_string(latest.order + 1);
   Pending pending(dir);
   Write(pending.file.fd, data.data(), data.size());
   store.Flush(); // Data and object names precede publication of the manifest.

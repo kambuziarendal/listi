@@ -35,6 +35,12 @@ introduction…**. Existing preferences are not reset on upgrade.
 
 Opening **Einn**, switching to it, or detaching a tab to it gives you a compact single-panel window. Resize it normally. Switching back in the same window restores the previous multi-panel frame. To save versions while Listi is closed, see [automatic folder history](#automatic-folder-history-optional). The helper remains off until you enable it in its settings.
 
+## Mount or unmount a volume (private alpha revision 40)
+
+Open **Disks**. Right-click an unmounted volume and choose **Mount** to make it available, or right-click a mounted volume and choose **Unmount**. Double-clicking a mounted volume still opens it. Listi does not offer to format unrecognized partitions.
+
+Finish transfers before unmounting. If Haiku reports that the volume is busy, close files using it and retry. Unmount every mounted volume on a removable drive before unplugging it. This feature does not fix the known Haiku FAT crash on unexpected removal.
+
 ## Small features at a glance
 
 Available actions depend on whether the location is local, in an archive or on
@@ -142,7 +148,9 @@ Modified**, each ascending or descending. in the ordinary local Details view. Re
   apply to just one collision unless you explicitly tick the repeat option. For a local copy
   between regular files, **Keep both** preserves the original and gives the
   incoming file the proposed numbered name. If another program claims that name
-  first, the copy fails without replacing it. During publication the new name
+  first, the copy fails without replacing it. The same protection applies to a regular
+  file copied to an initially unused name. Allow room on the destination for
+  both the staging file and the final copy. During publication the new name
   can be visible before the copy finishes. If interrupted, consult the job
   report and recovery inventory before using a partial copy.
 - A regular copy to FAT can ask **Copy without attributes**: the file bytes can
@@ -684,7 +692,9 @@ for one step at a time. Scrolling over the timeline also steps between versions.
 folder. Added and removed paths and changes to file bytes, link targets or
 saved metadata (attributes, mode and modification time) are relative to the preceding version. The listing is read-only and is
 limited to 2,048 entries per version. Changes are not annotated when truncated.
-**Refresh** reloads saved versions.
+**Refresh** reloads saved versions. Starting with private alpha revision 42, new
+versions follow save order even if the clock moves backward. Each still shows
+its recorded date. Existing versions keep their previous order.
 
 Select a regular file and click **Restore file…**, or **Restore folder…** for
 the entire version. Choose the containing folder and name the new copy.

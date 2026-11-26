@@ -39,6 +39,22 @@ void PinnedDirectory::Verify() const {
     throw std::runtime_error(path + ": destination directory changed.");
 }
 
+bool PinnedDirectory::SetCopyMode(mode_t mode,
+                                  bool allowUnsupportedNtfs) const {
+  if (!fchmod(fd, mode))
+    return true;
+  const int error = errno;
+#ifdef __HAIKU__
+  if (allowUnsupportedNtfs && error == B_UNSUPPORTED) {
+    fs_info info{};
+    if (!fs_stat_dev(device, &info) && !strcasecmp(info.fsh_name, "ntfs"))
+      return false;
+  }
+#endif
+  throw std::runtime_error(path + ": cannot set directory permissions: " +
+                           strerror(error));
+}
+
 bool PinnedDirectory::Flush(const std::function<void()> &checkpoint,
                             bool allowUnsupportedNtfs) const {
   if (checkpoint)
@@ -122,12 +138,14 @@ void PinnedDirectory::FlushAfterCleanup(
   });
 }
 
-void FinalizeDirectory(const PinnedDirectory &directory,
+bool FinalizeDirectory(const PinnedDirectory &directory,
                        const PinnedDirectory &parent,
-                       const std::function<void()> &checkpoint) {
+                       const std::function<void()> &checkpoint,
+                       bool allowUnsupportedNtfs) {
   parent.Verify();
-  directory.Flush(checkpoint);
-  parent.Flush(checkpoint);
+  const bool directoryFlushed = directory.Flush(checkpoint, allowUnsupportedNtfs);
+  const bool parentFlushed = parent.Flush(checkpoint, allowUnsupportedNtfs);
   directory.Verify();
+  return directoryFlushed && parentFlushed;
 }
 } // namespace Listi

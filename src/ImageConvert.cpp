@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "ImageConvert.h"
+#include "ExclusiveFileOutput.h"
 #include "LeafName.h"
 
 #include <DataIO.h>
@@ -315,74 +316,6 @@ std::vector<Encoding> FindOutputs(BTranslatorRoster &roster,
   return choices;
 }
 
-class ExclusiveOutput {
-  int directory;
-  const std::string &name;
-  FD fd;
-  bool complete = false;
-  struct stat identity{};
-
-public:
-  ExclusiveOutput(int dir, const std::string &leaf)
-      : directory(dir), name(leaf),
-        fd(openat(dir, leaf.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW,
-                  0666)) {
-    if (fd.value < 0)
-      throw std::runtime_error(
-          errno == EEXIST
-              ? name + ": already exists; no file was replaced."
-              : name + ": could not create converted file: " + strerror(errno));
-    if (fstat(fd.value, &identity)) {
-      unlinkat(directory, name.c_str(), 0);
-      throw std::runtime_error(name + ": could not inspect the converted file.");
-    }
-  }
-  ~ExclusiveOutput() {
-    if (complete)
-      return;
-    struct stat entry;
-    if (fstatat(directory, name.c_str(), &entry, AT_SYMLINK_NOFOLLOW) == 0 &&
-        entry.st_dev == identity.st_dev && entry.st_ino == identity.st_ino)
-      unlinkat(directory, name.c_str(), 0);
-  }
-
-  void Write(ConversionIO &encoded, const std::string &mime,
-             const Hooks &hooks) {
-    std::array<char, 64 * 1024> buffer;
-    off_t offset = 0;
-    while (offset < encoded.Length()) {
-      Check(hooks);
-      ssize_t n = encoded.ReadAt(offset, buffer.data(), buffer.size());
-      Check(hooks);
-      if (n <= 0)
-        throw std::runtime_error("Could not read the staged converted image.");
-      for (ssize_t copied = 0; copied < n;) {
-        ssize_t written = write(fd.value, buffer.data() + copied, n - copied);
-        if (written < 0 && errno == EINTR)
-          continue;
-        if (written <= 0)
-          throw std::runtime_error(
-            name + ": could not write the converted image.");
-        copied += written;
-      }
-      offset += n;
-    }
-    // Filesystems without attributes still receive a valid image and suffix.
-    fs_write_attr(fd.value, "BEOS:TYPE", B_MIME_STRING_TYPE, 0, mime.c_str(),
-                  mime.size() + 1);
-    if (fsync(fd.value))
-      throw std::runtime_error(name + ": could not sync the converted image.");
-  }
-
-  void Commit() {
-    struct stat current;
-    if (fstatat(directory, name.c_str(), &current, AT_SYMLINK_NOFOLLOW) ||
-        current.st_dev != identity.st_dev || current.st_ino != identity.st_ino)
-      throw std::runtime_error(name + ": converted file was moved or replaced.");
-    complete = true;
-  }
-};
-
 void VerifyFolder(const Job &job, int directory) {
   struct stat pinned, current;
   if (directory < 0 || fstat(directory, &pinned) || !S_ISDIR(pinned.st_mode) ||
@@ -479,12 +412,23 @@ Result RunImageConversion(const Job &job, const Hooks &hooks) {
     auto destination = Join(job.destination, leaf);
     // BFS cannot publish a staged file with hard links or atomic no-replace
     // rename. Reserve the final leaf exclusively, then copy the staged bytes.
-    ExclusiveOutput output(folder.value, leaf);
-    output.Write(encoded, choice->output.mime, hooks);
-    Check(hooks);
-    VerifyFolder(job, folder.value);
-    source.Verify();
-    output.Commit();
+    SaveExclusiveFile(folder.value, leaf, 0666, [&](int fd) {
+      std::array<char, 64 * 1024> buffer;
+      for (off_t offset = 0; offset < encoded.Length();) {
+        Check(hooks);
+        const ssize_t n = encoded.ReadAt(offset, buffer.data(), buffer.size());
+        if (n <= 0)
+          throw std::runtime_error("Could not read the staged converted image.");
+        WriteOutputBytes(fd, buffer.data(), n);
+        offset += n;
+      }
+      // Filesystems without attributes still receive a valid image and suffix.
+      fs_write_attr(fd, "BEOS:TYPE", B_MIME_STRING_TYPE, 0,
+                    choice->output.mime.c_str(), choice->output.mime.size() + 1);
+      Check(hooks);
+      VerifyFolder(job, folder.value);
+      source.Verify();
+    }, [&] { VerifyFolder(job, folder.value); });
     ++result.completed;
     result.completedRoots.emplace_back(source.path, destination);
     if (hooks.fileDone)

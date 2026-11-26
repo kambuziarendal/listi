@@ -22,7 +22,7 @@ namespace Listi {
 std::vector<ExportRow> FreezeFileList(const PaneModel &model) {
   std::vector<ExportRow> rows;
   for (const auto *entry : model.Visible()) {
-    if (entry->parent)
+    if (entry->parent || entry->unmountedDisk)
       continue;
     const auto type = entry->kind == 2 ? "link" : entry->directory ? "folder" : "file";
     std::string size;

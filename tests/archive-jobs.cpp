@@ -7,6 +7,7 @@
 #include "MessageStore.h"
 #include "RecoveryInventory.h"
 #include "JobSnapshot.h"
+#include "JobReportStore.h"
 #include "VirtualFile.h"
 #include <Application.h>
 #include <FindDirectory.h>
@@ -20,6 +21,7 @@
 #include <Path.h>
 #include <fstream>
 #include <iostream>
+#include <locale.h>
 #include <map>
 #include <Node.h>
 #include <sys/stat.h>
@@ -224,6 +226,57 @@ void *run(void *) {
     check(sawPublishing && stopped.cancelled && stopped.errors.empty() &&
               stopped.completed == 0 && read(original) == originalBytes,
           "cancellation after the publication checkpoint preserves the archive");
+
+    auto create = PrepareArchiveJob(false, {input + "/folder"});
+    SetArchiveDestination(create, out, "replaced-stage.zip");
+    bool replaced = false;
+    std::vector<std::string> finished;
+    Hooks substitute;
+    substitute.progress = [&](const std::string &, uint64_t) {
+      if (replaced)
+        return;
+      BDirectory directory(out.c_str());
+      BEntry entry;
+      char name[B_FILE_NAME_LENGTH];
+      while (directory.GetNextEntry(&entry, false) == B_OK) {
+        if (entry.GetName(name) != B_OK ||
+            std::string(name).find(prefix) != 0)
+          continue;
+        const auto staged = out + "/" + name + "/archive";
+        if (rename(staged.c_str(), (staged + "-original").c_str()) == 0) {
+          write(staged, "not an archive");
+          replaced = true;
+          break;
+        }
+      }
+    };
+    substitute.fileDone = [&](const std::string &path, const std::string &) {
+      finished.push_back(path);
+    };
+    const auto rejected = RunArchiveJob(create, substitute);
+    check(replaced && rejected.completed == 0 && !rejected.errors.empty() &&
+              !exists(create.destination) && finished.empty(),
+          "replaced staging output is never published or reported complete");
+  }
+  if (madeArchives.count("tar")) {
+    const auto fixture = input + "/" + std::string(180, 'x') + "æ 🍕.txt";
+    write(fixture, "PAX payload\n");
+    auto create = PrepareArchiveJob(false, {fixture});
+    create.archiveFormat = "tar";
+    SetArchiveDestination(create, out, "long-utf8.tar");
+    locale_t c = newlocale(LC_CTYPE_MASK, "C", nullptr);
+    check(c != nullptr, "allocate archive worker C locale");
+    const auto previous = uselocale(c);
+    check(previous != nullptr, "activate archive worker C locale");
+    const auto created = RunArchiveJob(create, {});
+    const bool restored = uselocale(previous) == c;
+    freelocale(c);
+    if (!created.errors.empty())
+      std::cerr << created.errors.front() << std::endl;
+    check(created.completed == 1 && created.errors.empty() && restored &&
+              vread(ChildLocation(OpenArchive(create.destination), LocationLeaf(fixture))) ==
+                  "PAX payload\n",
+          "TAR writes exact long UTF-8 names and restores the worker locale");
   }
   if (madeArchives.count("iso")) {
     // Renamed images still have the same format; copying bytes without the
@@ -275,6 +328,20 @@ void *run(void *) {
     auto selfTarget=PrepareArchiveEditTarget(original,"/");bool selfRefused=false;
     try{SetArchiveEditAdditions(selfTarget,{original});}catch(...){selfRefused=true;}
     check(selfRefused,id+" archive cannot add itself during editing");
+    if (id == "zip") {
+      const auto addition = input + "/edit/unsupported";
+      mkdir(addition.c_str(), 0700);
+      const auto unsupported = addition + "/pipe";
+      check(mkfifo(unsupported.c_str(), 0600) == 0, "create unsupported addition fixture");
+      const auto initial = read(original);
+      Hooks queued;
+      queued.report = std::make_shared<JobReportStore>();
+      auto rejected = RunArchiveJob(PrepareArchiveEditJob(original, {addition}, {removed}), queued);
+      check(!rejected.completed && !rejected.errors.empty() && read(original) == initial,
+            "queued archive edit with unsupported addition retains every original byte");
+      unlink(unsupported.c_str());
+      rmdir(addition.c_str());
+    }
     auto edit=PrepareArchiveEditJob(original,{input+"/edit/replacement/empty",input+"/edit/new.txt"},{removed},"/");
     edit.archiveLevel=4;auto encoded=DecodeJob(EncodeJob(edit,0));
     check(encoded.action==Action::EditArchive&&encoded.archiveRemove.size()==1&&encoded.archivePath.empty(),id+" edit snapshot round trip");

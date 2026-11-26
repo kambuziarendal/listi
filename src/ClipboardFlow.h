@@ -22,11 +22,12 @@ public:
   void CancelPrompt();
   bool ArchivePromptPending() const { return archiveClipboardPending; }
   bool Busy() const { return !clipboardJobs.empty(); }
-  bool AcceptArchivePaste(Job &job, const std::string &lease);
+  void SubmitArchivePaste(Job &job, const std::string &lease);
   void JobFinished(const BMessage &done);
 
 private:
   void AskToSaveFile(const char *folder, ClipboardContent content);
+  void EnqueuePaste(Job &job);
   void FinishPaste(const std::vector<std::string> &moved);
 
   InlineAction &actionArea;

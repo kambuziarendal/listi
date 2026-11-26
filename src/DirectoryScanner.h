@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #pragma once
 #include "ReadWorker.h"
+#include "DiskActions.h"
 #include <Messenger.h>
 #include <NodeMonitor.h>
 #include <mutex>
@@ -60,7 +61,7 @@ class DirectoryWatch {
   std::mutex lock;
   std::optional<node_ref> node;
   int64 current = -1;
-  bool watchingVolumes = false;
+  bool watchingVolumes = false, watchingDisks = false;
 
   status_t WatchVolumes(BMessenger target) {
     if (watchingVolumes)
@@ -76,6 +77,10 @@ public:
     current = serial;
     if (keep)
       return;
+    if (watchingDisks) {
+      Listi::StopWatchingDiskPartitions(target);
+      watchingDisks = false;
+    }
     if (watchingVolumes) {
       // The mount watch has no node_ref. Remove both subscriptions.
       stop_watching(target);
@@ -86,11 +91,14 @@ public:
       node.reset();
     }
   }
-  status_t InstallVolumes(int64 serial, BMessenger target) {
+  status_t InstallDisks(int64 serial, BMessenger target) {
     std::lock_guard<std::mutex> guard(lock);
     if (current != serial)
       return B_CANCELED;
-    return WatchVolumes(target);
+    const auto volumeStatus = WatchVolumes(target);
+    if (!watchingDisks)
+      watchingDisks = Listi::WatchDiskPartitions(target) == B_OK;
+    return watchingDisks ? volumeStatus : B_ERROR;
   }
   bool WatchesDevice(int64 serial, dev_t device) {
     std::lock_guard<std::mutex> guard(lock);

@@ -23,8 +23,8 @@ Everyday responsiveness and trustworthy file operations come before new workflow
 1. **Before beta: interrupted file jobs.** In 0.36.1-3, late removal of a virtual USB disk
    left a copy waiting for over 100 seconds even after cancellation was requested.
    Revision 0.38.0-4 isolates writes and flushes to the private staging file.
-   Disconnecting a physical USB disk during a copy remains untested. Keep
-   this priority open pending the [physical USB test record](VERIFICATION.md#physical-usb-disconnect-during-copy).
+   A physical disconnect during copying was followed by a kernel panic. Do not repeat
+   that test. See the [physical USB test record](VERIFICATION.md#physical-usb-disconnect-during-copy).
    The window must stay responsive and unrelated jobs must be able to proceed. While a write can still return, report
    “Cancellation requested; waiting for device”, not “Cancelled”. Prevent a
    second write to the same target until the first is resolved. Check the

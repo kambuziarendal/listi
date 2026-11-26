@@ -16,6 +16,7 @@
 #include "PaneSidebar.h"
 #include "ImagePreview.h"
 #include "MillerColumns.h"
+#include "MainWindow.h"
 #include "NameFilter.h"
 #include "Trash.h"
 #include "VirtualFile.h"
@@ -46,6 +47,7 @@
 #include <map>
 #include <set>
 #include <sys/stat.h>
+#include <thread>
 #include <unistd.h>
 
 namespace {
@@ -586,7 +588,8 @@ void Pane::UpdateNavigation() {
   back->SetEnabled(history.Back() >= 0);
   forward->SetEnabled(history.Forward() >= 0);
 }
-void Pane::StartNavigation(const std::string &request, int target, bool trash, bool restore) {
+void Pane::StartNavigation(const std::string &request, int target, bool trash,
+                           bool restore, bool refresh) {
   try {
     const auto query = queries.find(request);
     if (Listi::InterruptedVolumes().Contains(
@@ -604,6 +607,8 @@ void Pane::StartNavigation(const std::string &request, int target, bool trash, b
     history.SavePosition(CaptureVisit());
   pendingVisit = restore ? restoring->pendingVisit
                          : target >= 0 ? history.PositionAt(target) : std::nullopt;
+  if (refresh && locationValid)
+    pendingVisit = CaptureVisit(entries.Visible().size());
   if (!restore) {
     restoring.reset();
     if (path != request.c_str())
@@ -618,7 +623,9 @@ void Pane::StartNavigation(const std::string &request, int target, bool trash, b
   reveal = {};
   columnAction.MakeEmpty();
   savedSelection.clear();
-  if (target < 0 && !trash && path == request.c_str()) {
+  if (refresh && pendingVisit) {
+    savedSelection = pendingVisit->selected;
+  } else if (target < 0 && !trash && path == request.c_str()) {
     for (auto entry : entries.Visible())
       if (entries.IsSelected(entry->path))
         savedSelection.emplace(entry->path,
@@ -651,7 +658,7 @@ void Pane::StartNavigation(const std::string &request, int target, bool trash, b
   generation->store(serial);
   directoryWatch->Begin(serial, sameDirectory, BMessenger(this));
   ClearRows();
-  if (IsSearchList() || wasQuery || restore)
+  if (IsSearchList() != wasQuery || restore)
     list->SetAttributes(IsSearchList() ? std::vector<std::string>{"Original folder"} : attributeColumns);
   SetDisplayMode(LocationMode());
   navigationFailed = false;
@@ -709,7 +716,7 @@ void Pane::ScheduleDirectoryRefresh() {
   }
 }
 void Pane::RequestVisibleIcon(PaneEntry &row) {
-  if (row.iconRequested || pendingIcons.size() >= 64 ||
+  if (row.unmountedDisk || row.iconRequested || pendingIcons.size() >= 64 ||
       Listi::InterruptedVolumes().ContainsDevice(row.device) ||
       Listi::InterruptedVolumes().Contains(row.path) ||
       ((mode == 0 || mode == MillerMode) && !prefs.icons))
@@ -733,13 +740,41 @@ void Pane::RequestVisibleIcon(PaneEntry &row) {
   }
 }
 void Pane::Reload() {
+  if (!Window())
+    return;
   if (scanning) {
     refreshPending = true;
     return;
   }
-  Navigate(path);
+  StartNavigation(path.String(), -1, false, false, true);
 }
-std::vector<std::string> Pane::Selected() const { return entries.Selected(); }
+std::vector<std::string> Pane::Selected() const {
+  return entries.SelectedFiles();
+}
+
+const PaneEntry *Pane::SelectedDisk() const {
+  return path == "@disks" && !scanning ? entries.OnlySelected() : nullptr;
+}
+
+void Pane::ChangeDiskMount(const PaneEntry &disk, bool mount) {
+  if (!disk.partition || mount != disk.unmountedDisk)
+    return;
+  const BMessenger target(this);
+  try {
+    std::thread([target, partition = *disk.partition, mount, path = disk.path,
+                 device = disk.device, node = disk.node] {
+      const auto result = mount ? Listi::MountDisk(partition)
+                                : Listi::UnmountDisk(partition, path, device, node);
+      BMessage done(Listi::kDiskActionDone);
+      done.AddBool("mount", mount);
+      done.AddInt32("status", result);
+      target.SendMessage(&done);
+    }).detach();
+    SetStatus(mount ? "Mounting disk..." : "Unmounting disk...");
+  } catch (const std::exception &error) {
+    PostMainWindowNotice(error.what());
+  }
+}
 void Pane::ContextMenu(const std::string &path, BPoint screen) {
   if (scanning)
     return;
@@ -1048,8 +1083,10 @@ void Pane::MessageReceived(BMessage *m) {
         attributeColumns.push_back(name);
       attributeDetails = true;
     }
-    list->SetAttributes(attributeColumns);
-    StartNavigation(path.String());
+    if (!IsSearchList()) {
+      list->SetAttributes(attributeColumns);
+      StartNavigation(path.String());
+    }
     if (m->IsSourceWaiting())
       m->SendReply(&reply);
     break;
@@ -1256,7 +1293,9 @@ void Pane::MessageReceived(BMessage *m) {
       if (r->parent) {
         BMessage parent(kParent);
         MessageReceived(&parent);
-      } else if (r->directory)
+      } else if (r->unmountedDisk)
+        SetStatus("This disk is not mounted. Right-click and choose Mount.");
+      else if (r->directory)
         Navigate(r->path.c_str());
       else {
         BMessage open(kOpenPaths);
@@ -1330,6 +1369,12 @@ void Pane::MessageReceived(BMessage *m) {
           Listi::InterruptedVolumes().Contains(row->path))
         continue;
       row->node = e.GetInt64("node", -1);
+      if (path == "@disks") {
+        row->unmountedDisk = e.GetBool("unmountedDisk", false);
+        if (e.HasInt32("partition"))
+          row->partition = std::make_unique<Listi::DiskPartition>(
+              Listi::DiskPartition::ReadFrom(e));
+      }
       // Virtual listings have no local node identity; retain their path-based
       // behavior. A replacement local entry must not inherit selection.
       auto saved = savedSelection.find(row->path);
@@ -1456,6 +1501,19 @@ void Pane::MessageReceived(BMessage *m) {
       directoryRefreshPending = false;
       Reload();
     }
+    break;
+  }
+  case Listi::kDiskDeviceUpdate:
+    if (path == "@disks")
+      ScheduleDirectoryRefresh();
+    break;
+  case Listi::kDiskActionDone: {
+    const auto result = m->GetInt32("status", B_ERROR);
+    const bool mount = m->GetBool("mount", false);
+    if (result != B_OK)
+      PostMainWindowNotice(Listi::DiskActionError(mount, result).c_str());
+    if (path == "@disks")
+      ScheduleDirectoryRefresh();
     break;
   }
   case B_NODE_MONITOR: {

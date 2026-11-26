@@ -263,7 +263,7 @@ public:
       return;
     try {
       auto drag = Listi::MakeFileDrag(
-          model->Selected(), model->SelectedLocalIdentities(Listi::kFileSelectionLimit));
+          model->SelectedFiles(), model->SelectedLocalIdentities(Listi::kFileSelectionLimit));
       dragging = true;
       DragMessage(&drag, BRect(point.x, point.y, point.x + 90, point.y + 22));
     } catch (const std::exception &error) {
