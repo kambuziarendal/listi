@@ -148,7 +148,9 @@ Modified**, each ascending or descending. in the ordinary local Details view. Re
   apply to just one collision unless you explicitly tick the repeat option. For a local copy
   between regular files, **Keep both** preserves the original and gives the
   incoming file the proposed numbered name. If another program claims that name
-  first, the copy fails without replacing it. During publication the new name
+  first, the copy fails without replacing it. The same protection applies to a regular
+  file copied to an initially unused name. Allow room on the destination for
+  both the staging file and the final copy. During publication the new name
   can be visible before the copy finishes. If interrupted, consult the job
   report and recovery inventory before using a partial copy.
 - A regular copy to FAT can ask **Copy without attributes**: the file bytes can

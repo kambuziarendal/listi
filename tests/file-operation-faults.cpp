@@ -20,7 +20,8 @@
 using namespace Listi;
 namespace fs = std::filesystem;
 namespace {
-std::string deniedStage, watchedStage, deniedRemoval;
+std::string deniedStage, watchedStage, deniedRemoval, claimNewLeaf;
+bool newLeafClaimed = false;
 int watchedFd = -1, writes = 0;
 int writeFailure = 0;
 bool denyTrashCleanup = false;
@@ -56,6 +57,15 @@ extern "C" int __wrap_openat(int directory, const char *path, int flags, ...) {
   va_start(args, flags);
   const auto mode = va_arg(args, int);
   va_end(args);
+  if (claimNewLeaf == path) {
+    const int competing = __real_openat(directory, path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (competing >= 0) {
+      const char contents[] = "competitor";
+      newLeafClaimed = write(competing, contents, sizeof(contents) - 1) ==
+                       sizeof(contents) - 1;
+      close(competing);
+    }
+  }
   const bool stage = std::string(path).rfind(".listi-copy-", 0) == 0;
   if (stage && !deniedStage.empty()) {
     errno = EACCES;
@@ -159,6 +169,24 @@ int main() {
   const std::string payload(1000, 'x');
   std::ofstream(source) << payload;
   std::ofstream(target) << "original";
+  {
+    const auto incoming = root / "new.txt", destination = out / "new.txt";
+    std::ofstream(incoming) << "incoming";
+    const Job copy{Action::Copy, {incoming.string()}, out.string()};
+    claimNewLeaf = destination.filename().string();
+    const auto raced = Run(copy, {});
+    claimNewLeaf.clear();
+    Check(newLeafClaimed && !raced.completed && !raced.errors.empty() &&
+              Read(destination) == "competitor" && Read(incoming) == "incoming",
+          "ordinary copy reserves an unused leaf without overwriting a concurrent arrival");
+    fs::remove(destination);
+    const auto clean = Run(copy, {});
+    Check(clean.completed == 1 && clean.errors.empty() &&
+              Read(destination) == "incoming" && Read(incoming) == "incoming",
+          "ordinary copy to a new leaf publishes the complete bytes");
+    fs::remove(destination);
+    fs::remove(incoming);
+  }
   for (const std::string name : {"report.pdf", ".settings", "notes"}) {
     const auto incoming = root / name, existing = out / name;
     const std::string stem = name == "report.pdf" ? "report" : name;

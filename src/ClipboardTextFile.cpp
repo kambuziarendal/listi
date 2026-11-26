@@ -3,6 +3,7 @@
 #include "ClipboardImage.h"
 #include "ClipboardLock.h"
 #include "ExclusiveFileOutput.h"
+#include "UnavailableVolume.h"
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
@@ -42,7 +43,7 @@ void Fail(const char *operation) {
 }
 
 bool CanSaveClipboardIn(const std::string &folder) {
-  if (!IsFullPath(folder))
+  if (!IsFullPath(folder) || InterruptedVolumes().ContainsResolved(folder))
     return false;
   FD directory(open(folder.c_str(), O_RDONLY | O_DIRECTORY));
   return IsWritable(directory.value);
@@ -68,6 +69,8 @@ std::optional<ClipboardContent> DetectClipboardSaveContent(BClipboard *clipboard
 ClipboardFile PrepareClipboardFile(const std::string &folder,
                                    ClipboardContent content,
                                    BClipboard *clipboard) {
+  if (InterruptedVolumes().ContainsResolved(folder))
+    throw std::runtime_error(kUnavailableVolumeText);
   FD directory(IsFullPath(folder) ? open(folder.c_str(), O_RDONLY | O_DIRECTORY)
                                   : -1);
   struct stat st;
@@ -95,6 +98,9 @@ ClipboardFile PrepareClipboardFile(const std::string &folder,
 }
 
 void SaveClipboardFile(const ClipboardFile &file, const std::string &name) {
+  if (InterruptedVolumes().ContainsDevice(file.destination.device) ||
+      InterruptedVolumes().ContainsResolved(file.folder))
+    throw std::runtime_error(kUnavailableVolumeText);
   FD directory(open(file.folder.c_str(), O_RDONLY | O_DIRECTORY));
   auto verifyFolder = [&] {
     struct stat current;

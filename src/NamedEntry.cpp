@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "NamedEntry.h"
+#include "UnavailableVolume.h"
 #include "FileClipboard.h"
 #include "VirtualFile.h"
 #include <Entry.h>
@@ -75,6 +76,8 @@ void ValidateEntryLeaf(const std::string &name) {
 }
 void ValidateNewEntryName(const std::string &folder, const std::string &name) {
   ValidateEntryLeaf(name);
+  if (InterruptedVolumes().ContainsResolved(folder))
+    throw std::runtime_error(kUnavailableVolumeText);
   if (Exists(Join(folder, name)))
     throw std::runtime_error(
         "That name already exists. Choose a different name; nothing will be replaced.");

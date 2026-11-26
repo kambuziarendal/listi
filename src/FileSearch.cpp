@@ -172,13 +172,24 @@ SearchSummary SearchFiles(const SearchRequest &request,
       ++out.visited;
       BPath path;
       struct stat st;
-      if (entry.GetPath(&path) != B_OK || lstat(path.Path(), &st) != 0) {
+      if (entry.GetPath(&path) != B_OK) {
         ++out.skipped;
         continue;
       }
-      if (st.st_dev != rootStat.st_dev || !Within(path.Path(), root) ||
-          path.Path() == root || excluded(path.Path()) ||
-          IsListiPrivateEntry(path.Path()))
+      if (!Within(path.Path(), root) || path.Path() == root ||
+          excluded(path.Path()))
+        continue;
+      if (InterruptedVolumes().Contains(path.Path())) {
+        ++out.skipped;
+        continue;
+      }
+      if (IsListiPrivateEntry(path.Path()))
+        continue;
+      if (lstat(path.Path(), &st) != 0) {
+        ++out.skipped;
+        continue;
+      }
+      if (st.st_dev != rootStat.st_dev)
         continue;
       if (!accept(path.Path(), st, {}))
         break;
@@ -191,6 +202,10 @@ SearchSummary SearchFiles(const SearchRequest &request,
   while (!pending.empty() && alive() && !out.limited) {
     Pending current = pending.back();
     pending.pop_back();
+    if (InterruptedVolumes().Contains(current.path)) {
+      ++out.skipped;
+      continue;
+    }
     std::unique_ptr<DIR, decltype(&closedir)> dir(opendir(current.path.c_str()),
                                                   closedir);
     if (!dir) {
@@ -230,7 +245,13 @@ SearchSummary SearchFiles(const SearchRequest &request,
       ++out.visited;
       std::string path =
           current.path + (current.path == "/" ? "" : "/") + item->d_name;
-      if (InterruptedVolumes().Contains(path) || excluded(path) || IsListiPrivateEntry(path))
+      if (excluded(path))
+        continue;
+      if (InterruptedVolumes().Contains(path)) {
+        ++out.skipped;
+        continue;
+      }
+      if (IsListiPrivateEntry(path))
         continue;
       struct stat st;
       if (lstat(path.c_str(), &st)) {

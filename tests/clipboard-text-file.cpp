@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "ClipboardTextFile.h"
+#include "UnavailableVolume.h"
 #include <Application.h>
 #include <Bitmap.h>
 #include <DataIO.h>
@@ -188,6 +189,13 @@ int main(int argc, char **argv) {
               mkdir(destination.c_str(), 0700) == 0 &&
               Rejected([&] { SaveClipboardFile(stale, "unexpected.txt"); }),
           "a replaced destination is rejected");
+    auto blocked = PrepareClipboardFile(destination, ClipboardContent::Text, &clipboard);
+    InterruptedVolumes().Block(destination);
+    Check(!CanSaveClipboardIn(destination) &&
+              Rejected([&] { PrepareClipboardFile(destination, ClipboardContent::Text, &clipboard); }) &&
+              Rejected([&] { SaveClipboardFile(blocked, "blocked.txt"); }) &&
+              access((destination + "/blocked.txt").c_str(), F_OK) != 0,
+          "a blocked folder cannot accept clipboard data from an open prompt");
     failWrite = 1;
     bool rejected = Rejected([&] { SaveClipboardFile(frozen, "partial.txt"); });
     failWrite = 0;

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "FileSearch.h"
+#include "UnavailableVolume.h"
 #include "VirtualFile.h"
 #include <Application.h>
 #include <FindDirectory.h>
@@ -118,6 +119,17 @@ int main() {
   request.root = "/boot"; request.includeTrash = false;
   check(run().matched == 0, "BFS query excludes Trash by default");
   unlink(trashed.c_str());
+  InterruptedVolumes().Block(root + "/nested");
+  request.root = root; request.predicate = false; request.expression = "same";
+  result = run();
+  check(result.error.empty() && result.matched == 1 && result.skipped == 1 &&
+            hits.front().path == root + "/same.txt",
+        "recursive search reports an unavailable branch without losing healthy results");
+  request.predicate = true; request.expression = "name==\"same.txt\"";
+  result = run();
+  check(result.error.empty() && result.matched == 1 && result.skipped == 1 &&
+            hits.front().path == root + "/same.txt",
+        "BFS search reports in-scope matches omitted on an unavailable branch");
   for (const char *path : {"same.txt", "nested/same.txt", "literal[1].txt", "Å space.txt", "linked directory", "broken link"}) unlink((root + "/" + path).c_str());
   rmdir((root + "/nested").c_str()); rmdir(root.c_str());
   unlink((sibling + "/same.txt").c_str()); rmdir(sibling.c_str());

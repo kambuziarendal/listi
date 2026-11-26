@@ -91,17 +91,17 @@ void ClipboardFlow::Begin(uint32 action, Pane &pane) {
       archiveClipboardPending = !clipboardPaste.lease.empty();
       auto prompt = ArchiveActions::ConfirmAddition(clipboardPaste.jobs[0],
                                                    clipboardPaste.lease);
-      actionArea.Ask(prompt.text.String(), prompt.button, prompt.accepted);
+      if (!actionArea.Ask(prompt.text.String(), prompt.button, prompt.accepted))
+        CancelPrompt();
       if (!archiveClipboardPending)
         clipboardPaste = {};
       return;
     }
     clipboardMoved.clear();
-    for (auto job : clipboardPaste.jobs) {
-      job.tag = ++clipboardSerial;
-      clipboardJobs.insert(job.tag);
-      queue.Enqueue(job);
-    }
+    for (auto &job : clipboardPaste.jobs)
+      EnqueuePaste(job);
+    if (clipboardJobs.empty())
+      FinishPaste({});
   } catch (const std::exception &e) {
     PostMainWindowNotice(e.what());
   }
@@ -115,14 +115,20 @@ void ClipboardFlow::CancelPrompt() {
   archiveClipboardPending = false;
 }
 
-bool ClipboardFlow::AcceptArchivePaste(Job &job, const std::string &lease) {
-  if (!archiveClipboardPending || lease != clipboardPaste.lease)
-    return false;
+void ClipboardFlow::EnqueuePaste(Job &job) {
   job.tag = ++clipboardSerial;
-  clipboardJobs.insert(job.tag);
+  if (queue.Enqueue(job))
+    clipboardJobs.insert(job.tag);
+}
+
+void ClipboardFlow::SubmitArchivePaste(Job &job, const std::string &lease) {
+  if (!archiveClipboardPending || lease != clipboardPaste.lease)
+    return;
+  EnqueuePaste(job);
   clipboardMoved.clear();
   archiveClipboardPending = false;
-  return true;
+  if (clipboardJobs.empty())
+    FinishPaste({});
 }
 
 void ClipboardFlow::JobFinished(const BMessage &done) {

@@ -150,7 +150,8 @@ Hooks PrivateCopyHooks(const Hooks &hooks) {
 }
 
 void PublishNewArchive(Stage &stage, const Job &job, BEntry &published,
-                       node_ref &identity, const std::function<void()> &check) {
+                       node_ref &identity, const struct stat &written,
+                       const std::function<void()> &check) {
   PinnedDirectory stagedFolder(stage.path, stage.identity.device, stage.identity.node);
   try {
     stagedFolder.Flush(check);
@@ -161,8 +162,7 @@ void PublishNewArchive(Stage &stage, const Job &job, BEntry &published,
   const auto parent = stage.namespaceParent->Descriptor();
   FD source(openat(stagedFolder.Descriptor(), "archive", O_RDONLY | O_NOFOLLOW));
   struct stat staged;
-  Require(source.n >= 0 && !fstat(source.n, &staged) &&
-              staged.st_dev == identity.device && staged.st_ino == identity.node,
+  Require(source.n >= 0 && !fstat(source.n, &staged) && Unchanged(written, staged),
           "Archive output changed before publication.");
   Require(StagingSpaceAvailable(parent, staged.st_size),
           "Not enough confirmed space to publish the new archive.");
@@ -942,6 +942,7 @@ Result RunArchiveJob(const Job &job, const Hooks &hooks) {
     check();
     BEntry publish;
     node_ref publishIdentity;
+    struct stat writtenArchive;
     if (job.action == Action::CreateArchive) {
       auto path = Join(PathOf(stage.dir), "archive");
       FD output(
@@ -959,9 +960,11 @@ Result RunArchiveJob(const Job &job, const Hooks &hooks) {
       if (job.archiveFormat == "iso")
         SealDataIso(output.n, tracked);
       Require(!fsync(output.n), "Cannot flush archive to disk.");
-      Require(publish.SetTo(&stage.dir, "archive", false) == B_OK &&
-                  publish.GetNodeRef(&publishIdentity) == B_OK,
+      Require(!fstat(output.n, &writtenArchive) &&
+                  publish.SetTo(&stage.dir, "archive", false) == B_OK,
               "Archive output disappeared.");
+      publishIdentity.device = writtenArchive.st_dev;
+      publishIdentity.node = writtenArchive.st_ino;
     } else {
       std::vector<std::pair<std::string, struct stat>> original;
       for (const auto &item : job.expectedSources) {
@@ -1037,7 +1040,8 @@ Result RunArchiveJob(const Job &job, const Hooks &hooks) {
     };
     verifyOutput();
     if (job.action == Action::CreateArchive) {
-      PublishNewArchive(stage, job, publish, publishIdentity, check);
+      PublishNewArchive(stage, job, publish, publishIdentity, writtenArchive,
+                        check);
     } else {
       // Haiku checks a directory's destination separately from its rename.
       Require(publish.MoveTo(&stage.parent, job.entryName.c_str(), false) == B_OK,
