@@ -178,6 +178,7 @@ bool Pane::HandleQueryReply(BMessage &message) {
       row->kind = hit.GetInt32("kind", 0);
       row->directory = hit.GetBool("directory", false);
       row->size = hit.GetInt64("size", 0);
+      row->modifiedKnown = hit.HasInt64("date");
       row->modified = hit.GetInt64("date", 0);
       row->attributeCells.push_back({Listi::ParentLocation(row->path), B_STRING_TYPE});
       queryRows.push_back(std::move(row));

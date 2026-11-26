@@ -17,6 +17,7 @@ struct TarOwner {
   }
 };
 using TarOwners = std::map<std::string, TarOwner>;
+bool IsTarFormat(const std::string &format);
 void CreateArchiveOutput(int output, const std::string &format,
                          const std::vector<std::string> &sources, int level,
                          bool encryptNames, const ArchiveSecretPtr &secret,

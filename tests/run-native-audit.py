@@ -20,7 +20,7 @@ OUTPUT = ROOT / "build/native-audit-tests"
 REQUIRED = """
 file-operation-faults directory-finalization copy-crash-recovery worker-lifecycle virtual-operation-faults archive-read-scope
 operation-queue removable-copy disk-actions archive-move-scaling directory-delivery terminal-delivery search-filters
-archive-local-move-faults archive-local-move tar-edit-ownership same-file-type folder-compare
+archive-local-move-faults archive-local-move tar-edit-ownership tar-move-ownership same-file-type folder-compare
 archive-editor-faults archive-editor archive-move-faults archive-move
 archive-folder-operations transfer-races archive-ambiguity archive-metadata archive-volumes
 sevenzip-backend archive-passwords archive-jobs ar-writer arj-writer rar-store
@@ -40,6 +40,7 @@ WRAPS = {
     "working-windows": ["stat", "_ZN10BPopUpMenu2GoE6BPointbbb"],
     "removable-copy": ["fsync", "write", "read"],
     "directory-finalization": ["fsync", "fs_stat_dev"],
+    "tar-move-ownership": ["renameat"],
     "archive-move-faults": ['renameat'],
     "archive-editor-faults": ['rename', 'renameat', 'fsync', 'fs_stat_dev'],
     "archive-local-move-faults": ['renameat', 'unlink', 'openat'],
@@ -105,6 +106,58 @@ def run_tar_edit_ownership(binary):
             assert (member.uid, member.gid) == (1001, 2002)
             assert (member.uname, member.gname) == ("original-owner", "original-group")
             assert archive.extractfile(member).read() == b"keep"
+
+
+def run_tar_move_ownership(binary):
+    # Python supplies and verifies headers independently of Listi/libarchive.
+    # Directories are explicit; each entry has a distinct uid/gid and names.
+    source = {"box": (1, None), "box/tree": (2, None), "box/tree/file": (3, b"data"),
+              "loose": (4, b"loose"), "keep": (5, b"keep")}
+    target = {"recv": (6, None), "keep": (7, b"target")}
+    moved = {**target, "recv/tree": source["box/tree"],
+             "recv/tree/file": source["box/tree/file"], "recv/loose": source["loose"]}
+
+    def write(path, entries):
+        with tarfile.open(path, "w:gz" if path.suffix == ".gz" else "w") as archive:
+            for name, (owner, data) in entries.items():
+                header = tarfile.TarInfo(name)
+                header.uid, header.gid = 1000 + owner, 2000 + owner
+                header.uname, header.gname = f"owner{owner}", f"group{owner}"
+                header.type = tarfile.DIRTYPE if data is None else tarfile.REGTYPE
+                header.mode = 0o755 if data is None else 0o644
+                header.size = len(data) if data is not None else 0
+                archive.addfile(header, io.BytesIO(data) if data is not None else None)
+
+    def verify(path, expected):
+        with tarfile.open(path) as archive:
+            assert sorted(archive.getnames()) == sorted(expected)
+            for name, (owner, data) in expected.items():
+                member = archive.getmember(name)
+                assert (member.uid, member.gid) == (1000 + owner, 2000 + owner)
+                assert (member.uname, member.gname) == (f"owner{owner}", f"group{owner}")
+                assert member.isdir() if data is None else archive.extractfile(member).read() == data
+
+    for damage in (False, True):
+        with tempfile.TemporaryDirectory(prefix="listi-tar-move-") as folder:
+            src = Path(folder) / "source.tar.gz"
+            dst = Path(folder) / "target.tar"
+            write(src, source)
+            write(dst, target)
+            command = [binary, src, dst]
+            original = src.read_bytes()
+            if damage:
+                # Same paths and content; only one published ownership record differs.
+                different = {**moved, "recv/tree/file": (9, b"data")}
+                substitute = Path(folder) / "changed.tar"
+                write(substitute, different)
+                command.append(substitute)
+            subprocess.run(command, cwd=ROOT, check=True, timeout=90)
+            if damage:
+                assert src.read_bytes() == original
+                verify(dst, different)
+            else:
+                verify(dst, moved)
+                verify(src, {"box": source["box"], "keep": source["keep"]})
 
 
 def build_configuration():
@@ -186,6 +239,8 @@ def run():
             run_disk_actions(binary)
         elif name == "tar-edit-ownership":
             run_tar_edit_ownership(binary)
+        elif name == "tar-move-ownership":
+            run_tar_move_ownership(binary)
         else:
             subprocess.run([binary], cwd=ROOT, check=True, timeout=90)
         print("PASS", name, flush=True)

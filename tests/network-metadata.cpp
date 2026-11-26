@@ -3,8 +3,10 @@
 #include "FileOperation.h"
 #include "FolderCompare.h"
 #include "JobSnapshot.h"
+#include "RecoveryInventory.h"
 #include "VirtualFile.h"
 #include <Application.h>
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <fcntl.h>
@@ -28,6 +30,131 @@ FileEntry Stat(const std::string &base, const std::string &name) {
 std::string Read(const std::string &path) {
   std::ifstream file(path);
   return {std::istreambuf_iterator<char>(file), {}};
+}
+std::string RemoteBytes(const std::string &path) {
+  std::string bytes;
+  ReadFile(path, [&](const char *data, size_t n) { bytes.append(data, n); });
+  return bytes;
+}
+Result Copy(const std::string &source, const std::string &destination,
+            const Hooks &hooks = {}) {
+  Job job{Action::Copy, {source}, destination};
+  FreezeLocalJob(job, destination);
+  return Run(job, hooks);
+}
+void CheckUncertainOperations(const std::string &ftp, const std::string &local) {
+  const auto source = ChildLocation(ChildLocation(ftp, "guarded-rename"), "visible");
+  const auto target = ChildLocation(ParentLocation(source), ".settings");
+  auto rename = Run(Job{Action::Rename, {source}, target}, {});
+  FileEntry marker;
+  Expect(!rename.completed && !rename.errors.empty() &&
+             !StatFile(ChildLocation(ftp, "rename-command-seen"), marker) &&
+             RemoteBytes(source) == "visible\n" && RemoteBytes(target) == "hidden\n",
+         "uncertain FTP target blocks rename before RNFR or RNTO; both files survive");
+
+  for (const std::string name : {"hidden-only", "outer"}) {
+    const auto remote = ChildLocation(ftp, name);
+    const auto legacy = name == "outer" ? ChildLocation(remote, "mixed-nested") : remote;
+    Expect(RemoteBytes(ChildLocation(legacy, ".settings")) == "hidden\n",
+           "partial copy fixture contains a directly readable hidden child");
+    std::vector<std::string> notifications;
+    Hooks hooks;
+    hooks.fileDone = [&](const auto &src, const auto &) { notifications.push_back(src); };
+    auto result = Copy(remote, local, hooks);
+    Expect(!result.completed && !result.errors.empty() &&
+               std::find(notifications.begin(), notifications.end(), remote) == notifications.end(),
+           name + ": uncertain nested listing does not complete the selected folder");
+    auto destination = local + "/" + name;
+    if (name == "outer") {
+      destination += "/mixed-nested";
+      Expect(result.partialCopies == 1 && Read(destination + "/visible") == "visible\n" &&
+                 std::any_of(result.outcomes.begin(), result.outcomes.end(), [&](const auto &row) {
+                   return row.destination == destination + "/visible" && row.status == "copied";
+                 }), "mixed nested FTP folder retains the delivered file and its receipt");
+    }
+    Expect(!std::filesystem::exists(destination + "/.settings"), "hidden child was not delivered");
+  }
+}
+void CheckIdentity(const std::string &ftp, const std::string &local) {
+  const auto folder = local + "/identity";
+  std::filesystem::create_directory(folder);
+  std::ofstream(folder + "/sample") << "aaaa";
+  for (const std::string mode : {"identity-stable", "identity-compare", "identity-copy"}) {
+    const auto remote = ChildLocation(ftp, mode);
+    const auto path = ChildLocation(remote, "sample");
+    const auto before = Stat(remote, "sample");
+    Expect(!before.providerIdentity.empty(), mode + " exposes an MLSD unique identity");
+    if (mode != "identity-copy") {
+      auto compared = CompareFolders({folder, remote, true});
+      const bool stable = mode == "identity-stable";
+      Expect(compared.complete == stable && compared.verified == size_t(stable) &&
+                 compared.unverified == size_t(!stable),
+             mode + ": comparison accepts only stable identity across the read");
+    }
+    if (mode != "identity-compare") {
+      std::ofstream(folder + "/sample") << "original destination";
+      Hooks hooks;
+      hooks.conflict = [](const auto &) { return Decision::Replace; };
+      auto copied = Copy(path, folder, hooks);
+      const bool stable = mode == "identity-stable";
+      Expect(copied.completed == int(stable) && copied.errors.empty() == stable &&
+                 Read(folder + "/sample") == (stable ? "aaaa" : "original destination"),
+             mode + ": transfer publishes only with stable identity");
+    }
+    const auto after = Stat(remote, "sample");
+    const bool stable = mode == "identity-stable";
+    Expect(before.size == after.size && before.SameModification(after) &&
+               !after.providerIdentity.empty() &&
+               (before.providerIdentity == after.providerIdentity) == stable &&
+               RemoteBytes(path) == (stable ? "aaaa" : "bbbb"),
+           mode + ": independent read confirms bytes, size, time and identity");
+  }
+}
+void CheckStagedRecovery(const std::string &ftp, const std::string &sftp,
+                         const std::string &local) {
+  const std::string payload = "stage payload";
+  const std::string source = local + "/upload.txt";
+  std::ofstream(source) << payload;
+  const auto signals = ChildLocation(sftp, "signals");
+  for (const std::string mode : {"upload-uncertain", "upload-cancel"}) {
+    const bool interrupt = mode == "upload-cancel";
+    const auto remote = ChildLocation(ftp, mode);
+    bool sent = false, cancel = false;
+    Hooks hooks;
+    if (interrupt) {
+      hooks.proceed = [&] { return !cancel; };
+      hooks.progress = [&](const auto &, uint64_t n) {
+        if (n)
+          sent = true;
+        else if (sent) {
+          // Independent side channel. The fixture signals only upon RETR of
+          // the .part file, after the client has received the STOR reply.
+          if (!ListFiles(signals).empty()) {
+            cancel = true;
+            throw Cancelled();
+          }
+        }
+      };
+    }
+    auto result = Copy(source, remote, hooks);
+    Expect(!result.completed && result.cancelled == interrupt &&
+               (interrupt || !result.errors.empty()), mode + ": not reported as published");
+    const auto row = std::find_if(result.outcomes.begin(), result.outcomes.end(),
+                                  [](const auto &r) { return r.upload.has_value(); });
+    Expect(row != result.outcomes.end() && row->upload->bytesWritten == payload.size() &&
+               row->upload->sourceRetained && !row->upload->contentVerified &&
+               row->upload->publication == Publication::NotAttempted &&
+               row->upload->recoveryPaths.size() == 1,
+           mode + ": acknowledged bytes and unpublished recovery path in receipt");
+    const auto &stage = row->upload->recoveryPaths.front();
+    const auto review = ReviewRecovery("", RecoveryReview::JournalOnly);
+    Expect(ParentLocation(stage) == remote && RemoteBytes(stage) == payload &&
+               review.find(stage) != std::string::npos && Read(source) == payload,
+           mode + ": receipt and journal identify actual retained upload");
+    FileEntry marker;
+    Expect(!StatFile(ChildLocation(ftp, "rename-command-seen"), marker),
+           mode + ": no publication command reached server");
+  }
 }
 void CheckFtpCompare(const std::string &ftp, const std::string &local) {
   auto folder = local + "/ftp-compare";
@@ -84,6 +211,9 @@ int main() {
   int status = 0;
   try {
     CheckFtpCompare(ftp, local);
+    CheckUncertainOperations(ftp, local);
+    CheckIdentity(ftp, local);
+    CheckStagedRecovery(ftp, sftp, local);
     // An explicit epoch is not the same as an omitted or malformed fact.
     const auto epoch = Stat(ftp, "epoch");
     Expect(epoch.modifiedKnown && epoch.modified == 0, "MLSD explicit epoch");

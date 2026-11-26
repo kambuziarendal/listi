@@ -82,6 +82,8 @@ std::vector<FileEntry> ListFiles(const std::string &,
                                  const TransferControl & = {},
                                  std::vector<std::string> *omitted = nullptr,
                                  ListingMethod *method = nullptr);
+// False means confirmed absence. An incomplete FTP LIST that omits the
+// requested name throws rather than authorizing a mutation at that path.
 // Only a copy's initial FTP/SFTP lookup may reuse an entry from its traversal.
 // Leave discovered unset when checking the current revision.
 bool StatFile(const std::string &, FileEntry &, const TransferControl & = {},

@@ -187,6 +187,7 @@ public:
       item.AddInt64("node", st.st_ino);
       item.AddInt64("size", st.st_size);
       item.AddInt64("date", st.st_mtime);
+      item.AddBool("modifiedKnown", true);
       if (disk && st.st_dev == disk->mountedDevice && !disk->protectedVolume)
         disk->partition.WriteTo(item);
       const bool cells = !parent && (S_ISREG(st.st_mode) || S_ISDIR(st.st_mode)) &&

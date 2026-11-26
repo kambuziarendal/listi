@@ -41,9 +41,13 @@ BEFORE = "modify=20240229123000.1234567891;"
 AFTER = "modify=20240229123000.1234567892;"
 
 
+LEGACY = {"list-only", "hidden-only", "mixed-nested", "guarded-rename"}
+UPLOADS = {"upload-uncertain", "upload-cancel"}
+
+
 class MetadataFS(AbstractedFS):
     def format_list(self, basedir, listing, *args, **kwargs):
-        if Path(basedir).name == "list-only":
+        if Path(basedir).name in LEGACY | UPLOADS:
             listing = [name for name in listing if not name.startswith(".")]
         return super().format_list(basedir, listing, *args, **kwargs)
 
@@ -63,9 +67,11 @@ class MetadataFS(AbstractedFS):
 class MetadataDTP(DTPHandler):
     def send(self, data):
         count = super().send(data)
-        if not count or self.cmd != "RETR" or Path(self.file_obj.name).name != "changed":
+        if not count or self.cmd != "RETR":
             return count
         path = Path(self.file_obj.name)
+        if path.name != "changed":
+            return count
         if path.stat().st_mtime_ns // 1_000_000_000 == MODIFIED:
             with path.open("r+b") as file:
                 file.seek(-1, os.SEEK_END)
@@ -82,6 +88,11 @@ class MetadataFTP(FTPHandler):
     use_sendfile = False
 
     def pre_process_command(self, line, cmd, arg):
+        if cmd in {"RNFR", "RNTO"} and self.authenticated:
+            # Log even an attempted rename, including paths relative to login.
+            (Path(self.fs.root) / "rename-command-seen").touch()
+            self.respond("550 Rename disabled by the test fixture.")
+            return
         # This server shows dotfiles in list-all only for an explicit LIST -a.
         if cmd == "LIST" and self.fs.cwd == "/list-all" and arg != "-a":
             self.respond("501 Use LIST -a.")
@@ -89,10 +100,33 @@ class MetadataFTP(FTPHandler):
         return super().pre_process_command(line, cmd, arg)
 
     def ftp_MLSD(self, path):
-        if Path(path).name in ("list-only", "list-all"):
+        folder = Path(path)
+        if (folder.name in LEGACY | {"list-all"} or
+                (folder.name == "upload-uncertain" and any(folder.glob("*.part"))) or
+                (folder.name == "upload-cancel" and self.cancel_signal.exists())):
             self.respond("502 MLSD unavailable.")
             return
         return super().ftp_MLSD(path)
+
+    def on_file_sent(self, filename):
+        # Small transfers can finish before pyftpdlib assigns DTPHandler.cmd.
+        # This callback runs before servicing the client's next stat/list.
+        path = Path(filename)
+        if path.name == "sample" and path.parent.name in {"identity-compare", "identity-copy"}:
+            replacement = path.with_suffix(".next")
+            if path.read_bytes() == b"aaaa":
+                parent = path.parent.stat()
+                replacement.write_bytes(b"bbbb")
+                os.utime(replacement, (MODIFIED, MODIFIED))
+                replacement.replace(path)  # New inode, same size and Modify.
+                os.utime(path.parent, ns=(parent.st_atime_ns, parent.st_mtime_ns))
+
+    def ftp_RETR(self, path):
+        file = Path(path)
+        if file.parent.name == "upload-cancel" and file.suffix == ".part":
+            # Only reached when the client verifies a STOR acknowledged earlier.
+            self.cancel_signal.touch()
+        return super().ftp_RETR(path)
 
 
 class Auth(paramiko.ServerInterface):
@@ -183,6 +217,19 @@ def main():
         (ftp_root / directory).mkdir()
         (ftp_root / directory / "name").write_bytes(b"fixture contents\n")
         (ftp_root / directory / ".settings").write_bytes(b"hidden\n")
+    for directory in ("identity-stable", "identity-compare", "identity-copy"):
+        (ftp_root / directory).mkdir()
+        sample = ftp_root / directory / "sample"
+        sample.write_bytes(b"aaaa")
+        os.utime(sample, (MODIFIED, MODIFIED))
+    for directory in ("hidden-only", "guarded-rename", "outer/mixed-nested"):
+        folder = ftp_root / directory
+        folder.mkdir(parents=True)
+        (folder / ".settings").write_bytes(b"hidden\n")
+        if directory != "hidden-only":
+            (folder / "visible").write_bytes(b"visible\n")
+    for directory in UPLOADS:
+        (ftp_root / directory).mkdir()
     changed = ftp_root / "changed"
     changed.write_bytes(b"d" * (2 * 1024 * 1024))
     os.utime(changed, (MODIFIED, MODIFIED))
@@ -192,7 +239,9 @@ def main():
     os.utime(recursive_ftp, (MODIFIED, MODIFIED))
 
     sftp_root = staging / "sftp"
-    (sftp_root / "compare").mkdir(parents=True)
+    (sftp_root / "signals").mkdir(parents=True)
+    MetadataFTP.cancel_signal = sftp_root / "signals" / "checking-upload"
+    (sftp_root / "compare").mkdir()
     for name in ("known", "unknown", "compare/known"):
         file = sftp_root / name
         file.write_bytes(b"fixture contents\n")
@@ -216,6 +265,8 @@ def main():
 
     auth = DummyAuthorizer()
     auth.add_user(USER, PASSWORD, str(ftp_root), perm="elr")
+    for directory in UPLOADS:
+        auth.override_perm(USER, str(ftp_root / directory), perm="elrw")
     MetadataFTP.authorizer = auth
     class SFTPServer(socketserver.ThreadingTCPServer):
         allow_reuse_address = True

@@ -3,6 +3,8 @@
 #include "ArchiveJobChecks.h"
 #include "DataIsoVerification.h"
 #include "DirectoryFinalization.h"
+#include "EmptyAttribute.h"
+#include "ArchiveMetadata.h"
 #include "RemovableCopy.h"
 #include "ArchiveBackend.h"
 #include "ArchiveVolumes.h"
@@ -236,15 +238,13 @@ void RemoveTree(const std::string &path, const Hooks &hooks,
   Require(!(S_ISDIR(st.st_mode) ? rmdir(path.c_str()) : unlink(path.c_str())),
           "Cannot remove an entry from archive staging.");
 }
-void CopyMetadata(const std::string &fromPath, const std::string &toPath,
+void CopyMetadata(const std::string &fromPath, int output,
                   const Hooks &hooks) {
   struct stat st;
-  Require(!stat(fromPath.c_str(), &st), "Cannot inspect archive metadata.");
-  Require(!chmod(toPath.c_str(), st.st_mode & 07777),
+  BNode from(fromPath.c_str());
+  Require(from.GetStat(&st) == B_OK, "Cannot inspect archive metadata.");
+  Require(!fchmod(output, st.st_mode & 07777),
           "Cannot preserve archive permissions.");
-  BNode from(fromPath.c_str()), to(toPath.c_str());
-  Require(from.InitCheck() == B_OK && to.InitCheck() == B_OK,
-          "Cannot open archive metadata.");
   char name[B_ATTR_NAME_LENGTH];
   std::vector<char> bytes(65536);
   status_t status;
@@ -255,8 +255,7 @@ void CopyMetadata(const std::string &fromPath, const std::string &toPath,
     Require(from.GetAttrInfo(name, &info) == B_OK,
             "Archive metadata changed during editing.");
     if (!info.size) {
-      Require(to.WriteAttr(name, info.type, 0, nullptr, 0) == 0,
-              "Cannot preserve empty archive metadata.");
+      RestoreEmptyAttribute(output, name, info.type);
       continue;
     }
     off_t at = 0;
@@ -264,7 +263,7 @@ void CopyMetadata(const std::string &fromPath, const std::string &toPath,
       auto amount = std::min<off_t>(bytes.size(), info.size - at);
       auto got = from.ReadAttr(name, info.type, at, bytes.data(), amount);
       Require(got > 0, "Cannot read archive metadata.");
-      Require(to.WriteAttr(name, info.type, at, bytes.data(), got) == got,
+      Require(fs_write_attr(output, name, info.type, at, bytes.data(), got) == got,
               "Cannot preserve archive metadata.");
       at += got;
     }
@@ -291,10 +290,59 @@ void ChangeTarOwnerPaths(TarOwners &owners, const std::string &from,
   while (it != owners.end() && it->first.compare(0, prefix.size(), prefix) == 0)
     change(it++);
 }
+// A TAR move crosses a private filesystem snapshot, whose ownership is not
+// the source metadata. Map each selected header into the final member namespace.
+TarOwners MovedTarOwners(const Job &remove, const Job &add, const Hooks &hooks) {
+  TarOwners moved;
+  if (!IsTarFormat(remove.archiveFormat) || !IsTarFormat(add.archiveFormat))
+    return moved;
+  TarOwners source;
+  Require(DetectArchiveEditFormat(remove.destination, hooks, &source) == remove.archiveFormat,
+          "The source TAR format changed. Source entries were retained.");
+  ArchiveMetadataBudget budget;
+  for (const auto &from : remove.archiveRemove) {
+    const auto leaf = Leaf(from);
+    const auto to = add.archivePath.empty() ? leaf : Join(add.archivePath, leaf);
+    auto transfer = [&](TarOwners::iterator it) {
+      auto entry = source.extract(it);
+      budget.Charge(sizeof(TarOwners::value_type) + ArchiveMetadataBudget::NodeOverhead +
+                    to.size() + entry.key().size() - from.size() +
+                    entry.mapped().user.size() + entry.mapped().group.size());
+      entry.key().replace(0, from.size(), to);
+      Require(moved.insert(std::move(entry)).inserted, "Conflicting TAR move destinations.");
+    };
+    auto exact = source.find(from);
+    const auto prefix = from + "/";
+    auto child = source.lower_bound(prefix);
+    Require(exact != source.end() ||
+                (child != source.end() && child->first.compare(0, prefix.size(), prefix) == 0),
+            "No TAR ownership information for " + from + ". Source entries were retained.");
+    if (exact != source.end())
+      transfer(exact);
+    while (child != source.end() && child->first.compare(0, prefix.size(), prefix) == 0)
+      transfer(child++);
+  }
+  return moved;
+}
+
+void VerifyTarOwners(const std::string &path, const std::string &format,
+                     const TarOwners &expected, const Hooks &hooks) {
+  if (expected.empty())
+    return;
+  TarOwners actual;
+  Require(DetectArchiveEditFormat(path, hooks, &actual) == format,
+          "Updated TAR format changed. Source entries were retained.");
+  for (const auto &[name, owner] : expected) {
+    const auto found = actual.find(name);
+    Require(found != actual.end() && found->second == owner,
+            "Updated TAR ownership differs for " + name + ". Source entries were retained.");
+  }
+}
 void VerifyMovedEntry(const std::string &, const std::string &,
                       const TransferControl &, bool exactTree = false, unsigned depth = 0);
 Result RunArchiveEdit(const Job &job, const Hooks &hooks,
-                      const std::function<void()> &beforePublish = {}) {
+                      const std::function<void()> &beforePublish = {},
+                      const TarOwners &incomingOwners = {}) {
   Result result;
   try {
     Require(!job.destination.empty() && !job.destinationFolder.empty(),
@@ -308,6 +356,8 @@ Result RunArchiveEdit(const Job &job, const Hooks &hooks,
     const auto format = DetectArchiveEditFormat(job.destination, hooks, &owners);
     Require(format == job.archiveFormat,
             "Archive format changed after selection.");
+    for (const auto &[name, owner] : incomingOwners)
+      owners.insert_or_assign(name, owner);
     const auto passwordGeneration = ArchivePasswordGeneration();
     const auto originalSet = FindArchiveVolumes(job.destination);
     ArchiveEditProtection protection(originalSet.files.front().identity,
@@ -459,7 +509,7 @@ Result RunArchiveEdit(const Job &job, const Hooks &hooks,
     CreateArchiveOutput(output.n, format, Children(work), job.archiveLevel,
                         secret && format == "7z", secret, internal, owners);
     Require(!fsync(output.n), "Cannot flush updated archive to disk.");
-    CopyMetadata(job.destination, outputPath, internal);
+    CopyMetadata(job.destination, output.n, internal);
     if (format == "iso")
       SealDataIso(output.n, internal);
     Require(!fsync(output.n), "Cannot flush updated archive metadata.");
@@ -484,16 +534,7 @@ Result RunArchiveEdit(const Job &job, const Hooks &hooks,
         if (hooks.progress)
           hooks.progress(job.destination, 0);
       };
-      if (!owners.empty()) {
-        TarOwners written;
-        Require(DetectArchiveEditFormat(outputPath, internal, &written) == format,
-                "Updated TAR format changed. Original archive retained.");
-        for (const auto &[name, owner] : owners) {
-          const auto it = written.find(name);
-          Require(it != written.end() && it->second == owner,
-                  "Updated TAR ownership differs for " + name + ". Original archive retained.");
-        }
-      }
+      VerifyTarOwners(outputPath, format, owners, internal);
       const auto root = OpenArchive(outputPath, verify);
       Require(
           !root.empty(),
@@ -834,7 +875,8 @@ Result RunArchiveMove(const Job &job, const Hooks &hooks) {
         additions.push_back(Join(snapshot, LocationLeaf(path)));
       auto add =
           PrepareArchiveEditJob(target.archive, additions, {}, target.path);
-      auto written = RunArchiveEdit(add, internal);
+      const auto movedOwners = MovedTarOwners(sourceGuard, add, internal);
+      auto written = RunArchiveEdit(add, internal, {}, movedOwners);
       stage.CheckInterrupted(written);
       if (written.cancelled)
         throw Cancelled();
@@ -855,6 +897,7 @@ Result RunArchiveMove(const Job &job, const Hooks &hooks) {
         Guards(published);
         return true;
       };
+      VerifyTarOwners(target.archive, add.archiveFormat, movedOwners, internal);
       TransferControl verify;
       verify.proceed = internal.proceed;
       for (const auto &path : job.sources)

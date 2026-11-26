@@ -10,7 +10,8 @@ int main() {
     auto entry = std::make_unique<PaneEntry>();
     entry->name = i == 0 ? "=1+2" : i == 1 ? "Håkon,\"Ø\"\nÆ" : std::to_string(i);
     entry->path = "/fixture/" + entry->name;
-    entry->modified = 1;
+    entry->modifiedKnown = i == 0;
+    entry->modified = i < 2 ? 0 : 1;
     entry->sizeKnown = false;
     if (i < 20)
       selection.push_back(entry->path);
@@ -29,7 +30,9 @@ int main() {
     else if (expected == "Håkon,\"Ø\"\nÆ")
       expected = "Håkon,\"\"Ø\"\"\nÆ";
     assert(rows[i].csv.find("\"" + expected + "\",") == 0);
-    assert(rows[i].csv.find(",file,,1970-01-01T00:00:01Z\r\n") != std::string::npos);
+    const std::string timestamp = entry->modifiedKnown ? "1970-01-01T00:00:00Z" :
+                                  entry->modified ? "1970-01-01T00:00:01Z" : "";
+    assert(rows[i].csv.find(",file,," + timestamp + "\r\n") != std::string::npos);
   }
   model.Filter("Håkon");
   assert(Listi::FreezeFileList(model).size() == 1);

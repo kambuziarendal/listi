@@ -316,6 +316,13 @@ over, **Failed** includes the problem, and **Not processed** is not a success.
 Other providers can give a job-level error or a recovery path rather than
 confirm the state of every file. Concurrent external edits are not prevented.
 
+On FTP servers that only support legacy directory listings (LIST), a name
+missing from the list may still exist. Listi will not use that result to
+authorize a rename or upload to a supposedly unused name. When downloading a
+folder, check the individual file receipts: the server may have hidden other
+children, even if the folder looked empty. If you need a complete copy, use a
+connection that can enumerate the whole directory before removing the source.
+
 **Cancel job** requests cancellation of the running job only. In Details you
 can cancel a selected waiting job, or choose **Cancel all** to discard waiting
 jobs and request cancellation of the running one. A cancellation request does
