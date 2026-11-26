@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.38.0-44 (private alpha candidate)
+
+- Permanent network deletion checks the selected type and available revision information before removing anything from that selection. If a folder deletion stops partway, the report identifies entries already removed.
+- Folder comparison still verifies visible file pairs by SHA-256, but no longer certifies an entire FTP tree when the server falls back to LIST. Uploads recheck each source directory before reporting it complete; this is not a filesystem snapshot.
+- Moving a regular archive member to an unused local name now claims that name exclusively. TAR edits preserve and check existing member ownership before replacing the archive.
+- Folder history restores empty typed BFS attributes and verifies the type and size before removing the incomplete-copy marker.
+
 ## 0.38.0-43 (private alpha candidate)
 
 - When copying a regular file to an unused name, Listi claims that name exclusively. This also protects Duplicate and the copy step of a cross-volume move. The verified stage stays until the new file is flushed, so the destination needs space for both copies. Direct rename, same-volume move, symbolic links and publication of an extracted folder still have separate collision limitations.
