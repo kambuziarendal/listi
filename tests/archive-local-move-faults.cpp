@@ -6,6 +6,8 @@
 #include <Entry.h>
 #include <Path.h>
 #include <cerrno>
+#include <cstdarg>
+#include <cstring>
 #include <fcntl.h>
 #include <fstream>
 #include <iostream>
@@ -13,12 +15,33 @@
 #include <unistd.h>
 using namespace Listi;
 namespace {
-enum Fault { None, DestinationRename, SourceRename, CorruptDestination, LocalDelete } fault=None;
+enum Fault { None, DestinationRename, SourceRename, CorruptDestination, LocalDelete, ClaimDestination } fault=None;
 std::string sourceArchive,destinationArchive,deletePath;
 bool injected=false;
+struct stat claimParent{};
 const std::string payload="Listi move fault payload";
 std::string readBytes(const std::string &path){std::ifstream in(path,std::ios::binary);return {std::istreambuf_iterator<char>(in),std::istreambuf_iterator<char>()};}
 void clean(const std::string &p){BDirectory d(p.c_str());BEntry e;while(d.GetNextEntry(&e,false)==B_OK){struct stat s;e.GetStat(&s);if(S_ISDIR(s.st_mode)){BPath path;e.GetPath(&path);clean(path.Path());}e.Remove();}rmdir(p.c_str());}
+}
+extern "C" int __real_openat(int, const char *, int, ...);
+extern "C" int __wrap_openat(int parent, const char *leaf, int flags, ...) {
+  if (!(flags & O_CREAT))
+    return __real_openat(parent, leaf, flags);
+  va_list args;
+  va_start(args, flags);
+  int mode = va_arg(args, int);
+  va_end(args);
+  struct stat actualParent;
+  if (fault == ClaimDestination && !injected && !strcmp(leaf, "item") &&
+      (flags & O_EXCL) && !fstat(parent, &actualParent) &&
+      actualParent.st_dev == claimParent.st_dev && actualParent.st_ino == claimParent.st_ino) {
+    const int other = __real_openat(parent, leaf, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (other >= 0) {
+      injected = write(other, "other", 5) == 5;
+      close(other);
+    }
+  }
+  return __real_openat(parent, leaf, flags, mode);
 }
 extern "C" int __real_renameat(int,const char *,int,const char *);
 extern "C" int __wrap_renameat(int from,const char *oldLeaf,int target,const char *newLeaf){
@@ -62,7 +85,16 @@ int main(){
  auto out=root+"/out";mkdir(out.c_str(),0700);auto job=PrepareArchiveMove(Job{Action::Move,{member},out});fault=SourceRename;auto r=Run(job,{});fault=None;
  check(injected&&!r.completed&&!r.errors.empty(),"archive cleanup rename failure cannot report move");
  check(readBytes(sourceArchive)==original&&readBytes(out+"/item")==payload,"archive cleanup failure retains exact source and local copy");
- unlink((out+"/item").c_str());bool damaged=false;Hooks corrupt;corrupt.proceed=[&]{struct stat st;if(!damaged&&!lstat((out+"/item").c_str(),&st)){damaged=true;std::ofstream(out+"/item")<<std::string(payload.size(),'X');}return true;};
+ unlink((out+"/item").c_str());
+ injected = false;
+ if (stat(out.c_str(), &claimParent)) return 2;
+ fault = ClaimDestination;
+ r = Run(job, {});
+ fault = None;
+ check(injected && !r.completed && !r.errors.empty() &&
+       readBytes(out + "/item") == "other" && readBytes(sourceArchive) == original,
+       "archive move never replaces a newly claimed local name or removes the member");
+ unlink((out+"/item").c_str());bool damaged=false;Hooks corrupt;corrupt.proceed=[&]{struct stat st;if(!damaged&&!lstat((out+"/item").c_str(),&st)&&readBytes(out+"/item")==payload){damaged=true;std::ofstream(out+"/item")<<std::string(payload.size(),'X');}return true;};
  r=Run(job,corrupt);check(damaged&&!r.completed&&!r.errors.empty()&&readBytes(sourceArchive)==original,"same-size local destination corruption blocks source cleanup");
  // Cleanup can fail after an earlier local root completed. Report only that root.
  std::ofstream(root+"/in/first")<<"first";std::ofstream(root+"/in/item")<<payload;
