@@ -7,6 +7,7 @@
 #include "MessageStore.h"
 #include "RecoveryInventory.h"
 #include "JobSnapshot.h"
+#include "JobReportStore.h"
 #include "VirtualFile.h"
 #include <Application.h>
 #include <FindDirectory.h>
@@ -275,6 +276,20 @@ void *run(void *) {
     auto selfTarget=PrepareArchiveEditTarget(original,"/");bool selfRefused=false;
     try{SetArchiveEditAdditions(selfTarget,{original});}catch(...){selfRefused=true;}
     check(selfRefused,id+" archive cannot add itself during editing");
+    if (id == "zip") {
+      const auto addition = input + "/edit/unsupported";
+      mkdir(addition.c_str(), 0700);
+      const auto unsupported = addition + "/pipe";
+      check(mkfifo(unsupported.c_str(), 0600) == 0, "create unsupported addition fixture");
+      const auto initial = read(original);
+      Hooks queued;
+      queued.report = std::make_shared<JobReportStore>();
+      auto rejected = RunArchiveJob(PrepareArchiveEditJob(original, {addition}, {removed}), queued);
+      check(!rejected.completed && !rejected.errors.empty() && read(original) == initial,
+            "queued archive edit with unsupported addition retains every original byte");
+      unlink(unsupported.c_str());
+      rmdir(addition.c_str());
+    }
     auto edit=PrepareArchiveEditJob(original,{input+"/edit/replacement/empty",input+"/edit/new.txt"},{removed},"/");
     edit.archiveLevel=4;auto encoded=DecodeJob(EncodeJob(edit,0));
     check(encoded.action==Action::EditArchive&&encoded.archiveRemove.size()==1&&encoded.archivePath.empty(),id+" edit snapshot round trip");

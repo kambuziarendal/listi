@@ -11,6 +11,8 @@
 #include "LocalMoveTree.h"
 #include "RecoveryInventory.h"
 #include "PrivateScratch.h"
+#include "StagingSpace.h"
+#include <utility>
 #include "VirtualFile.h"
 #include <Directory.h>
 #include <Entry.h>
@@ -136,6 +138,67 @@ struct Stage {
     }
   }
 };
+// The outer job owns the user-facing report. Inner copies must return failures
+// directly to the caller that decides whether a snapshot is safe to publish.
+Hooks PrivateCopyHooks(const Hooks &hooks) {
+  auto inner = hooks;
+  inner.privateStaging = true;
+  inner.report.reset();
+  inner.fileDone = {};
+  inner.fileFailed = {};
+  return inner;
+}
+
+void PublishNewArchive(Stage &stage, const Job &job, BEntry &published,
+                       node_ref &identity, const std::function<void()> &check) {
+  PinnedDirectory stagedFolder(stage.path, stage.identity.device, stage.identity.node);
+  try {
+    stagedFolder.Flush(check);
+  } catch (const RemovableCopyInterrupted &) {
+    stage.retainRecovery = true;
+    throw;
+  }
+  const auto parent = stage.namespaceParent->Descriptor();
+  FD source(openat(stagedFolder.Descriptor(), "archive", O_RDONLY | O_NOFOLLOW));
+  struct stat staged;
+  Require(source.n >= 0 && !fstat(source.n, &staged) &&
+              staged.st_dev == identity.device && staged.st_ino == identity.node,
+          "Archive output changed before publication.");
+  Require(StagingSpaceAvailable(parent, staged.st_size),
+          "Not enough confirmed space to publish the new archive.");
+  check();
+  stage.namespaceParent->Verify();
+  FD out(openat(parent, job.entryName.c_str(), O_WRONLY | O_CREAT | O_EXCL |
+                O_NOFOLLOW | O_CLOEXEC, 0600));
+  Require(out.n >= 0, "Cannot reserve the new archive name. No file was replaced.");
+  // The name now exists. Never unlink an uncertain destination or discard the
+  // completed stage if a write, device check or directory flush fails.
+  stage.retainRecovery = true;
+  struct stat reserved;
+  Require(!fstat(out.n, &reserved), "Cannot identify the new file. Check the destination and recovery stage.");
+  try {
+    WriteRemovableStagingFile(std::exchange(source.n, -1), std::exchange(out.n, -1),
+                              staged, [&](size_t) { check(); }, true,
+                              StagingPermissions::KeepCreationMode);
+  } catch (const RemovableCopyInterrupted &) {
+    throw RemovableCopyInterrupted("Archive publication interrupted; the new file may be incomplete. "
+                                   "The archive stage was retained.", job.destinationFolder);
+  } catch (const Cancelled &) {
+    stage.result.errors.push_back("Archive publication cancelled; check the incomplete destination and retained stage.");
+    throw;
+  } catch (const std::exception &error) {
+    throw std::runtime_error(std::string("Archive publication incomplete; check the new file and retained stage: ") + error.what());
+  }
+  struct stat final;
+  Require(!fstatat(parent, job.entryName.c_str(), &final, AT_SYMLINK_NOFOLLOW) &&
+              final.st_dev == reserved.st_dev && final.st_ino == reserved.st_ino &&
+              final.st_size == staged.st_size,
+          "The new archive changed during publication. Check the destination and retained stage.");
+  identity.device = reserved.st_dev;
+  identity.node = reserved.st_ino;
+  Require(published.SetTo(&stage.parent, job.entryName.c_str(), false) == B_OK,
+          "Cannot locate the new archive. The recovery stage was retained.");
+}
 std::vector<std::string> Children(const std::string &folder) {
   DIR *raw = opendir(folder.c_str());
   Require(raw, "Cannot list archive staging folder.");
@@ -246,10 +309,7 @@ Result RunArchiveEdit(const Job &job, const Hooks &hooks,
       if (hooks.progress)
         hooks.progress(job.destination, bytes);
     };
-    Hooks internal = hooks;
-    internal.privateStaging = true;
-    internal.fileDone = {};
-    internal.fileFailed = {};
+    auto internal = PrivateCopyHooks(hooks);
     internal.proceed = [&] {
       check();
       return true;
@@ -277,8 +337,8 @@ Result RunArchiveEdit(const Job &job, const Hooks &hooks,
       Require(copied.errors.empty(), copied.errors.empty()
                                          ? "Archive extraction failed."
                                          : copied.errors.front());
-      Require(!copied.skipped,
-              "Archive contains conflicting entries and was not changed.");
+      Require(!copied.skipped && copied.completed == int(extract.sources.size()),
+              "Archive extraction was incomplete. The original archive was retained.");
     }
     for (const auto &member : job.archiveRemove) {
       check();
@@ -354,12 +414,14 @@ Result RunArchiveEdit(const Job &job, const Hooks &hooks,
         return hooks.conflict(job.destination + " → " + relative);
       };
       auto added = Run(add, adding);
+      stage.CheckInterrupted(added);
       if (added.cancelled)
         throw Cancelled();
       Require(added.errors.empty(), added.errors.empty()
                                         ? "Could not add files to archive."
                                         : added.errors.front());
-      Require(!added.skipped, "Archive edit was cancelled at a name conflict.");
+      Require(!added.skipped && added.completed == int(add.sources.size()),
+              "Archive additions were incomplete. The original archive was retained.");
     }
     check();
     const auto outputPath = Join(PathOf(stage.dir), "updated");
@@ -533,10 +595,7 @@ Result RunArchiveLocalMove(const Job &job, const Hooks &hooks) {
   try {
     const auto source = ParseLocation(job.sources.front());
     const auto target = ParseLocation(job.destination);
-    Hooks internal = hooks;
-    internal.privateStaging = true;
-    internal.fileDone = {};
-    internal.fileFailed = {};
+    auto internal = PrivateCopyHooks(hooks);
     internal.proceed = [&] {
       if (hooks.proceed && !hooks.proceed())
         throw Cancelled();
@@ -702,10 +761,7 @@ Result RunArchiveMove(const Job &job, const Hooks &hooks) {
     const auto target = ParseLocation(job.destination);
     if (source.Local() || target.Local())
       return RunArchiveLocalMove(job, hooks);
-    Hooks internal = hooks;
-    internal.privateStaging = true;
-    internal.fileDone = {};
-    internal.fileFailed = {};
+    auto internal = PrivateCopyHooks(hooks);
     auto sourceGuard = PrepareArchiveEditJob(source.archive, {}, job.sources);
     auto checkSource = [&] {
       if (hooks.proceed && !hooks.proceed())
@@ -927,18 +983,13 @@ Result RunArchiveJob(const Job &job, const Hooks &hooks) {
       Job copy;
       copy.sources = selected;
       copy.destination = PathOf(stage.dir);
-      Hooks guarded = tracked;
-      guarded.privateStaging = true;
-      // The inner copy must return its errors here. A queue report consumes
-      // them, leaving copied.errors empty even when the stage is incomplete.
-      guarded.report.reset();
+      auto guarded = PrivateCopyHooks(tracked);
       // Defer all member completion notifications until atomic publication.
       // Otherwise the UI leaves successfully extracted members marked failed.
       if (hooks.fileDone)
         guarded.fileDone = [&](const std::string &path, const std::string &) {
           completedPaths.insert(path);
         };
-      guarded.fileFailed = {};
       guarded.proceed = [&] {
         check();
         return true;
@@ -950,8 +1001,8 @@ Result RunArchiveJob(const Job &job, const Hooks &hooks) {
       Require(copied.errors.empty(),
               copied.errors.empty() ? "" : copied.errors.front());
       Require(
-          !copied.skipped,
-          "Archive contains conflicting entries; extraction was not published.");
+          !copied.skipped && copied.completed == int(copy.sources.size()),
+          "Archive contents were not fully copied; extraction was not published.");
       for (const auto &item : original) {
         struct stat s;
         Require(!lstat(item.first.c_str(), &s) && Unchanged(item.second, s),
@@ -983,13 +1034,14 @@ Result RunArchiveJob(const Job &job, const Hooks &hooks) {
               "Archive job output was replaced.");
     };
     verifyOutput();
-    // Native no-clobber publication. A new target appearing while the job runs
-    // must never be overwritten, including an empty directory or a symlink.
-    Require(
-        publish.MoveTo(&stage.parent, job.entryName.c_str(), false) == B_OK,
-        "Could not publish the result. The destination may already exist; it was not replaced.");
-    if (job.action == Action::ExtractArchive)
+    if (job.action == Action::CreateArchive) {
+      PublishNewArchive(stage, job, publish, publishIdentity, check);
+    } else {
+      // Haiku checks a directory's destination separately from its rename.
+      Require(publish.MoveTo(&stage.parent, job.entryName.c_str(), false) == B_OK,
+              "Could not publish the extracted folder. Check the destination.");
       stage.published = true;
+    }
     stage.retainRecovery = true;
     try {
       stage.namespaceParent->Flush(check);

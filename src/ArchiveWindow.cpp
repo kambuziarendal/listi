@@ -283,7 +283,8 @@ public:
     layout
         .Add(new BStringView(
             "archive safety",
-            "Use a new name. Existing files and folders are never replaced."))
+            Extract() ? "Use a new folder name that no other job is creating."
+                      : "Use a new name. Existing files are not replaced."))
         .Add(status)
         .AddGlue()
         .AddGroup(B_HORIZONTAL, 8)
