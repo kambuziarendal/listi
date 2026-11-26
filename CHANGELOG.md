@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.38.0-38 (private alpha candidate)
+
+- Correction for users of revision 37: do not follow the USB disconnect test in that package. A physical disconnect during copying was followed by a kernel panic. Finish the transfer and unmount before removal. This revision does not fix the FAT driver.
+- Folder comparison and upload report inaccessible paths instead of treating an incomplete folder as complete.
+
 ## [0.38.0-37 alpha](https://github.com/kambuziarendal/listi/releases/tag/v0.38.0-37)
 
 This public package includes the changes in revisions 24 through 37 listed below. Interrupted FAT writes can still crash Haiku; finish the copy and unmount before disconnecting the drive.

@@ -328,7 +328,7 @@ Build the package separately, record the HPKG digest, install it on the test
 system, confirm the installed executable digest and repeat the relevant
 app self-tests and UI operations against that executable. QEMU exercise with
 USB hot-unplug is not a physical test. Record physical combinations separately,
-including clean eject, disconnect, remount and content comparison. A passing
+using normal copies, clean eject, remount and content comparison. Never deliberately disconnect physical media during a transfer. A passing
 source audit alone does not qualify an installed artifact, another architecture,
 another filesystem, or physical device behavior.
 

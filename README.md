@@ -17,6 +17,8 @@ Listi is a native Haiku file manager. Browse a single folder, compare two panels
 
 The [feature tour](docs/FEATURES.md) covers Mini icons, compact Einn windows, working sets and the other tools included in this alpha.
 
+**If you have the public 0.38.0-37 package:** disregard the USB disconnect test in its installed verification guide. A physical mid-copy disconnect was followed by a kernel panic. Do not repeat that test.
+
 ## Install
 
 Download the **[0.38.0-37 alpha test candidate for Haiku x86_64](https://github.com/kambuziarendal/listi/releases/tag/v0.38.0-37)**. Open the HPKG in HaikuDepot, or install it from the download folder:
@@ -35,7 +37,7 @@ See the [feature tour](docs/FEATURES.md) for screenshots or the [workflow guide]
 
 ## Development and testing
 
-The developer uses large language models (LLMs) to help write code and design and run tests. Much of the hands-on testing takes place on a ThinkPad X1 Carbon (6th Gen) running Haiku R1/beta6 directly on the hardware, not in a VM. Much of the automated stress testing runs in Haiku VMs with LLM assistance. The [verification notes](docs/VERIFICATION.md) distinguish test environments: the mid-copy disconnect result is from a virtual USB device.
+The developer uses large language models (LLMs) to help write code and design and run tests. Much of the hands-on testing takes place on a ThinkPad X1 Carbon (6th Gen) running Haiku R1/beta6 directly on the hardware, not in a VM. Much of the automated stress testing runs in Haiku VMs with LLM assistance. The [verification notes](docs/VERIFICATION.md) distinguish test environments: the physical disconnect reports and the separate VM results are recorded individually.
 
 ## Build from source
 
