@@ -2,6 +2,7 @@
 // Deterministic native syscall faults, including when the test user is root.
 #include "FileOperation.h"
 #include "JobSnapshot.h"
+#include "JobReportStore.h"
 #include "Trash.h"
 #include <Node.h>
 #include <fcntl.h>
@@ -163,6 +164,153 @@ extern "C" status_t __wrap__ZN5BNode10RemoveAttrEPKc(BNode *node, const char *na
   return __real__ZN5BNode10RemoveAttrEPKc(node, name);
 }
 
+namespace {
+void TestDirectoryClaims(const fs::path &root, const fs::path &out) {
+  for (const auto action : {Action::Copy, Action::Move}) {
+    for (const bool existing : {false, true}) {
+      const auto first = root / "first" / "tree", second = root / "second" / "tree";
+      const auto target = out / "tree";
+      fs::create_directories(first);
+      fs::create_directories(second);
+      std::ofstream(first / "one") << "one";
+      std::ofstream(second / "two") << "two";
+      if (existing) {
+        fs::create_directory(target);
+        std::ofstream(target / "keep") << "untouched";
+      }
+      const auto r = Run({action, {first.string(), second.string()}, out.string()}, {});
+      Check(r.completed == 1 && r.errors.size() == 1 &&
+                Has(r, second, target, "failed", "already used by source folder") &&
+                Read(target / "one") == "one" && !fs::exists(target / "two") &&
+                Read(second / "two") == "two" &&
+                fs::exists(first) == (action == Action::Copy) &&
+                (!existing || Read(target / "keep") == "untouched"),
+            "two selected roots cannot silently share a new or existing destination folder");
+      fs::remove_all(first.parent_path());
+      fs::remove_all(second.parent_path());
+      fs::remove_all(target);
+    }
+  }
+  const auto source = root / "set";
+  fs::create_directories(source / "Drafts" / "one");
+  fs::create_directories(source / "drafts" / "two");
+  auto run = [&](const fs::path &parent, bool insensitive) {
+    const auto result = Run({Action::Copy, {source.string()}, parent.string()}, {});
+    const auto tree = parent / "set";
+    if (insensitive) {
+      const bool one = fs::is_directory(tree / "Drafts" / "one");
+      const bool two = fs::is_directory(tree / "drafts" / "two");
+      Check(!result.completed && result.partialCopies == 1 && result.errors.size() == 1 &&
+                Has(result, source, tree, "partial", "already used by source folder") &&
+                one != two && fs::is_directory(source / "Drafts" / "one") &&
+                fs::is_directory(source / "drafts" / "two"),
+            "case-insensitive target preserves the first sibling and reports partial copy");
+    } else {
+      Check(result.completed == 1 && result.errors.empty() &&
+                fs::is_directory(tree / "Drafts" / "one") &&
+                fs::is_directory(tree / "drafts" / "two") &&
+                !fs::exists(tree / "Drafts" / "two") && !fs::exists(tree / "drafts" / "one"),
+            "case-sensitive target preserves both distinct sibling folders");
+    }
+  };
+  run(out, false);
+  fs::remove_all(out / "set");
+  if (const char *volume = getenv("LISTI_CASE_INSENSITIVE_TEST_ROOT")) {
+    std::string scratch = (fs::path(volume) / "Listi-alias-XXXXXX").string();
+    if (!mkdtemp(scratch.data()))
+      throw std::runtime_error("Cannot create case-insensitive filesystem fixture");
+    const fs::path test(scratch);
+    fs::create_directory(test / "MiXeD");
+    Check(fs::equivalent(test / "MiXeD", test / "mixed"),
+          "case-insensitive fixture resolves both spellings to one real inode");
+    run(test, true);
+    run(test, true); // The first delivery must survive a retry.
+    fs::remove_all(test);
+  } else {
+    std::cout << "NOTE separate case-insensitive volume not configured\n";
+  }
+  fs::remove_all(source);
+}
+void TestMovePermissions(const fs::path &root, const fs::path &out) {
+  const auto source = root / "permissions", destination = out / "permissions";
+  for (bool nested : {false, true}) {
+    for (const auto modes : {std::pair<mode_t, mode_t>{0700, 0755}, {0755, 0700},
+                             {0740, 0750}, {0750, 0750}}) {
+      const auto from = nested ? source / "sub" : source;
+      const auto to = nested ? destination / "sub" : destination;
+      fs::create_directories(from);
+      fs::create_directories(to);
+      if (chmod(from.c_str(), modes.first) || chmod(to.c_str(), modes.second))
+        throw std::runtime_error("Cannot set move permission fixture");
+      if (nested)
+        std::ofstream(source / "outside") << "sibling";
+      std::ofstream(from / "memo") << "private";
+      std::ofstream(to / "keep") << "unrelated";
+      const bool matched = modes.first == modes.second;
+      const Job move{Action::Move, {source.string()}, out.string()};
+      auto verify = [&](const Result &r) {
+        struct stat node;
+        return r.completed == int(matched) && r.errors.empty() == matched &&
+               (matched ? !fs::exists(source) && Read(to / "memo") == "private"
+                        : Read(from / "memo") == "private" && !fs::exists(to / "memo") &&
+                          Has(r, from, to, "failed", "move permissions differ")) &&
+               (!nested || fs::exists(destination / "outside") == matched) &&
+               Read(to / "keep") == "unrelated" && !stat(to.c_str(), &node) &&
+               (node.st_mode & 07777) == modes.second;
+      };
+      Check(verify(Run(move, {})), "directory merge requires matching access without changing prior files");
+      if (!matched)
+        Check(verify(Run(move, {})), "retry of refused directory merge leaves both trees intact");
+      fs::remove_all(source);
+      fs::remove_all(destination);
+    }
+  }
+}
+void TestNameFlush(const fs::path &root, const fs::path &out) {
+  for (const auto action : {Action::MakeFile, Action::MakeDirectory, Action::Link,
+                            Action::Rename, Action::Move}) {
+    const auto src = root / "flush-name", dst = out / "flush-name";
+    const bool create = action == Action::MakeFile || action == Action::MakeDirectory;
+    const bool move = action == Action::Rename || action == Action::Move;
+    if (!create)
+      std::ofstream(src) << "payload";
+    Job job{action, {}, out.string()};
+    if (!create)
+      job.sources.push_back(src.string());
+    FreezeLocalJob(job, out.string());
+    if (action == Action::MakeFile || action == Action::MakeDirectory || action == Action::Rename)
+      job.destination = dst.string();
+    if (action == Action::Link)
+      job.entryName = "flush-name";
+    struct stat parent;
+    if (stat(out.c_str(), &parent))
+      throw std::runtime_error("Cannot identify flush target");
+    directoryForSync = parent.st_ino;
+    failDirectorySync = true;
+    Hooks hooks;
+    hooks.report = std::make_shared<JobReportStore>();
+    const auto failed = Run(job, hooks);
+    failDirectorySync = false;
+    hooks.report->Seal();
+    const auto page = hooks.report->Page(0, 5);
+    const std::string selected = create ? "" : src.string();
+    Check(!failed.completed && page.errors.size() == 1 && fs::exists(dst) &&
+              page.outcomes.size() == 1 && page.outcomes.front().source == selected &&
+              page.outcomes.front().destination == dst.string() &&
+              OutcomeLabel(page.outcomes.front().status) == "Published; directory flush failed" &&
+              page.outcomes.front().detail.find("name change already applied") != std::string::npos &&
+              (!move || !fs::exists(src)),
+          "failed parent flush reports the applied name, not a successful job or an intact move source");
+    const auto retried = Run(job, {});
+    Check(!retried.completed && !retried.errors.empty() && fs::exists(dst) &&
+              (create || Read(dst) == "payload"),
+          "retry does not overwrite a previously applied name");
+    fs::remove(dst);
+    if (!create)
+      fs::remove(src);
+  }
+}
+}
 int main() {
   char temp[] = "/boot/home/Listi-operation-faults-XXXXXX";
   if (!mkdtemp(temp))
@@ -170,6 +318,9 @@ int main() {
   const auto root = fs::canonical(temp);
   const auto out = root / "out", source = root / "file", target = out / "file";
   fs::create_directory(out);
+  TestDirectoryClaims(root, out);
+  TestMovePermissions(root, out);
+  TestNameFlush(root, out);
   const std::string payload(1000, 'x');
   std::ofstream(source) << payload;
   std::ofstream(target) << "original";

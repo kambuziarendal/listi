@@ -83,7 +83,7 @@ bool PinnedDirectory::Flush(const std::function<void()> &checkpoint,
         mount = location.Path();
     }
     auto interruption = [&](const std::string &message) {
-      return RemovableCopyInterrupted(path + ": " + message, mount);
+      return RemovableCopyInterrupted(path + ": " + message, mount.empty() ? path : mount);
     };
     struct stat backing;
     auto check = [&] {
@@ -121,7 +121,7 @@ bool PinnedDirectory::Flush(const std::function<void()> &checkpoint,
   if ((error || closeError) && !unsupported)
     throw std::runtime_error(
         path + ": directory flush failed: " + strerror(error ? error : closeError) +
-        ". Durability after restart is unknown; source retained.");
+        ". Durability after restart is unknown.");
   Verify();
   return !unsupported;
 }
