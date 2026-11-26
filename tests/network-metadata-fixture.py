@@ -70,15 +70,6 @@ class MetadataDTP(DTPHandler):
         if not count or self.cmd != "RETR":
             return count
         path = Path(self.file_obj.name)
-        if path.name == "sample" and path.parent.name in {"identity-compare", "identity-copy"}:
-            replacement = path.with_suffix(".next")
-            if path.read_bytes() == b"aaaa":
-                parent = path.parent.stat()
-                replacement.write_bytes(b"bbbb")
-                os.utime(replacement, (MODIFIED, MODIFIED))
-                replacement.replace(path)  # New inode, same size and Modify.
-                os.utime(path.parent, ns=(parent.st_atime_ns, parent.st_mtime_ns))
-            return count
         if path.name != "changed":
             return count
         if path.stat().st_mtime_ns // 1_000_000_000 == MODIFIED:
@@ -117,6 +108,18 @@ class MetadataFTP(FTPHandler):
             return
         return super().ftp_MLSD(path)
 
+    def on_file_sent(self, filename):
+        # Small transfers can finish before pyftpdlib assigns DTPHandler.cmd.
+        # This callback runs before servicing the client's next stat/list.
+        path = Path(filename)
+        if path.name == "sample" and path.parent.name in {"identity-compare", "identity-copy"}:
+            replacement = path.with_suffix(".next")
+            if path.read_bytes() == b"aaaa":
+                parent = path.parent.stat()
+                replacement.write_bytes(b"bbbb")
+                os.utime(replacement, (MODIFIED, MODIFIED))
+                replacement.replace(path)  # New inode, same size and Modify.
+                os.utime(path.parent, ns=(parent.st_atime_ns, parent.st_mtime_ns))
 
     def ftp_RETR(self, path):
         file = Path(path)
