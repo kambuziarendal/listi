@@ -75,10 +75,7 @@ struct Writer {
       } else if (format == "xar")
         Check(LIBCALL(lib, archive_write_set_format_xar)(a));
       else {
-        Require(format == "tar" || format == "tgz" || format == "txz" ||
-                    format == "tbz2" || format == "tlz" || format == "tzst" ||
-                    format == "tlz4" || format == "tlzip" || format == "taz",
-                "Unknown archive format.");
+        Require(IsTarFormat(format), "Unknown archive format.");
         Check(LIBCALL(lib, archive_write_set_format_pax_restricted)(a));
         const char *filter = format == "tgz"     ? "gzip"
                              : format == "txz"   ? "xz"
@@ -277,6 +274,12 @@ struct Pack {
     }
   }
 };
+}
+
+bool IsTarFormat(const std::string &format) {
+  return format == "tar" || format == "tgz" || format == "txz" ||
+         format == "tbz2" || format == "tlz" || format == "tzst" ||
+         format == "tlz4" || format == "tlzip" || format == "taz";
 }
 
 void CreateArchiveOutput(int output, const std::string &format,

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "FolderHistory.h"
 #include "DirectoryFinalization.h"
+#include "EmptyAttribute.h"
 #include "Sha256.h"
 
 #include <OS.h>
@@ -323,14 +324,8 @@ void ApplyAttributes(int fd, const BMessage &entry, const std::atomic_bool &canc
     const auto *data = static_cast<const char *>(bytes);
     ssize_t offset = 0;
     if (length == 0) {
-      // BFS may defer a zero-byte attribute creation. Materialize an
-      // inode-backed attribute on the pinned output, then truncate it.
-      static constexpr char seed[kAttributeWriteChunk] = {};
-      Check(fs_write_attr(fd, name, type, 0, seed, sizeof(seed)) == sizeof(seed),
-            std::string("Create empty BFS attribute: ") + name);
-      const int attribute = fs_fopen_attr(fd, name, type, O_WRONLY | O_TRUNC);
-      Check(attribute >= 0, std::string("Truncate BFS attribute: ") + name);
-      Check(fs_close_attr(attribute) == 0, "Close BFS attribute");
+      RestoreEmptyAttribute(fd, name, type);
+      continue;
     }
     while (offset < length) {
       CheckCancel(cancel);
