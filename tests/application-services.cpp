@@ -100,7 +100,7 @@ int main() {
   assert(rejected.what == kSearchesSaved && rejected.HasString("error"));
   assert(rejected.GetInt64("revision", -1) == 4 && rejected.GetInt64("serial", -1) == 12);
 
-  for (const auto kind : {kSavePlaces, kSaveSearches}) {
+  for (const auto kind : {uint32(kSavePlaces), kSaveSearches}) {
     BMessage request(kind), edit;
     edit.AddString("name", "Work");
     edit.AddInt32("action", 0);
