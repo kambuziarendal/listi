@@ -1,5 +1,5 @@
 name listi
-version 0.38.0-43
+version 0.38.0-44
 architecture x86_64
 summary "Listi: a native Haiku file manager with four workspaces"
 description "Two resizable panels with folder trees, icons and previews, local archive browsing, SMB/SFTP/FTP connections, background file operations and inline conflict handling. Alpha / WIP for bug testing. Workspaces: Einn, Askr, Tvískipt and Smiðja. Data loss is possible; use at your own risk. Inspired by Directory Opus 5 workflows; independently implemented with Haiku BeAPI."

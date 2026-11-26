@@ -5,6 +5,7 @@
 #include "ArchiveBackend.h"
 #include "ArchiveJobChecks.h"
 #include "ArchiveJobs.h"
+#include "ArchiveMetadata.h"
 #include "ArchiveTextLocale.h"
 #include "ArchiveVolumes.h"
 #include "ArWriter.h"
@@ -137,10 +138,34 @@ la_ssize_t BudgetArchiveWrite(archive *archive, void *opaque,
   }
   return size;
 }
+// Read the original logical headers, not the ownership of extracted scratch files.
+void ReadTarOwners(DynamicLibrary &lib, archive *reader, archive_entry *entry,
+                   int status, const Hooks &hooks, TarOwners &owners) {
+  ArchiveMetadataBudget budget;
+  for (; status != ARCHIVE_EOF;
+       status = LIBCALL(lib, archive_read_next_header)(reader, &entry)) {
+    Require(status == ARCHIVE_OK, "Cannot read TAR ownership. Original archive retained.");
+    if (hooks.proceed && !hooks.proceed())
+      throw Cancelled();
+    Require(owners.size() < 200000, "Archive has too many entries.");
+    auto name = SafeArchivePath(LIBCALL(lib, archive_entry_pathname)(entry));
+    Require(!name.empty(), "Cannot preserve an explicit TAR root entry. Original archive retained.");
+    const char *user = LIBCALL(lib, archive_entry_uname)(entry);
+    const char *group = LIBCALL(lib, archive_entry_gname)(entry);
+    budget.Charge(sizeof(TarOwners::value_type) + ArchiveMetadataBudget::NodeOverhead +
+                  name.size() + (user ? strlen(user) : 0) + (group ? strlen(group) : 0));
+    TarOwner owner{LIBCALL(lib, archive_entry_uid)(entry),
+                   LIBCALL(lib, archive_entry_gid)(entry),
+                   user ? user : "", group ? group : ""};
+    Require(owners.emplace(std::move(name), std::move(owner)).second,
+            "Ambiguous TAR member ownership. Original archive retained.");
+  }
+}
 struct Pack {
   Writer &writer;
   const Hooks &hooks;
   bool zip;
+  const TarOwners &owners;
   size_t count = 0;
   std::vector<std::pair<std::string, struct stat>> snapshots;
   std::map<std::string, std::string> *isoMembers = nullptr;
@@ -186,8 +211,13 @@ struct Pack {
       else
         LIBCALL(writer.lib, archive_entry_set_pathname)(entry, name.c_str());
       LIBCALL(writer.lib, archive_entry_set_perm)(entry, before.st_mode & 0777);
-      LIBCALL(writer.lib, archive_entry_set_uid)(entry, 0);
-      LIBCALL(writer.lib, archive_entry_set_gid)(entry, 0);
+      const auto owner = owners.find(name);
+      LIBCALL(writer.lib, archive_entry_set_uid)(entry, owner == owners.end() ? 0 : owner->second.uid);
+      LIBCALL(writer.lib, archive_entry_set_gid)(entry, owner == owners.end() ? 0 : owner->second.gid);
+      if (owner != owners.end()) {
+        LIBCALL(writer.lib, archive_entry_set_uname)(entry, owner->second.user.c_str());
+        LIBCALL(writer.lib, archive_entry_set_gname)(entry, owner->second.group.c_str());
+      }
       if (S_ISDIR(before.st_mode))
         LIBCALL(writer.lib, archive_entry_set_size)(entry, 0);
       writer.Check(LIBCALL(writer.lib, archive_write_header)(writer.a, entry));
@@ -252,7 +282,7 @@ struct Pack {
 void CreateArchiveOutput(int output, const std::string &format,
                          const std::vector<std::string> &sources, int level,
                          bool encryptNames, const ArchiveSecretPtr &secret,
-                         const Hooks &hooks) {
+                         const Hooks &hooks, const TarOwners &owners) {
   if (format == "ar" || format == "ar-bsd")
     ArCreate(output, sources, format == "ar-bsd", hooks);
   else if (format == "rar5")
@@ -275,7 +305,7 @@ void CreateArchiveOutput(int output, const std::string &format,
     writer.Check(LIBCALL(writer.lib, archive_write_set_bytes_in_last_block)(writer.a, 1));
     writer.Check(LIBCALL(writer.lib, archive_write_open)(
         writer.a, &writer, nullptr, BudgetArchiveWrite, nullptr));
-    Pack pack{writer, hooks, format == "zip"};
+    Pack pack{writer, hooks, format == "zip", owners};
     std::map<std::string, std::string> isoMembers;
     if (format == "iso")
       pack.isoMembers = &isoMembers;
@@ -288,7 +318,8 @@ void CreateArchiveOutput(int output, const std::string &format,
   }
 }
 std::string DetectArchiveEditFormat(const std::string &path,
-                                   const Hooks &hooks) {
+                                   const Hooks &hooks, TarOwners *owners) {
+  ArchiveTextLocale locale;
   const auto parts = FindArchiveVolumes(path);
   Require(
       parts.kind == ArchiveVolumes::Single,
@@ -344,6 +375,8 @@ std::string DetectArchiveEditFormat(const std::string &path,
           "Archive is damaged or cannot be inspected for editing.");
   const int detected =
       LIBCALL(lib, archive_format)(reader.value) & ARCHIVE_FORMAT_BASE_MASK;
+  if (owners && detected == ARCHIVE_FORMAT_TAR)
+    ReadTarOwners(lib, reader.value, entry, status, hooks, *owners);
   if (detected == ARCHIVE_FORMAT_CAB)
     CabValidateEdit(fd.n);
   if (detected == ARCHIVE_FORMAT_LHA)

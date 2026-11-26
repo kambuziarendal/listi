@@ -2,6 +2,7 @@
 """Link native regression cases against the current Haiku build and run them."""
 from pathlib import Path
 import hashlib
+import io
 import os
 import platform
 import re
@@ -9,6 +10,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 
 
@@ -18,7 +20,7 @@ OUTPUT = ROOT / "build/native-audit-tests"
 REQUIRED = """
 file-operation-faults directory-finalization copy-crash-recovery worker-lifecycle virtual-operation-faults archive-read-scope
 operation-queue removable-copy disk-actions archive-move-scaling directory-delivery terminal-delivery search-filters
-archive-local-move-faults archive-local-move same-file-type folder-compare
+archive-local-move-faults archive-local-move tar-edit-ownership same-file-type folder-compare
 archive-editor-faults archive-editor archive-move-faults archive-move
 archive-folder-operations transfer-races archive-ambiguity archive-metadata archive-volumes
 sevenzip-backend archive-passwords archive-jobs ar-writer arj-writer rar-store
@@ -40,7 +42,7 @@ WRAPS = {
     "directory-finalization": ["fsync", "fs_stat_dev"],
     "archive-move-faults": ['renameat'],
     "archive-editor-faults": ['rename', 'renameat', 'fsync', 'fs_stat_dev'],
-    "archive-local-move-faults": ['renameat', 'unlink'],
+    "archive-local-move-faults": ['renameat', 'unlink', 'openat'],
     "file-operation-faults": ['lstat', 'fs_stat_dev', 'openat', 'write', 'unlinkat', 'stat', 'close', 'fsync', '_ZN5BNode10RemoveAttrEPKc'],
     "recovery-inventory": ["lstat", "access"],
     "copy-crash-recovery": ["openat", "renameat", "unlinkat", "fsync"],
@@ -83,6 +85,26 @@ def run_disk_actions(binary):
         raise
     image.unlink()
     folder.rmdir()
+
+
+def run_tar_edit_ownership(binary):
+    # Use an independent TAR writer/reader, not the production libarchive adapter.
+    with tempfile.TemporaryDirectory(prefix="listi-tar-owner-") as folder:
+        path = Path(folder) / "owners.tar.gz"
+        with tarfile.open(path, "w:gz") as archive:
+            for name in ("keep", "remove"):
+                header = tarfile.TarInfo(name)
+                header.uid, header.gid = 1001, 2002
+                header.uname, header.gname = "original-owner", "original-group"
+                header.size = len(name)
+                archive.addfile(header, io.BytesIO(name.encode()))
+        subprocess.run([binary, path], cwd=ROOT, check=True, timeout=90)
+        with tarfile.open(path, "r:gz") as archive:
+            assert archive.getnames() == ["keep"]
+            member = archive.getmember("keep")
+            assert (member.uid, member.gid) == (1001, 2002)
+            assert (member.uname, member.gname) == ("original-owner", "original-group")
+            assert archive.extractfile(member).read() == b"keep"
 
 
 def build_configuration():
@@ -162,6 +184,8 @@ def run():
         ], cwd=SRC, check=True)
         if name == "disk-actions" and not os.environ.get("LISTI_TEST_DISK_DEVICE"):
             run_disk_actions(binary)
+        elif name == "tar-edit-ownership":
+            run_tar_edit_ownership(binary)
         else:
             subprocess.run([binary], cwd=ROOT, check=True, timeout=90)
         print("PASS", name, flush=True)

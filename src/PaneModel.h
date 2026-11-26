@@ -19,6 +19,8 @@ struct PaneEntry {
   int kind = 0, transferState = 0;
   int64_t device = -1, node = -1;
   int64_t size = 0, modified = 0;
+  bool modifiedKnown = false;
+  std::string modifiedFraction, providerIdentity;
   float fraction = 0;
   std::shared_ptr<BBitmap> icon;
   bool iconRequested = false;
@@ -58,6 +60,7 @@ public:
   // Non-filesystem disk rows must never become file-operation sources.
   std::vector<std::string> SelectedFiles() const;
   std::map<std::string, Listi::NodeIdentity> SelectedLocalIdentities(size_t limit = SIZE_MAX) const;
+  std::map<std::string, Listi::FileEntry> SelectedRemoteEntries() const;
   const PaneEntry *OnlySelected() const;
   SelectionSummary Summary() const;
   void Select(int mode);

@@ -42,6 +42,11 @@ AFTER = "modify=20240229123000.1234567892;"
 
 
 class MetadataFS(AbstractedFS):
+    def format_list(self, basedir, listing, *args, **kwargs):
+        if Path(basedir).name == "list-only":
+            listing = [name for name in listing if not name.startswith(".")]
+        return super().format_list(basedir, listing, *args, **kwargs)
+
     def format_mlsx(self, basedir, listing, perms, facts, ignore_err=True):
         for row in super().format_mlsx(basedir, listing, perms, facts, ignore_err):
             attrs, name = row.split(b" ", 1)
@@ -76,8 +81,15 @@ class MetadataFTP(FTPHandler):
     passive_ports = [31270]
     use_sendfile = False
 
+    def pre_process_command(self, line, cmd, arg):
+        # This server shows dotfiles in list-all only for an explicit LIST -a.
+        if cmd == "LIST" and self.fs.cwd == "/list-all" and arg != "-a":
+            self.respond("501 Use LIST -a.")
+            return
+        return super().pre_process_command(line, cmd, arg)
+
     def ftp_MLSD(self, path):
-        if Path(path).name == "list-only":
+        if Path(path).name in ("list-only", "list-all"):
             self.respond("502 MLSD unavailable.")
             return
         return super().ftp_MLSD(path)
@@ -167,8 +179,10 @@ def main():
     ftp_root.mkdir()
     for name in FACTS:
         (ftp_root / name).write_bytes(b"fixture contents\n")
-    (ftp_root / "list-only").mkdir()
-    (ftp_root / "list-only" / "name").write_bytes(b"fixture contents\n")
+    for directory in ("mlsd", "list-only", "list-all"):
+        (ftp_root / directory).mkdir()
+        (ftp_root / directory / "name").write_bytes(b"fixture contents\n")
+        (ftp_root / directory / ".settings").write_bytes(b"hidden\n")
     changed = ftp_root / "changed"
     changed.write_bytes(b"d" * (2 * 1024 * 1024))
     os.utime(changed, (MODIFIED, MODIFIED))

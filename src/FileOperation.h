@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #pragma once
+#include "FileEntry.h"
 #include <functional>
 #include <map>
 #include <memory>
@@ -83,6 +84,8 @@ struct Job {
   std::function<void()> checkDestinationWindow;
   // For confirmed Trash restores, bind the previewed original paths as well as the entries.
   std::map<std::string, std::string> restoreTargets;
+  // Metadata from the selected pane row, not a later lookup at the same URL.
+  std::map<std::string, FileEntry> expectedRemoteDeletes;
 };
 class JobReportStore;
 struct Hooks {
@@ -131,6 +134,7 @@ struct Result {
   bool bulkRenameRecoveryNeeded = false;
   // Do not reread this folder automatically after a removable transfer lost it.
   std::string interruptedCopyFolder;
+  int partialDeletions = 0;
   int partialCopies = 0; // Selected folders changed but not fully copied.
 };
 Result Run(const Job &, const Hooks &);

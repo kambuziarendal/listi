@@ -29,6 +29,36 @@ std::string Read(const std::string &path) {
   std::ifstream file(path);
   return {std::istreambuf_iterator<char>(file), {}};
 }
+void CheckFtpCompare(const std::string &ftp, const std::string &local) {
+  auto folder = local + "/ftp-compare";
+  std::filesystem::create_directory(folder);
+  std::ofstream(folder + "/name") << "fixture contents\n";
+  for (const std::string mode : {"mlsd", "list-all", "list-only"}) {
+    const auto remote = ChildLocation(ftp, mode);
+    std::string hidden;
+    ReadFile(ChildLocation(remote, ".settings"),
+             [&](const char *p, size_t n) { hidden.append(p, n); });
+    Expect(hidden == "hidden\n", remote + " has a readable dotfile");
+    auto result = CompareFolders({folder, remote, true});
+    Expect(result.verified == 1, remote + " verifies the visible file pair");
+    if (mode != "list-only") {
+      Expect(result.complete == (mode == "mlsd") && result.different == 1 &&
+                 result.entries.front().relative == ".settings" &&
+                 result.entries.front().state == CompareState::OnlyRight,
+             mode + " reports the visible dotfile as a difference");
+    } else {
+      Expect(!result.complete && !result.different &&
+                 result.error.find("Only entries shown") != std::string::npos,
+             "legacy FTP listing cannot certify a whole tree");
+      std::ofstream(folder + "/.settings") << hidden;
+      result = CompareFolders({remote, folder, true});
+      Expect(!result.complete && !result.different && result.verified == 1 &&
+                 result.unverified == 1 &&
+                 result.entries.front().state == CompareState::Unverified,
+             "absence from legacy FTP LIST is not a proven difference");
+    }
+  }
+}
 }
 
 int main() {
@@ -53,6 +83,7 @@ int main() {
   const std::string local = pattern;
   int status = 0;
   try {
+    CheckFtpCompare(ftp, local);
     // An explicit epoch is not the same as an omitted or malformed fact.
     const auto epoch = Stat(ftp, "epoch");
     Expect(epoch.modifiedKnown && epoch.modified == 0, "MLSD explicit epoch");

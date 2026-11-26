@@ -8,6 +8,7 @@
 #include "RecoveryInventory.h"
 #include "UnavailableVolume.h"
 #include "VirtualFile.h"
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -116,6 +117,24 @@ bool Same(const FileEntry &a, const FileEntry &b) {
   return a.directory == b.directory && a.link == b.link && a.size == b.size &&
          a.sizeKnown == b.sizeKnown && a.SameModification(b);
 }
+bool MatchesDeleteSelection(const FileEntry &selected, const FileEntry &current) {
+  return selected.directory == current.directory && selected.link == current.link &&
+         (!selected.sizeKnown || (current.sizeKnown && selected.size == current.size)) &&
+         (!selected.modifiedKnown || selected.SameModification(current)) &&
+         (selected.providerIdentity.empty() || selected.providerIdentity == current.providerIdentity);
+}
+
+// Enumeration order may change even when the source tree does not.
+bool SameListing(std::vector<FileEntry> &before, std::vector<FileEntry> &after) {
+  auto byName = [](const FileEntry &a, const FileEntry &b) { return a.name < b.name; };
+  std::sort(before.begin(), before.end(), byName);
+  std::sort(after.begin(), after.end(), byName);
+  return std::equal(before.begin(), before.end(), after.begin(), after.end(),
+                    [](const FileEntry &a, const FileEntry &b) {
+                      return a.name == b.name && Same(a, b) &&
+                             a.providerIdentity == b.providerIdentity;
+                    });
+}
 std::string TransferIdentity(const std::string &path) {
   auto location = ParseLocation(path);
   const unsigned defaultPort = location.scheme == "sftp"   ? 22
@@ -187,6 +206,7 @@ struct Runner {
   bool replaceAll = false, skipAll = false;
   bool selectedDirectory = false;
   size_t visited = 0;
+  size_t deletedEntries = 0;
   size_t publishedEntries = 0, omittedEntries = 0;
   std::string firstOmission;
   void RecordPartialRoot(const std::string &dst, size_t publishedBefore,
@@ -367,6 +387,12 @@ struct Runner {
         result.copyLimitations = true;
         RecordOutcome({src, dst, "filesystem limitations", std::move(limitations)});
       }
+      std::vector<std::string> nowOmitted;
+      auto current = ListFiles(src, control, &nowOmitted);
+      std::sort(omitted.begin(), omitted.end());
+      std::sort(nowOmitted.begin(), nowOmitted.end());
+      if (omitted != nowOmitted || !SameListing(entries, current))
+        throw std::runtime_error("Source folder changed during transfer: " + src);
       if (result.skipped == skippedBefore && omittedEntries == omittedBefore) {
         if (hooks.fileDone)
           hooks.fileDone(src, dst);
@@ -616,7 +642,7 @@ struct Runner {
       std::rethrow_exception(failure);
     }
   }
-  void DeleteTree(const std::string &p, int depth = 0) {
+  void DeleteTree(const std::string &p, const FileEntry &expected, int depth = 0) {
     if (depth > 128 || ++visited > 200000)
       throw std::runtime_error("Folder tree exceeds deletion limit");
     auto c = Control(p);
@@ -624,10 +650,15 @@ struct Runner {
     FileEntry e;
     if (!StatFile(p, e, c))
       throw std::runtime_error("Entry no longer exists");
-    if (e.directory && !e.link)
-      for (auto &child : ListFiles(p, c))
-        DeleteTree(child.path, depth + 1);
-    RemoveFile(p, e.directory && !e.link, c);
+    if (!MatchesDeleteSelection(expected, e))
+      throw std::runtime_error("Entry changed before deletion: " + p);
+    const bool directory = expected.directory && !expected.link;
+    if (directory)
+      for (const auto &child : ListFiles(p, c))
+        DeleteTree(child.path, child, depth + 1);
+    RemoveFile(p, directory, c);
+    ++deletedEntries;
+    RecordOutcome({p, "", "deleted", ""});
   }
 };
 } // namespace
@@ -679,7 +710,20 @@ Result RunVirtual(const Job &job, const Hooks &hooks) {
           if (ParseLocation(source).Archive())
             throw std::runtime_error(
                 "Use Delete from archive to remove entries from a writable archive");
-          runner.DeleteTree(source);
+          const auto expected = job.expectedRemoteDeletes.find(source);
+          if (expected == job.expectedRemoteDeletes.end())
+            throw std::runtime_error("No confirmed network entry. Refresh and select it again.");
+          const auto deletedBefore = runner.deletedEntries;
+          try {
+            runner.DeleteTree(source, expected->second);
+          } catch (...) {
+            if (runner.deletedEntries != deletedBefore) {
+              ++runner.result.partialDeletions;
+              runner.RecordOutcome({source, "", "partially deleted",
+                                    "Deletion stopped after removing entries from this folder."});
+            }
+            throw;
+          }
         } else if (job.action == Action::Move || job.action == Action::Rename) {
           auto from = ParseLocation(source), to = ParseLocation(dst);
           if (from.Archive() || from.Local() ||

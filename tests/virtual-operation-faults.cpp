@@ -57,7 +57,7 @@ bool failCommit = false, failRollback = false, failPartCleanup = false,
      failBackupCleanup = false, cancelAfterBackup = false, cancelled = false,
      mutateDestination = false, loseBackupReply = false, loseCommitReply = false;
 const std::string destination = "sftp://fixture/out/input";
-std::string unreadableSource;
+std::string unreadableSource, refuseRemoval;
 enum class LocalPublish { Unexpected, Limited, FlushFailure, CancelAfterPublish };
 LocalPublish localPublish = LocalPublish::Unexpected;
 bool expectPrivatePublication = false;
@@ -139,7 +139,10 @@ bool StatNetwork(const Location &l, FileEntry &entry, const TransferControl &c,
   entry.SetModification(it->second.modified, it->second.nanoseconds);
   return true;
 }
-std::vector<FileEntry> ListNetwork(const Location &l, const TransferControl &c) {
+std::vector<FileEntry> ListNetwork(const Location &l, const TransferControl &c,
+                                   ListingMethod *method) {
+  if (method)
+    *method = ListingMethod::Provider;
   std::vector<FileEntry> out;
   for (auto &item : files) {
     if (ParentLocation(item.first) == l.URL()) {
@@ -192,7 +195,18 @@ void ChangeNetwork(const Location &l, const char *action,
     files.emplace(source, Remote{"", 1, 0, true});
     return;
   }
+  if (std::string(action) == "rmdir") {
+    for (const auto &child : files)
+      if (ParentLocation(child.first) == source)
+        throw std::runtime_error("Directory not empty");
+    if (!files.at(source).directory)
+      throw std::runtime_error("Not a directory");
+    files.erase(source);
+    return;
+  }
   if (std::string(action) == "remove") {
+    if (source == refuseRemoval || files.at(source).directory)
+      throw std::runtime_error("Deletion refused");
     if ((suffix(source, ".part") && failPartCleanup) ||
         (suffix(source, ".previous") && failBackupCleanup))
       throw std::runtime_error("injected cleanup failure");
@@ -591,6 +605,71 @@ int main() {
         "nested omissions propagate to the selected folder without hiding healthy receipts");
   rmdir(nestedBlocked.c_str());
   rmdir(nested.c_str());
+  reset();
+  const auto arrived = folder + "/new.txt";
+  Hooks changing = hooks;
+  changing.fileDone = [&](const std::string &path, const std::string &) {
+    ++done;
+    if (path == sibling)
+      std::ofstream(arrived) << "new arrival";
+  };
+  r = RunVirtual(folderJob, changing);
+  check(!r.completed && r.partialCopies == 1 && done == 1 && hasReceipt(r) &&
+            errorHas(r, "Source folder changed") && files.count(remoteSibling) &&
+            !files.count(remoteFolder + "/new.txt") && access(arrived.c_str(), F_OK) == 0,
+        "concurrent source addition retains delivered child but suppresses root completion");
+  unlink(arrived.c_str());
+
+  const std::string tree = "sftp://fixture/in/selection";
+  const auto first = tree + "/a";
+  const auto second = tree + "/b";
+  reset();
+  files[tree] = {"old file"};
+  Job deletion{Action::Delete, {tree}, ""};
+  FileEntry selected;
+  if (!StatFile(tree, selected))
+    return 1;
+  deletion.expectedRemoteDeletes[tree] = selected;
+  files[tree].nanoseconds = 500;
+  r = RunVirtual(deletion, hooks);
+  check(!r.completed && errorHas(r, "changed before deletion") && files.count(tree) &&
+            r.outcomes.empty(),
+        "queued deletion preserves a same-size file with a changed revision");
+  files[tree] = Remote{"", 1, 0, true};
+  files[first] = {"keep this"};
+  files[second] = {"keep this too"};
+  r = RunVirtual(deletion, hooks);
+  check(errorHas(r, "changed before deletion") && !r.completed &&
+            r.outcomes.empty() && files.count(tree) && files.count(first) && files.count(second),
+        "queued file deletion cannot expand to a replacement tree");
+  r = RunVirtual(Job{Action::Delete, {tree}, ""}, hooks);
+  check(!r.completed && !r.errors.empty() && r.outcomes.empty() && files.count(tree) &&
+            files.count(first) && files.count(second),
+        "a network delete missing its confirmed selection fails closed");
+  if (!StatFile(tree, deletion.expectedRemoteDeletes.at(tree)))
+    return 1;
+  for (bool cancel : {true, false}) {
+    files[first] = {"remove first"};
+    Hooks interrupt = hooks;
+    interrupt.report = std::make_shared<JobReportStore>();
+    interrupt.proceed = [&] { return !cancel || files.count(first); };
+    refuseRemoval = cancel ? "" : second;
+    r = RunVirtual(deletion, interrupt);
+    const auto rows = interrupt.report->Page(0, 10);
+    check(!r.completed && r.cancelled == cancel && r.partialDeletions == 1 &&
+              rows.errors.size() == (cancel ? 0u : 1u) && !files.count(first) &&
+              files.count(second) && files.count(tree) && rows.outcomes.size() == 2 &&
+              rows.outcomes[0].source == first && rows.outcomes[0].status == "deleted" &&
+              rows.outcomes[1].source == tree && rows.outcomes[1].status == "partially deleted",
+          cancel ? "cancelled deletion reports acknowledged child and partial root"
+                 : "failed deletion reports acknowledged child and partial root");
+  }
+  refuseRemoval.clear();
+  r = RunVirtual(deletion, hooks);
+  check(r.completed == 1 && !r.partialDeletions && r.errors.empty() && !files.count(second) &&
+            !files.count(tree) && r.outcomes.size() == 2 &&
+            r.outcomes.back().source == tree && r.outcomes.back().status == "deleted",
+        "completed network deletion reports each acknowledged removal");
   unlink(sibling.c_str());
   rmdir(folder.c_str());
   unlink(source.c_str()); rmdir(dir);

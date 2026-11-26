@@ -140,9 +140,9 @@ struct Stage {
 };
 // The outer job owns the user-facing report. Inner copies must return failures
 // directly to the caller that decides whether a snapshot is safe to publish.
-Hooks PrivateCopyHooks(const Hooks &hooks) {
+Hooks InnerCopyHooks(const Hooks &hooks, bool privateDestination) {
   auto inner = hooks;
-  inner.privateStaging = true;
+  inner.privateStaging = privateDestination;
   inner.report.reset();
   inner.fileDone = {};
   inner.fileFailed = {};
@@ -271,6 +271,26 @@ void CopyMetadata(const std::string &fromPath, const std::string &toPath,
   }
   Require(status == B_ENTRY_NOT_FOUND, "Cannot enumerate archive metadata.");
 }
+// Apply the same subtree removal or rename to the original member headers.
+// Extraction identities belong to our scratch directory, not the TAR users.
+void ChangeTarOwnerPaths(TarOwners &owners, const std::string &from,
+                         const std::string &to = {}) {
+  auto change = [&](TarOwners::iterator it) {
+    auto member = owners.extract(it);
+    if (!to.empty()) {
+      member.key().replace(0, from.size(), to);
+      Require(owners.insert(std::move(member)).inserted,
+              "Conflicting TAR ownership after rename. Original archive retained.");
+    }
+  };
+  auto exact = owners.find(from);
+  if (exact != owners.end())
+    change(exact);
+  const auto prefix = from + "/";
+  auto it = owners.lower_bound(prefix);
+  while (it != owners.end() && it->first.compare(0, prefix.size(), prefix) == 0)
+    change(it++);
+}
 void VerifyMovedEntry(const std::string &, const std::string &,
                       const TransferControl &, bool exactTree = false, unsigned depth = 0);
 Result RunArchiveEdit(const Job &job, const Hooks &hooks,
@@ -284,7 +304,8 @@ Result RunArchiveEdit(const Job &job, const Hooks &hooks,
             "Choose an archive change first.");
     Guards(job);
     VerifyArchiveSets(job);
-    const auto format = DetectArchiveEditFormat(job.destination, hooks);
+    TarOwners owners;
+    const auto format = DetectArchiveEditFormat(job.destination, hooks, &owners);
     Require(format == job.archiveFormat,
             "Archive format changed after selection.");
     const auto passwordGeneration = ArchivePasswordGeneration();
@@ -311,7 +332,7 @@ Result RunArchiveEdit(const Job &job, const Hooks &hooks,
       if (hooks.progress)
         hooks.progress(job.destination, bytes);
     };
-    auto internal = PrivateCopyHooks(hooks);
+    auto internal = InnerCopyHooks(hooks, true);
     internal.proceed = [&] {
       check();
       return true;
@@ -351,6 +372,7 @@ Result RunArchiveEdit(const Job &job, const Hooks &hooks,
       Require(!lstat(target.c_str(), &st),
               "An archive entry selected for removal no longer exists.");
       RemoveTree(target, internal);
+      ChangeTarOwnerPaths(owners, relative);
     }
     for (const auto &path : job.archiveFolders) {
       check();
@@ -372,6 +394,7 @@ Result RunArchiveEdit(const Job &job, const Hooks &hooks,
       Require(
           entry.MoveTo(&parent, Leaf(to).c_str(), false) == B_OK,
           "Could not rename or move the archive entry. Existing entries were not replaced.");
+      ChangeTarOwnerPaths(owners, from, to);
     }
     if (!job.sources.empty()) {
       const auto relative = MemberPath(job.archivePath),
@@ -434,7 +457,7 @@ Result RunArchiveEdit(const Job &job, const Hooks &hooks,
     Require(!secret || format == "zip" || format == "7z",
             "The writer cannot preserve this archive's password protection.");
     CreateArchiveOutput(output.n, format, Children(work), job.archiveLevel,
-                        secret && format == "7z", secret, internal);
+                        secret && format == "7z", secret, internal, owners);
     Require(!fsync(output.n), "Cannot flush updated archive to disk.");
     CopyMetadata(job.destination, outputPath, internal);
     if (format == "iso")
@@ -461,6 +484,16 @@ Result RunArchiveEdit(const Job &job, const Hooks &hooks,
         if (hooks.progress)
           hooks.progress(job.destination, 0);
       };
+      if (!owners.empty()) {
+        TarOwners written;
+        Require(DetectArchiveEditFormat(outputPath, internal, &written) == format,
+                "Updated TAR format changed. Original archive retained.");
+        for (const auto &[name, owner] : owners) {
+          const auto it = written.find(name);
+          Require(it != written.end() && it->second == owner,
+                  "Updated TAR ownership differs for " + name + ". Original archive retained.");
+        }
+      }
       const auto root = OpenArchive(outputPath, verify);
       Require(
           !root.empty(),
@@ -597,7 +630,7 @@ Result RunArchiveLocalMove(const Job &job, const Hooks &hooks) {
   try {
     const auto source = ParseLocation(job.sources.front());
     const auto target = ParseLocation(job.destination);
-    auto internal = PrivateCopyHooks(hooks);
+    auto internal = InnerCopyHooks(hooks, true);
     internal.proceed = [&] {
       if (hooks.proceed && !hooks.proceed())
         throw Cancelled();
@@ -651,7 +684,7 @@ Result RunArchiveLocalMove(const Job &job, const Hooks &hooks) {
       copy.copyForArchiveMove = true;
       FreezeLocalJob(copy, job.destination);
       copied = true;
-      auto written = Run(copy, internal);
+      auto written = Run(copy, InnerCopyHooks(internal, false));
       stage.CheckInterrupted(written);
       if (written.cancelled)
         throw Cancelled();
@@ -763,7 +796,7 @@ Result RunArchiveMove(const Job &job, const Hooks &hooks) {
     const auto target = ParseLocation(job.destination);
     if (source.Local() || target.Local())
       return RunArchiveLocalMove(job, hooks);
-    auto internal = PrivateCopyHooks(hooks);
+    auto internal = InnerCopyHooks(hooks, true);
     auto sourceGuard = PrepareArchiveEditJob(source.archive, {}, job.sources);
     auto checkSource = [&] {
       if (hooks.proceed && !hooks.proceed())
@@ -988,7 +1021,7 @@ Result RunArchiveJob(const Job &job, const Hooks &hooks) {
       Job copy;
       copy.sources = selected;
       copy.destination = PathOf(stage.dir);
-      auto guarded = PrivateCopyHooks(tracked);
+      auto guarded = InnerCopyHooks(tracked, true);
       // Defer all member completion notifications until atomic publication.
       // Otherwise the UI leaves successfully extracted members marked failed.
       if (hooks.fileDone)

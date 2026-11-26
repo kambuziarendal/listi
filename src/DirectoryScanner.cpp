@@ -250,6 +250,9 @@ public:
         item.AddInt64("size", entry.size);
         item.AddBool("sizeKnown", entry.sizeKnown);
         item.AddInt64("date", entry.modified);
+        item.AddBool("modifiedKnown", entry.modifiedKnown);
+        item.AddString("modifiedFraction", entry.modifiedFraction.c_str());
+        item.AddString("providerIdentity", entry.providerIdentity.c_str());
         if (icons)
           ReadVirtualIcon(entry.name, entry.directory, iconPixels, item);
         batch.AddMessage("entry", &item);

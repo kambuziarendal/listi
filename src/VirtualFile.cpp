@@ -94,7 +94,10 @@ Connection GetConnection(const std::string &url) {
 }
 std::vector<FileEntry> ListFiles(const std::string &p,
                                  const TransferControl &c,
-                                 std::vector<std::string> *omitted) {
+                                 std::vector<std::string> *omitted,
+                                 ListingMethod *method) {
+  if (method)
+    *method = ListingMethod::Provider;
   c.Check();
   if (InterruptedVolumes().ContainsResolved(p))
     throw std::runtime_error(p + ": " + kUnavailableVolumeText);
@@ -102,7 +105,7 @@ std::vector<FileEntry> ListFiles(const std::string &p,
   if (l.Archive())
     return ListArchive(l, c);
   if (!l.Local())
-    return ListNetwork(l, c);
+    return ListNetwork(l, c, method);
   DIR *dir = opendir(p.c_str());
   if (!dir)
     Fail(p);

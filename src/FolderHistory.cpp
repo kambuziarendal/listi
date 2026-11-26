@@ -322,13 +322,27 @@ void ApplyAttributes(int fd, const BMessage &entry, const std::atomic_bool &canc
     const auto type = attr.GetUInt32("type", 0);
     const auto *data = static_cast<const char *>(bytes);
     ssize_t offset = 0;
-    do {
+    if (length == 0) {
+      // BFS may defer a zero-byte attribute creation. Materialize an
+      // inode-backed attribute on the pinned output, then truncate it.
+      static constexpr char seed[kAttributeWriteChunk] = {};
+      Check(fs_write_attr(fd, name, type, 0, seed, sizeof(seed)) == sizeof(seed),
+            std::string("Create empty BFS attribute: ") + name);
+      const int attribute = fs_fopen_attr(fd, name, type, O_WRONLY | O_TRUNC);
+      Check(attribute >= 0, std::string("Truncate BFS attribute: ") + name);
+      Check(fs_close_attr(attribute) == 0, "Close BFS attribute");
+    }
+    while (offset < length) {
       CheckCancel(cancel);
       const auto count = std::min(length - offset, kAttributeWriteChunk);
       Check(fs_write_attr(fd, name, type, offset, data, count) == count, "Restore BFS attribute");
       offset += count;
-      if (count) data += count;
-    } while (offset < length);
+      data += count;
+    }
+    attr_info restored{};
+    Check(fs_stat_attr(fd, name, &restored) == 0, std::string("Verify BFS attribute: ") + name);
+    Require(restored.type == type && restored.size == length,
+            std::string("Restored BFS attribute type or size differs: ") + name);
   }
 }
 

@@ -168,6 +168,28 @@ PaneModel::SelectedLocalIdentities(size_t limit) const {
   return nodes;
 }
 
+std::map<std::string, Listi::FileEntry> PaneModel::SelectedRemoteEntries() const {
+  std::map<std::string, Listi::FileEntry> revisions;
+  for (const auto *row : visible) {
+    if (row->parent || !IsSelected(row->path) || row->path.empty() ||
+        row->path.front() == '/')
+      continue;
+    auto [it, inserted] = revisions.try_emplace(row->path);
+    if (!inserted)
+      throw std::runtime_error("Duplicate selected row. Refresh the folder: " + row->path);
+    auto &entry = it->second;
+    entry.directory = row->directory;
+    entry.link = row->kind == 2;
+    entry.sizeKnown = row->sizeKnown;
+    entry.size = row->size;
+    entry.modifiedKnown = row->modifiedKnown;
+    entry.modified = row->modified;
+    entry.modifiedFraction = row->modifiedFraction;
+    entry.providerIdentity = row->providerIdentity;
+  }
+  return revisions;
+}
+
 const PaneEntry *PaneModel::OnlySelected() const {
   if (selection.size() != 1)
     return nullptr;
