@@ -47,6 +47,15 @@ struct Remote {
   std::string identity;
 };
 std::map<std::string, Remote> files;
+bool foldDirectoryNames = false;
+std::string StoragePath(std::string path) {
+  constexpr char alias[] = "/drafts";
+  const auto at = path.find(alias);
+  if (foldDirectoryNames && path.rfind("sftp://fixture/out/", 0) == 0 && at != std::string::npos &&
+      (path.size() == at + sizeof(alias) - 1 || path[at + sizeof(alias) - 1] == '/'))
+    path.replace(at, sizeof(alias) - 1, "/Drafts");
+  return path;
+}
 bool corruptUpload = false, denyReadback = false, cancelReadback = false;
 bool cancelAtReadyCheck = false, cancelAfterStore = false, hideStoredPart = false;
 bool uncertainRollback = false, replaceStageOnRead = false;
@@ -137,7 +146,7 @@ bool StatNetwork(const Location &l, FileEntry &entry, const TransferControl &c,
   if ((hideStoredPart && suffix(l.URL(), ".part") && files.count(l.URL())) ||
       (uncertainRollback && commitFailed && c.cleanup && l.URL() == destination))
     throw std::runtime_error("FTP LIST cannot confirm absence");
-  auto it = files.find(l.URL());
+  auto it = files.find(StoragePath(l.URL()));
   if (it == files.end()) return false;
   entry.path = l.URL(); entry.name = LocationLeaf(entry.path);
   entry.directory = it->second.directory;
@@ -173,7 +182,7 @@ void ReadNetwork(const Location &l, const DataSink &sink, const TransferControl 
     c.Check();
   }
   if (denyReadback && suffix(l.URL(), ".part")) throw std::runtime_error("readback denied");
-  auto &data = files.at(l.URL()).data;
+  auto &data = files.at(StoragePath(l.URL())).data;
   if (commitFailed)
     cleanupReadBytes += data.size();
   if (growSourceOnRead && l.URL() == "sftp://fixture/in/input") {
@@ -194,7 +203,7 @@ void UploadNetwork(const std::string &local, const Location &l, const TransferCo
   std::ifstream stream(local);
   std::string data(std::istreambuf_iterator<char>(stream), {});
   if (corruptUpload && !data.empty()) data.front() ^= 1;
-  files[l.URL()] = {truncateUpload ? data.substr(0, data.size() / 2) : data, 1};
+  files[StoragePath(l.URL())] = {truncateUpload ? data.substr(0, data.size() / 2) : data, 1};
   if (mutateDestination) files[destination] = {"concurrent edit", 2};
   c.Tick(data.size());
   if (cancelAfterStore)
@@ -203,7 +212,7 @@ void UploadNetwork(const std::string &local, const Location &l, const TransferCo
 void ChangeNetwork(const Location &l, const char *action,
                    const std::string &target, const TransferControl &c) {
   c.Check();
-  std::string source = l.URL();
+  std::string source = StoragePath(l.URL());
   if (std::string(action) == "mkdir") {
     files.emplace(source, Remote{"", 1, 0, true});
     return;
@@ -233,9 +242,9 @@ void ChangeNetwork(const Location &l, const char *action,
   }
   if (suffix(source, ".previous") && failRollback)
     throw std::runtime_error("injected rename failure");
-  if (!files.count(source) || files.count(target))
+  if (!files.count(source) || files.count(StoragePath(target)))
     throw std::runtime_error("rename precondition");
-  files[target] = files.at(source); files.erase(source);
+  files[StoragePath(target)] = files.at(source); files.erase(source);
   if ((loseBackupReply && suffix(target, ".previous")) ||
       (loseCommitReply && suffix(source, ".part")))
     throw std::runtime_error("reply lost after server rename");
@@ -472,7 +481,7 @@ int main() {
   partial = RunVirtual({Action::Copy, {sourceFolder}, downloadFolder}, hooks);
   localPublish = LocalPublish::Unexpected;
   check(!partial.completed && done == 1 && partial.partialCopies == 1 &&
-            errorHas(partial, nestedRemote.c_str()) && errorHas(partial, "FTP LIST") &&
+            errorHas(partial, nestedRemote.c_str()) && errorHas(partial, "Only entries shown") &&
             partial.outcomes.size() == 2 && partial.outcomes.front().source == delivered &&
             partial.outcomes.front().status == "copied" && partial.outcomes.back().source == sourceFolder &&
             partial.outcomes.back().status == "partial",
@@ -613,6 +622,32 @@ int main() {
   reset(); r = RunVirtual({Action::Copy, {"sftp://fixture:22/out/input"}, "sftp://fixture/out"}, hooks);
   check(!r.errors.empty() && !r.completed && files.at(destination).data == "old contents",
         "explicit default port cannot bypass self-copy rejection");
+  const std::string in = "sftp://fixture/in/selection";
+  const std::string out = "sftp://fixture/out/selection";
+  for (bool fold : {false, true}) {
+    reset();
+    foldDirectoryNames = fold;
+    files[in] = {"", 1, 0, true};
+    files[in + "/Drafts"] = files[in + "/drafts"] = {"", 1, 0, true};
+    files[in + "/Drafts/first"] = {"first"};
+    files[in + "/drafts/second"] = {"second"};
+    // The selected root merges into an existing folder in both modes.
+    files[out] = {"", 1, 0, true};
+    files[out + "/unrelated"] = {"existing"};
+    r = RunVirtual({Action::Copy, {in}, "sftp://fixture/out"}, hooks);
+    const bool kept = files.at(out + "/unrelated").data == "existing" &&
+                      files.at(out + "/Drafts/first").data == "first";
+    check(kept && (fold ?
+              (!r.completed && r.partialCopies == 1 && !r.errors.empty() &&
+               !files.count(out + "/drafts") && !files.count(out + "/Drafts/second") &&
+               r.outcomes.size() == 2 && r.outcomes.front().destination == out + "/Drafts/first" &&
+               r.outcomes.back().status == "partial") :
+              (r.completed == 1 && r.errors.empty() && files.count(out + "/drafts") &&
+               files.at(out + "/drafts/second").data == "second")),
+          fold ? "case-insensitive target stops a folder collision and retains delivered receipt" :
+                 "case-sensitive target preserves both folders and ordinary existing-root merge");
+  }
+  foldDirectoryNames = false;
   const auto folder = std::string(dir) + "/upload-folder";
   const auto blocked = folder + "/unavailable";
   const auto sibling = folder + "/sibling";

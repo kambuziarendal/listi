@@ -9,6 +9,7 @@
 #include <Directory.h>
 #include <Entry.h>
 #include <Path.h>
+#include <fcntl.h>
 #include <fstream>
 #include <iostream>
 #include <sys/stat.h>
@@ -47,6 +48,10 @@ int main(){
   mkdir((input+"packed").c_str(),0700);
   const std::string nestedPayload(160000, 'x');
   std::ofstream(input+"packed/nested") << nestedPayload;
+  // The positive TAR→ZIP fixtures use whole-second times representable by both.
+  const timespec stamp[2]={{1700000000,0},{1700000000,0}};
+  for(const auto &path:{input+"item",input+"folder/nested",input+"folder/empty",input+"folder"})
+    if (utimensat(AT_FDCWD,path.c_str(),stamp,0)) return 2;
   for(const auto &format:WritableArchiveFormats()){
    const bool flat = format.id == "ar";
    const bool hasEmpty = !flat && format.id != "cab";

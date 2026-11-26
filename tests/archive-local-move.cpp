@@ -10,6 +10,7 @@
 #include <Directory.h>
 #include <Entry.h>
 #include <Path.h>
+#include <fcntl.h>
 #include <fstream>
 #include <iostream>
 #include <sys/stat.h>
@@ -50,6 +51,15 @@ int main(){
    const bool flat = format.id == "ar";
    const bool hasEmpty = !flat && format.id != "cab";
    auto input=local(hasEmpty),target=archive(format.id,{seed}),out=output();
+   if (format.id == "arj" || format.id == "cab") {
+     // DOS-style archives cannot represent a private directory mode.
+     if (chmod((input+"/folder").c_str(),0755) ||
+         (hasEmpty && chmod((input+"/folder/empty").c_str(),0755))) return 2;
+   }
+   if (format.id == "cab") {
+     // libarchive decodes writable Cabinet files with mode 0666.
+     if (chmod((input+"/item").c_str(),0666) || chmod((input+"/folder/nested").c_str(),0666)) return 2;
+   }
    const std::string secondInput = input + (flat ? "/folder/nested" : "/folder");
    const auto name = Leaf(secondInput);
    auto item = ChildLocation(target,"item"), second = ChildLocation(target,name);
@@ -66,6 +76,23 @@ int main(){
    if (hasEmpty) check(exists(out+"/folder/empty"),format.id+" empty directory restored");
    check(!exists(item)&&!exists(second)&&content(ChildLocation(target,"keep"))=="retained",format.id+" removes only selected archive members");
    check(PrepareArchiveEditTarget(ParseLocation(target).archive).archiveFormat==format.id,format.id+" archive format retained after both moves");
+  }
+  {
+   auto input=local(), target=archive("zip",{seed});
+   const auto item=input+"/item";
+   const timespec stamp[2]={{1700000000,125000000},{1700000000,125000000}};
+   if (utimensat(AT_FDCWD,item.c_str(),stamp,0)) return 2;
+   auto result=workerRun(move({item},target));
+   check(result.completed==1 && !exists(item) && result.copyLimitations && !result.outcomes.empty(),
+         "local-to-ZIP records reduced timestamp precision in the job receipt");
+  }
+  {
+   auto input=local(), target=archive("arj",{seed});
+   const auto item=input+"/item";
+   if (chmod(item.c_str(),0600)) return 2;
+   auto result=workerRun(move({item},target));
+   check(!result.completed && !result.errors.empty() && content(item)=="payload",
+         "DOS format cannot discard the private local mode and remove the source");
   }
   for(const auto &format:WritableArchiveFormats())if(format.encryption){
    SetArchivePasswordPrompt([](const std::string&,bool,const TransferControl&){return std::make_shared<ArchiveSecret>("Listi-move-test");});

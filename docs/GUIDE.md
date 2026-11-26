@@ -316,12 +316,19 @@ over, **Failed** includes the problem, and **Not processed** is not a success.
 Other providers can give a job-level error or a recovery path rather than
 confirm the state of every file. Concurrent external edits are not prevented.
 
-On FTP servers that only support legacy directory listings (LIST), a name
-missing from the list may still exist. Listi will not use that result to
-authorize a rename or upload to a supposedly unused name. When downloading a
-folder, check the individual file receipts: the server may have hidden other
-children, even if the folder looked empty. If you need a complete copy, use a
-connection that can enumerate the whole directory before removing the source.
+FTP and FTPS servers choose which entries to list, even with MLSD. Folder
+downloads and comparisons can verify individual visible files, not that the
+server showed every file. A missing name does not by itself mean the name is
+free. FTP rename cannot atomically promise not to replace a destination;
+Listi therefore refuses direct FTP and FTPS rename and same-server move. Check any reported recovery
+path after a failed upload, even if a directory listing does not show it.
+
+Avoid concurrent writers to the same destination during FTP upload. Creating a new name requires an exact lookup that distinguishes
+absence from an ambiguous failure; not all FTP servers provide one. The
+final server rename is not an atomic no-replace operation. Haiku's native
+same-volume move to an unused local name likewise checks the name before a
+separate rename. A competing process creating that name in between is not
+protected by the check.
 
 **Cancel job** requests cancellation of the running job only. In Details you
 can cancel a selected waiting job, or choose **Cancel all** to discard waiting
@@ -555,7 +562,18 @@ capabilities. A successful listing does not establish member-data integrity.
   transaction and have no automatic crash-resume journal.
 - Archive/local moves refuse unsupported metadata and file types rather than
   silently discarding them, including BFS attributes, source symlinks, special
-  files and some hard-link cases. Use Copy to retain originals.
+  files and some hard-link cases. Use Copy to retain originals. TAR moves check numeric ownership, mode and
+  modification time before removing selected members. A move can leave a
+  verified content copy and retain the source when the destination cannot
+  represent its metadata. Editing a TAR with recognized extended ACLs,
+  xattrs, sparse records or file flags is refused; a rebuild is not a
+  bit-for-bit preservation of arbitrary vendor-specific PAX headers.
+  When moving local files into other formats, Listi checks the permissions
+  read back and the modification time at the precision the format supports.
+  Job Details records a loss of time precision: generally whole seconds,
+  two-second file times for ARJ and CAB, and no time on implicit CAB folders.
+  Conflicting TAR directory metadata stops a merge rather than changing the
+  existing destination folder.
 - With the p7zip RAR5 reader installed, Listi writes single-volume RAR5 using
   Store (no compression). Ordinary existing RAR5 files, including supported
   compressed members, can be edited if their metadata can be retained.

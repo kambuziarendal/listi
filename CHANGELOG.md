@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.38.0-46 (private alpha candidate)
+
+- FTP folder receipts and SHA-256 comparisons describe visible entries only. Direct FTP rename/move is refused because the protocol lacks a no-replace guarantee. Uncertain upload stages and backups remain identifiable for recovery.
+- Directory copies check for aliases between different source folders. An SFTP directory listing alone cannot establish that a name is unused.
+- TAR moves verify local numeric ownership before removing the original; TAR edits preserve member mode and fractional modification time, and reject unsupported extended metadata.
+- A move that would break a hard link by copying and deleting now stops before replacing the target. Copy-and-delete moves also check ownership and special mode bits.
+
 ## 0.38.0-45 (private alpha candidate)
 
 - FTP operations distinguish an entry that is absent from one the server may have hidden. An incomplete listing cannot authorize a rename, certify a folder download, or hide a possible recovery file.

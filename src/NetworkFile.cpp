@@ -323,7 +323,7 @@ struct CurlSession {
       return 1;
     }
   }
-  CURLcode Perform(bool missingOK = false, bool accessDeniedOK = false) {
+  CURLcode Perform(bool missingOK = false, bool accessDeniedOK = false, bool quoteErrorOK = false) {
     control.Check();
     if (control.cleanup) {
       // NOSIGNAL with a synchronous DNS resolver cannot bound a lookup.
@@ -341,7 +341,8 @@ struct CurlSession {
           "Terminal, or select a trusted known_hosts file in Connect / "
           "Advanced.");
     if (r != CURLE_OK && !(missingOK && r == CURLE_REMOTE_FILE_NOT_FOUND) &&
-        !(accessDeniedOK && r == CURLE_REMOTE_ACCESS_DENIED))
+        !(accessDeniedOK && r == CURLE_REMOTE_ACCESS_DENIED) &&
+        !(quoteErrorOK && r == CURLE_QUOTE_ERROR))
       throw std::runtime_error(error[0] ? error
                                         : LIBCALL(lib, curl_easy_strerror)(r));
     return r;
@@ -496,6 +497,51 @@ FileEntry ParseList(const std::string &line, const Location &l, bool mlsd) {
   e.path = ChildLocation(l.URL(), e.name);
   return e;
 }
+// MLSD is a listing, not an exact lookup. MLST asks the server to
+// resolve the requested spelling, including on case-insensitive volumes.
+bool StatFtpName(const Location &l, FileEntry &entry, const TransferControl &control) {
+  auto root = l;
+  root.path = "/";
+  CurlSession probe(root, control);
+  std::string response;
+  probe.sink = [&](const char *data, size_t size) {
+    if (control.cleanup)
+      control.cleanup->Consume(size);
+    if (size > 65536 - response.size())
+      throw std::runtime_error("FTP name lookup response is too large.");
+    response.append(data, size);
+  };
+  probe.Set(CURLOPT_HEADERFUNCTION, &CurlSession::Write);
+  probe.Set(CURLOPT_HEADERDATA, &probe);
+  probe.Set(CURLOPT_NOBODY, 1L);
+  probe.Command("MLST " + l.path.substr(1)); // Relative to the login directory.
+  probe.Set(CURLOPT_QUOTE, probe.commands);
+  const auto status = probe.Perform(false, false, true);
+  std::istringstream headers(response);
+  std::string line, facts, last;
+  while (std::getline(headers, line)) {
+    if (!line.empty() && line.back() == '\r')
+      line.pop_back();
+    if (!line.empty())
+      last = line;
+    if (line.size() > 1 && line.front() == ' ') {
+      const auto split = line.find(' ', 1);
+      if (split != std::string::npos && line[split - 1] == ';')
+        facts = line.substr(1, split - 1);
+    }
+  }
+  if (status == CURLE_OK && !facts.empty()) {
+    // Use the requested leaf, not the server's potentially absolute pathname.
+    entry = ParseList(facts + " " + LocationLeaf(l.URL()), ParseLocation(ParentLocation(l.URL())), true);
+    if (!entry.name.empty())
+      return true;
+  }
+  // RFC 3659 also uses 550 for denied access; never treat the code
+  // alone, unrecognized/localized text, or unsupported MLST as absence.
+  if (status == CURLE_QUOTE_ERROR && last == "550 No such file or directory.")
+    return false;
+  throw std::runtime_error("FTP server did not confirm the state of this name: " + l.URL());
+}
 } // namespace
 bool NetworkAvailable(const std::string &s) {
   return s == "smb" ? SMB().Available() : Curl().Available();
@@ -635,9 +681,16 @@ bool StatNetwork(const Location &l, FileEntry &e, const TransferControl &c,
       return entry.name == name;
     });
     if (item == items.end()) {
-      if (method == ListingMethod::FtpList)
-        throw std::runtime_error("FTP LIST did not show this name and cannot confirm its absence: " + url);
-      return false;
+      if (VisibleEntriesOnly(method))
+        return StatFtpName(l, e, c);
+      // SFTP listing names may differ from the spelling the server resolves.
+      // A successful NOBODY request proves the name resolves, but cannot
+      // supply its directory/link type. Do not invent that metadata.
+      CurlSession probe(l, c);
+      probe.Set(CURLOPT_NOBODY, 1L);
+      if (probe.Perform(true) == CURLE_REMOTE_FILE_NOT_FOUND)
+        return false;
+      throw std::runtime_error("SFTP name resolves but its entry type is not verified: " + url);
     }
     entry = std::move(*item);
   }

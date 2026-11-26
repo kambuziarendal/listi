@@ -272,40 +272,40 @@ void CopyMetadata(const std::string &fromPath, int output,
 }
 // Apply the same subtree removal or rename to the original member headers.
 // Extraction identities belong to our scratch directory, not the TAR users.
-void ChangeTarOwnerPaths(TarOwners &owners, const std::string &from,
+void ChangeTarMetadataPaths(TarMemberMap &metadata, const std::string &from,
                          const std::string &to = {}) {
-  auto change = [&](TarOwners::iterator it) {
-    auto member = owners.extract(it);
+  auto change = [&](TarMemberMap::iterator it) {
+    auto member = metadata.extract(it);
     if (!to.empty()) {
       member.key().replace(0, from.size(), to);
-      Require(owners.insert(std::move(member)).inserted,
+      Require(metadata.insert(std::move(member)).inserted,
               "Conflicting TAR ownership after rename. Original archive retained.");
     }
   };
-  auto exact = owners.find(from);
-  if (exact != owners.end())
+  auto exact = metadata.find(from);
+  if (exact != metadata.end())
     change(exact);
   const auto prefix = from + "/";
-  auto it = owners.lower_bound(prefix);
-  while (it != owners.end() && it->first.compare(0, prefix.size(), prefix) == 0)
+  auto it = metadata.lower_bound(prefix);
+  while (it != metadata.end() && it->first.compare(0, prefix.size(), prefix) == 0)
     change(it++);
 }
 // A TAR move crosses a private filesystem snapshot, whose ownership is not
 // the source metadata. Map each selected header into the final member namespace.
-TarOwners MovedTarOwners(const Job &remove, const Job &add, const Hooks &hooks) {
-  TarOwners moved;
-  if (!IsTarFormat(remove.archiveFormat) || !IsTarFormat(add.archiveFormat))
+TarMemberMap MovedTarMetadata(const Job &remove, const std::string &targetFolder, const Hooks &hooks) {
+  TarMemberMap moved;
+  if (!IsTarFormat(remove.archiveFormat))
     return moved;
-  TarOwners source;
+  TarMemberMap source;
   Require(DetectArchiveEditFormat(remove.destination, hooks, &source) == remove.archiveFormat,
           "The source TAR format changed. Source entries were retained.");
   ArchiveMetadataBudget budget;
   for (const auto &from : remove.archiveRemove) {
     const auto leaf = Leaf(from);
-    const auto to = add.archivePath.empty() ? leaf : Join(add.archivePath, leaf);
-    auto transfer = [&](TarOwners::iterator it) {
+    const auto to = targetFolder.empty() ? leaf : Join(targetFolder, leaf);
+    auto transfer = [&](TarMemberMap::iterator it) {
       auto entry = source.extract(it);
-      budget.Charge(sizeof(TarOwners::value_type) + ArchiveMetadataBudget::NodeOverhead +
+      budget.Charge(sizeof(TarMemberMap::value_type) + ArchiveMetadataBudget::NodeOverhead +
                     to.size() + entry.key().size() - from.size() +
                     entry.mapped().user.size() + entry.mapped().group.size());
       entry.key().replace(0, from.size(), to);
@@ -325,24 +325,81 @@ TarOwners MovedTarOwners(const Job &remove, const Job &add, const Hooks &hooks) 
   return moved;
 }
 
-void VerifyTarOwners(const std::string &path, const std::string &format,
-                     const TarOwners &expected, const Hooks &hooks) {
+// A local extraction deliberately does not apply privileged permissions. A non-TAR
+// writer has no verified ownership contract. Reject unrepresentable selections
+// before publishing anything, and check the actual destination before cleanup.
+void RequirePortableTarMove(const TarMemberMap &members, bool toLocal) {
+  for (const auto &[name, member] : members) {
+    Require(!(member.mode & 07000) && member.user.empty() && member.group.empty() &&
+                (toLocal || (member.uid == 0 && member.gid == 0)),
+            "Cannot preserve selected permissions or ownership for " + name + ". Use Copy; source retained.");
+  }
+}
+// Only local sources use the documented non-TAR timestamp precision.
+void VerifyPortableMove(const TarMemberMap &members, const std::string &target,
+                        const TransferControl &control, const std::string &localToFormat = {},
+                        Result *receipt = nullptr) {
+  auto location = ParseLocation(target);
+  const bool dosTime = localToFormat == "arj" || localToFormat == "cab";
+  bool reducedTime = false;
+  for (const auto &[name, member] : members) {
+    control.Check();
+    bool matches = false;
+    if (location.Local()) {
+      struct stat st;
+      matches = !lstat(Join(target, name).c_str(), &st) &&
+                st.st_uid == member.uid && st.st_gid == member.gid &&
+                (st.st_mode & 07777) == member.mode &&
+                st.st_mtim.tv_sec == member.modified && st.st_mtim.tv_nsec == member.nanoseconds;
+    } else {
+      location.path = "/" + name;
+      FileEntry entry;
+      const bool exists = StatFile(location.URL(), entry, control);
+      Require(exists && !entry.link && entry.directory == member.directory,
+              "Destination member type differs for " + name + ". Source entries were retained.");
+      Require(entry.permissions == member.mode,
+              "Destination permissions differ for " + name + ". Source entries were retained.");
+      matches = entry.modifiedKnown && entry.modified == member.modified &&
+                entry.ModifiedNanoseconds() == member.nanoseconds;
+      if (!matches && !localToFormat.empty()) {
+        const auto expectedSeconds = dosTime ? member.modified - (member.modified % 2) : member.modified;
+        // No timestamp field for CAB's implicit directories. DOS writers store
+        // even seconds; other archive writers must at least reproduce the second.
+        matches = (entry.modifiedKnown && entry.modified == expectedSeconds) ||
+                  (localToFormat == "cab" && member.directory && !entry.modifiedKnown);
+        reducedTime |= matches;
+      }
+    }
+    Require(matches, "Destination timestamp or ownership differs for " + name +
+                         ". Source entries were retained.");
+  }
+  if (reducedTime && receipt) {
+    receipt->copyLimitations = true;
+    receipt->outcomes.push_back({{}, target, "archive timestamp precision",
+                                localToFormat == "cab" ? "CAB keeps file times to two seconds and stores no folder times." :
+                                dosTime ? "ARJ keeps modification times to two seconds." :
+                                "Non-TAR modification times verified to the second; finer precision was not retained."});
+  }
+}
+
+void VerifyTarMetadata(const std::string &path, const std::string &format,
+                     const TarMemberMap &expected, const Hooks &hooks) {
   if (expected.empty())
     return;
-  TarOwners actual;
+  TarMemberMap actual;
   Require(DetectArchiveEditFormat(path, hooks, &actual) == format,
           "Updated TAR format changed. Source entries were retained.");
-  for (const auto &[name, owner] : expected) {
+  for (const auto &[name, member] : expected) {
     const auto found = actual.find(name);
-    Require(found != actual.end() && found->second == owner,
-            "Updated TAR ownership differs for " + name + ". Source entries were retained.");
+    Require(found != actual.end() && found->second == member,
+            "Updated TAR metadata or ownership differs for " + name + ". Source entries were retained.");
   }
 }
 void VerifyMovedEntry(const std::string &, const std::string &,
                       const TransferControl &, bool exactTree = false, unsigned depth = 0);
 Result RunArchiveEdit(const Job &job, const Hooks &hooks,
                       const std::function<void()> &beforePublish = {},
-                      const TarOwners &incomingOwners = {}) {
+                      const TarMemberMap &incomingMetadata = {}) {
   Result result;
   try {
     Require(!job.destination.empty() && !job.destinationFolder.empty(),
@@ -352,12 +409,18 @@ Result RunArchiveEdit(const Job &job, const Hooks &hooks,
             "Choose an archive change first.");
     Guards(job);
     VerifyArchiveSets(job);
-    TarOwners owners;
-    const auto format = DetectArchiveEditFormat(job.destination, hooks, &owners);
+    TarMemberMap metadata;
+    const auto format = DetectArchiveEditFormat(job.destination, hooks, &metadata);
     Require(format == job.archiveFormat,
             "Archive format changed after selection.");
-    for (const auto &[name, owner] : incomingOwners)
-      owners.insert_or_assign(name, owner);
+    for (const auto &[name, member] : incomingMetadata) {
+      const auto existing = metadata.find(name);
+      Require(existing == metadata.end() || !member.directory || !existing->second.directory ||
+                  existing->second == member,
+              "Cannot merge directories with conflicting TAR metadata: " + name +
+                  ". Both original entries were retained.");
+      metadata.insert_or_assign(name, member);
+    }
     const auto passwordGeneration = ArchivePasswordGeneration();
     const auto originalSet = FindArchiveVolumes(job.destination);
     ArchiveEditProtection protection(originalSet.files.front().identity,
@@ -422,7 +485,7 @@ Result RunArchiveEdit(const Job &job, const Hooks &hooks,
       Require(!lstat(target.c_str(), &st),
               "An archive entry selected for removal no longer exists.");
       RemoveTree(target, internal);
-      ChangeTarOwnerPaths(owners, relative);
+      ChangeTarMetadataPaths(metadata, relative);
     }
     for (const auto &path : job.archiveFolders) {
       check();
@@ -444,7 +507,7 @@ Result RunArchiveEdit(const Job &job, const Hooks &hooks,
       Require(
           entry.MoveTo(&parent, Leaf(to).c_str(), false) == B_OK,
           "Could not rename or move the archive entry. Existing entries were not replaced.");
-      ChangeTarOwnerPaths(owners, from, to);
+      ChangeTarMetadataPaths(metadata, from, to);
     }
     if (!job.sources.empty()) {
       const auto relative = MemberPath(job.archivePath),
@@ -488,6 +551,22 @@ Result RunArchiveEdit(const Job &job, const Hooks &hooks,
           relative = "/" + relative;
         return hooks.conflict(job.destination + " → " + relative);
       };
+      if (!metadata.empty()) {
+        adding.fileDone = [&](const std::string &, const std::string &destination) {
+          const auto name = destination.substr(work.size() + 1);
+          auto replaced = metadata.find(name);
+          if (replaced == metadata.end() || replaced->second.directory || incomingMetadata.count(name))
+            return;
+          // A replacement is not the old member. In particular, never attach
+          // its set-id bits to different bytes.
+          struct stat st;
+          Require(!lstat(destination.c_str(), &st) && S_ISREG(st.st_mode),
+                  "Cannot verify replacement TAR member: " + name);
+          replaced->second.mode = st.st_mode & 0777;
+          replaced->second.modified = st.st_mtim.tv_sec;
+          replaced->second.nanoseconds = st.st_mtim.tv_nsec;
+        };
+      }
       auto added = Run(add, adding);
       stage.CheckInterrupted(added);
       if (added.cancelled)
@@ -507,7 +586,7 @@ Result RunArchiveEdit(const Job &job, const Hooks &hooks,
     Require(!secret || format == "zip" || format == "7z",
             "The writer cannot preserve this archive's password protection.");
     CreateArchiveOutput(output.n, format, Children(work), job.archiveLevel,
-                        secret && format == "7z", secret, internal, owners);
+                        secret && format == "7z", secret, internal, metadata);
     Require(!fsync(output.n), "Cannot flush updated archive to disk.");
     CopyMetadata(job.destination, output.n, internal);
     if (format == "iso")
@@ -534,7 +613,7 @@ Result RunArchiveEdit(const Job &job, const Hooks &hooks,
         if (hooks.progress)
           hooks.progress(job.destination, 0);
       };
-      VerifyTarOwners(outputPath, format, owners, internal);
+      VerifyTarMetadata(outputPath, format, metadata, internal);
       const auto root = OpenArchive(outputPath, verify);
       Require(
           !root.empty(),
@@ -679,6 +758,12 @@ Result RunArchiveLocalMove(const Job &job, const Hooks &hooks) {
       VerifyArchiveSets(job);
       return true;
     };
+    TarMemberMap fromTar;
+    if (target.Local()) {
+      const auto removal = PrepareArchiveEditJob(source.archive, {}, job.sources);
+      fromTar = MovedTarMetadata(removal, "", internal);
+      RequirePortableTarMove(fromTar, true);
+    }
     std::unique_ptr<LocalMoveTree> localSource;
     if (source.Local())
       localSource = std::make_unique<LocalMoveTree>(
@@ -705,11 +790,17 @@ Result RunArchiveLocalMove(const Job &job, const Hooks &hooks) {
           ChildLocation(job.destination, LocationLeaf(path)));
     }
     Job published;
+    TarMemberMap movedMetadata;
     std::unique_ptr<LocalMoveTree> localDestination;
     if (target.Archive()) {
       auto add =
           PrepareArchiveEditJob(target.archive, additions, {}, target.path);
-      auto written = RunArchiveEdit(add, internal);
+      movedMetadata = localSource->TarMetadata(add.archivePath);
+      const bool tarTarget = IsTarFormat(add.archiveFormat);
+      if (!tarTarget)
+        RequirePortableTarMove(movedMetadata, false);
+      auto written = tarTarget ? RunArchiveEdit(add, internal, {}, movedMetadata)
+                               : RunArchiveEdit(add, internal);
       stage.CheckInterrupted(written);
       if (written.cancelled)
         throw Cancelled();
@@ -759,6 +850,12 @@ Result RunArchiveLocalMove(const Job &job, const Hooks &hooks) {
     // publication atomic. Archive destinations have cheap fingerprint guards.
     verify.proceed = localDestination ? hooks.proceed : destinationGuard;
     destinationGuard();
+    if (!target.Archive())
+      VerifyPortableMove(fromTar, job.destination, verify);
+    else if (IsTarFormat(published.archiveFormat))
+      VerifyTarMetadata(target.archive, published.archiveFormat, movedMetadata, internal);
+    else
+      VerifyPortableMove(movedMetadata, job.destination, verify, published.archiveFormat, &result);
     for (size_t i = 0; i < additions.size(); ++i)
       VerifyMovedEntry(additions[i], destinations[i], verify);
     destinationGuard();
@@ -875,8 +972,12 @@ Result RunArchiveMove(const Job &job, const Hooks &hooks) {
         additions.push_back(Join(snapshot, LocationLeaf(path)));
       auto add =
           PrepareArchiveEditJob(target.archive, additions, {}, target.path);
-      const auto movedOwners = MovedTarOwners(sourceGuard, add, internal);
-      auto written = RunArchiveEdit(add, internal, {}, movedOwners);
+      const auto movedMetadata = MovedTarMetadata(sourceGuard, add.archivePath, internal);
+      const bool tarTarget = IsTarFormat(add.archiveFormat);
+      if (!tarTarget)
+        RequirePortableTarMove(movedMetadata, false);
+      auto written = tarTarget ? RunArchiveEdit(add, internal, {}, movedMetadata)
+                               : RunArchiveEdit(add, internal);
       stage.CheckInterrupted(written);
       if (written.cancelled)
         throw Cancelled();
@@ -897,9 +998,12 @@ Result RunArchiveMove(const Job &job, const Hooks &hooks) {
         Guards(published);
         return true;
       };
-      VerifyTarOwners(target.archive, add.archiveFormat, movedOwners, internal);
       TransferControl verify;
       verify.proceed = internal.proceed;
+      if (tarTarget)
+        VerifyTarMetadata(target.archive, add.archiveFormat, movedMetadata, internal);
+      else
+        VerifyPortableMove(movedMetadata, job.destination, verify);
       for (const auto &path : job.sources)
         VerifyMovedEntry(Join(snapshot, LocationLeaf(path)),
                          ChildLocation(job.destination, LocationLeaf(path)),

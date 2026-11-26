@@ -38,9 +38,9 @@ for protocol in protocols:
   actual=(share/'input').read_bytes() if (share/'input').exists() else None
   previous=[x.read_bytes() for x in share.glob('*.previous')]
   destination_safe=actual==wanted
-  if protocol=='smb' and mode in ('backup-reply','publish-before'):
-   # SMB cannot enforce a cleanup deadline. Keep the original under its
-   # reported recovery name instead of trying an unbounded rollback.
+  if protocol in ('smb','ftp') and mode in ('backup-reply','publish-before'):
+   # SMB recovery has no hard deadline; FTP cannot restore without a
+   # clobber race. Both must retain and report the exact backup.
    backups=list(share.glob('*.previous'))
    destination_safe=(actual is None and len(backups)==1 and previous==[wanted]
                      and backups[0].name in p.stdout)

@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -29,6 +30,7 @@ bool failStageClose = false, failDirectorySync = false;
 int stageForClose = -1;
 ino_t directoryForSync = -1;
 bool deviceGone = false, reportFat = false, synthesizeStageMode = false;
+std::string simulatedHardlink;
 int failures = 0;
 
 void Check(bool ok, const char *label) {
@@ -112,6 +114,8 @@ extern "C" int __wrap_close(int fd) {
 extern "C" int __real_lstat(const char *, struct stat *);
 extern "C" int __wrap_lstat(const char *path, struct stat *st) {
   const int status = __real_lstat(path, st);
+  if (!status && simulatedHardlink == path)
+    st->st_nlink = 2;
   // FAT synthesizes execute bits for .tmp stages but not the final .png.
   if (status == 0 && synthesizeStageMode && strstr(path, "/.listi-copy-") && S_ISREG(st->st_mode))
     st->st_mode |= S_IXUSR | S_IXGRP | S_IXOTH;
@@ -283,6 +287,144 @@ int main() {
   Hooks replace;
   replace.conflict = [](const std::string &) { return Decision::Replace; };
   Job move{Action::Move, {source.string()}, out.string()};
+
+  {
+    const char *hardlinkVolume = getenv("LISTI_HARDLINK_TEST_ROOT");
+    const char *preparedPair = getenv("LISTI_HARDLINK_TEST_PAIR");
+    const fs::path parent = preparedPair ? fs::path(preparedPair)
+                            : hardlinkVolume ? fs::path(hardlinkVolume) : root;
+    if (preparedPair) {
+      struct stat a{}, b{};
+      const auto entry = parent / "entry", sibling = parent / "sibling";
+      if (lstat(entry.c_str(), &a) || lstat(sibling.c_str(), &b) ||
+          !S_ISREG(a.st_mode) || !S_ISREG(b.st_mode) || a.st_nlink < 2 ||
+          a.st_dev != b.st_dev || a.st_ino != b.st_ino ||
+          Read(entry) != "source bytes" || Read(sibling) != "source bytes") {
+        std::cerr << "Invalid prepared hard-link pair: " << parent << '\n';
+        return 2;
+      }
+    }
+    std::string scratch = (parent / "Listi-hardlink-XXXXXX").string();
+    if (!mkdtemp(scratch.data()))
+      return 2;
+    const fs::path base(scratch), destination = base / "out";
+    const auto fixture = preparedPair ? parent : base;
+    const auto selected = fixture / "entry", sibling = fixture / "sibling";
+    const auto existing = destination / "entry";
+    fs::create_directory(destination);
+    if (!preparedPair)
+      std::ofstream(selected) << "source bytes";
+    std::ofstream(existing) << "destination bytes";
+    const bool realLinks = preparedPair || link(selected.c_str(), sibling.c_str()) == 0;
+    if (!realLinks) {
+      const int error = errno;
+      // Haiku libroot linkat translates a driver's B_UNSUPPORTED into EPERM.
+      Check(!hardlinkVolume && (error == B_UNSUPPORTED || error == ENOTSUP ||
+                                error == EOPNOTSUPP || error == ENOSYS || error == EPERM),
+            "hard link creation only skipped for an unsupported default volume");
+      std::cout << "NOTE no real hard-link coverage on " << base << ": "
+                << strerror(error) << "; exercising simulated link count instead\n";
+      simulatedHardlink = selected.string();
+    }
+
+    struct stat original{}, other{}, current{}, targetAfter{}, siblingAfter{};
+    const bool recorded = stat(selected.c_str(), &original) == 0 &&
+                          stat(existing.c_str(), &other) == 0;
+    const auto refused = Run({Action::Move, {selected.string()}, destination.string()}, replace);
+    simulatedHardlink.clear();
+    const bool retained = recorded && !refused.completed && !refused.errors.empty() &&
+              refused.errors.front().find("hard-linked") != std::string::npos &&
+              !stat(selected.c_str(), &current) && current.st_dev == original.st_dev &&
+              current.st_ino == original.st_ino && Read(selected) == "source bytes" &&
+              !stat(existing.c_str(), &targetAfter) && targetAfter.st_dev == other.st_dev &&
+              targetAfter.st_ino == other.st_ino && Read(existing) == "destination bytes";
+    Check(retained, "replacement move refuses a multiply linked source before altering either file");
+    if (preparedPair && !retained)
+      return 1; // Leave the test paths intact for inspection.
+    if (realLinks) {
+      Check(!stat(sibling.c_str(), &siblingAfter) && siblingAfter.st_dev == original.st_dev &&
+                siblingAfter.st_ino == original.st_ino && Read(sibling) == "source bytes",
+            "outside hard link still shares the original source inode and bytes");
+      fs::remove(existing);
+      const auto moved = Run({Action::Move, {selected.string()}, destination.string()}, {});
+      Check(moved.completed == 1 && moved.errors.empty() && !fs::exists(selected) &&
+                !stat(existing.c_str(), &targetAfter) && targetAfter.st_dev == original.st_dev &&
+                targetAfter.st_ino == original.st_ino && Read(existing) == "source bytes" &&
+                !stat(sibling.c_str(), &siblingAfter) && siblingAfter.st_dev == original.st_dev &&
+                siblingAfter.st_ino == original.st_ino && Read(sibling) == "source bytes",
+            "moving to a free name on the same volume preserves the linked inode");
+      if (preparedPair) {
+        // Return this exact link to its original, now vacant name. Never
+        // recursively clean a directory containing a caller-supplied link.
+        if (moved.completed != 1 || !moved.errors.empty() ||
+            lstat(existing.c_str(), &current) || current.st_dev != original.st_dev ||
+            current.st_ino != original.st_ino || !lstat(selected.c_str(), &current) ||
+            errno != ENOENT)
+          return 1;
+        const auto restored = Run({Action::Move, {existing.string()}, parent.string()}, {});
+        if (restored.completed != 1 || !restored.errors.empty() ||
+            lstat(selected.c_str(), &current) || current.st_dev != original.st_dev ||
+            current.st_ino != original.st_ino || Read(selected) != "source bytes" ||
+            lstat(sibling.c_str(), &siblingAfter) || siblingAfter.st_dev != original.st_dev ||
+            siblingAfter.st_ino != original.st_ino || Read(sibling) != "source bytes")
+          return 1;
+      }
+    }
+    if (preparedPair) {
+      fs::remove(destination);
+      fs::remove(base);
+    } else {
+      fs::remove_all(base);
+    }
+  }
+
+  {
+    // An existing root forces a copy-and-cleanup merge. Cover an existing
+    // file, an exclusively published new child, a new directory and a link.
+    const auto incoming = root / "move-owners", merged = out / "move-owners";
+    fs::create_directories(incoming / "sub");
+    fs::create_directory(merged);
+    std::ofstream(incoming / "replacement") << "new";
+    std::ofstream(merged / "replacement") << "old";
+    std::ofstream(incoming / "sub" / "new") << "nested";
+    fs::create_symlink("replacement", incoming / "link");
+    const uid_t owner = geteuid() == 0 ? 1003 : geteuid();
+    const gid_t group = geteuid() == 0 ? 2003 : getegid();
+    const auto metadata = [&](const fs::path &path, mode_t mode) {
+      struct stat st;
+      return !lstat(path.c_str(), &st) && st.st_uid == owner &&
+             st.st_gid == group && (st.st_mode & 07777) == mode;
+    };
+    for (const auto &path : {incoming / "replacement", incoming / "sub" / "new",
+                             incoming / "sub", incoming / "link"})
+      if (geteuid() == 0 && lchown(path.c_str(), owner, group))
+        return 2;
+    if (chmod((incoming / "replacement").c_str(), 04754) ||
+        chmod((incoming / "sub").c_str(), 03755) ||
+        chmod((incoming / "sub" / "new").c_str(), 02755))
+      return 2;
+    const auto copied = Run({Action::Move, {incoming.string()}, out.string()}, replace);
+    struct stat linkInfo;
+    Check(copied.completed == 1 && copied.errors.empty() && !fs::exists(incoming) &&
+              Read(merged / "replacement") == "new" && Read(merged / "sub" / "new") == "nested" &&
+              metadata(merged / "replacement", 04754) && metadata(merged / "sub", 03755) &&
+              metadata(merged / "sub" / "new", 02755) &&
+              !lstat((merged / "link").c_str(), &linkInfo) && S_ISLNK(linkInfo.st_mode) &&
+              linkInfo.st_uid == owner && linkInfo.st_gid == group &&
+              fs::read_symlink(merged / "link") == "replacement",
+          "same-volume copy-and-cleanup preserves moved owners and special bits");
+
+    fs::create_directory(incoming);
+    std::ofstream(incoming / "unmoved") << "source";
+    if (chmod(incoming.c_str(), 01755) || chmod(merged.c_str(), 0755))
+      return 2;
+    const auto refused = Run({Action::Move, {incoming.string()}, out.string()}, replace);
+    Check(!refused.completed && !refused.errors.empty() &&
+              Read(incoming / "unmoved") == "source" && !fs::exists(merged / "unmoved"),
+          "move refuses conflicting merged directory metadata before copying children");
+    fs::remove_all(incoming);
+    fs::remove_all(merged);
+  }
 
   deniedStage = (out / ".listi-copy-XXXXXX").string();
   auto result = Run(move, replace);

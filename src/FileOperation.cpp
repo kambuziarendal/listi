@@ -299,6 +299,27 @@ struct Runner {
   }
 
   bool deferCompletion = false, recoverableMove = false;
+  // A same-volume merge or replacement can end in unlink, unlike Copy or
+  // a cross-volume move that keeps the intact original in its volume's Trash.
+  bool UnlinksMoveSource() const { return deferCompletion && !recoverableMove; }
+  static bool SameOwner(const struct stat &a, const struct stat &b) {
+    return a.st_uid == b.st_uid && a.st_gid == b.st_gid;
+  }
+  void SetMoveOwner(int fd, const struct stat &source, const std::string &path) {
+    if (!UnlinksMoveSource())
+      return;
+    struct stat current;
+    if (fstat(fd, &current) ||
+        (!SameOwner(source, current) && fchown(fd, source.st_uid, source.st_gid)))
+      Fail(path + ": cannot preserve move ownership");
+  }
+  void VerifyMoveMetadata(const struct stat &source, const struct stat &target,
+                          const std::string &path) {
+    if (UnlinksMoveSource() &&
+        (!SameOwner(source, target) || ((source.st_mode ^ target.st_mode) & 07000)))
+      throw std::runtime_error(path +
+          ": move ownership or special permissions differ; source retained");
+  }
   struct CopiedEntry {
     std::string destination;
     struct stat committed;
@@ -580,7 +601,9 @@ struct Runner {
     if (st.st_dev != volume)
       throw std::runtime_error(path +
                                ": refusing to traverse another mounted volume");
-    if (recoverableMove && !S_ISDIR(st.st_mode) && st.st_nlink > 1)
+    // Copy-and-cleanup cannot preserve links to the original inode. The
+    // same-volume rename path does not need a snapshot and preserves links.
+    if (guardedJob->action == Action::Move && !S_ISDIR(st.st_mode) && st.st_nlink > 1)
       throw std::runtime_error(path +
                                ": use Copy for hard-linked entries; source retained");
     entries.emplace(path, st);
@@ -597,13 +620,13 @@ struct Runner {
   }
   bool SameEntry(const struct stat &a, const struct stat &b) {
     return a.st_dev == b.st_dev && a.st_ino == b.st_ino &&
-           a.st_mode == b.st_mode && a.st_size == b.st_size &&
+           a.st_mode == b.st_mode && SameOwner(a, b) && a.st_size == b.st_size &&
            a.st_mtim.tv_sec == b.st_mtim.tv_sec &&
            a.st_mtim.tv_nsec == b.st_mtim.tv_nsec &&
            a.st_ctim.tv_sec == b.st_ctim.tv_sec &&
            a.st_ctim.tv_nsec == b.st_ctim.tv_nsec;
   }
-  void VerifyCopy(const std::string &source, dev_t sourceVolume) {
+  void VerifyCopy(const std::string &source, const struct stat &original) {
     if (!deferCompletion)
       return;
     const auto recorded = copied.find(source);
@@ -612,7 +635,7 @@ struct Runner {
     const auto &copy = recorded->second;
     CheckDestinationDevice(copy.committed.st_dev);
     if (!recoverableMove)
-      RequireSameMoveVolume(sourceVolume, copy.committed.st_dev);
+      RequireSameMoveVolume(original.st_dev, copy.committed.st_dev);
     struct stat now;
     if (lstat(copy.destination.c_str(), &now) || !SameEntry(copy.committed, now)) {
       auto &row = Outcome(source);
@@ -623,6 +646,7 @@ struct Runner {
         Outcome(guardedSource).status = "partial";
       throw std::runtime_error(error);
     }
+    VerifyMoveMetadata(original, now, copy.destination);
   }
   void VerifyCopiedTree(const std::string &root, const Snapshot &before) {
     Snapshot after;
@@ -632,7 +656,7 @@ struct Runner {
           root + ": source changed; copied data kept and source retained");
     for (auto &entry : before) {
       auto found = after.find(entry.first);
-      VerifyCopy(entry.first, entry.second.st_dev);
+      VerifyCopy(entry.first, entry.second);
       if (found == after.end() || !SameEntry(entry.second, found->second))
         throw std::runtime_error(
             root + ": source changed; copied data kept and source retained");
@@ -677,8 +701,9 @@ struct Runner {
           (parentNode.st_dev != expectedParent->second.st_dev ||
            parentNode.st_ino != expectedParent->second.st_ino))
         throw std::runtime_error(parentPath + ": source folder changed during cleanup");
-      VerifyCopy(it->first, it->second.st_dev);
+      VerifyCopy(it->first, it->second);
       bool directory = S_ISDIR(it->second.st_mode);
+      VerifyMoveMetadata(it->second, now, it->first);
       if (now.st_ino != it->second.st_ino || now.st_dev != it->second.st_dev ||
           (!directory && !SameEntry(it->second, now)))
         throw std::runtime_error(
@@ -777,6 +802,7 @@ struct Runner {
     FD verify(dup(final.n));
     if (verify.n < 0)
       Fail(dst);
+    SetMoveOwner(final.n, staged, dst);
     if (metadata.InitCheck() == B_OK)
       Attributes(tmp, dst, false, final.n, staged.st_dev, &metadata);
     const auto &backing = backingDevices.at(staged.st_dev);
@@ -810,6 +836,7 @@ struct Runner {
         fstatat(parent, Leaf(dst).c_str(), &opened, AT_SYMLINK_NOFOLLOW) ||
         !SameEntry(opened, finalStat))
       throw std::runtime_error(dst + ": published file changed");
+    VerifyMoveMetadata(staged, finalStat, dst);
     if (fstatat(parent, leaf.c_str(), &opened, AT_SYMLINK_NOFOLLOW) ||
         !SameEntry(opened, staged))
       throw std::runtime_error(tmp + ": staging changed during publication");
@@ -898,8 +925,10 @@ struct Runner {
       } scope{copyDirectories};
       // A merge keeps the destination folder's own metadata. Never remove
       // the source folder on Move if that would discard a distinct attribute.
-      if (existed && deferCompletion)
+      if (existed && deferCompletion) {
+        VerifyMoveMetadata(st, before, dst);
         Attributes(src, dst, true);
+      }
       bool complete = true;
       Dir dir(opendir(src.c_str()), closedir);
       if (!dir)
@@ -913,6 +942,7 @@ struct Runner {
       }
       Guard();
       if (!existed) {
+        SetMoveOwner(directory.Descriptor(), st, dst);
         const bool useSourceMode =
             OrdinaryAttributes(src, dst, dirfd(dir.get()), directory.Descriptor(),
                                st.st_dev, before.st_dev);
@@ -925,6 +955,7 @@ struct Runner {
       struct stat expected;
       if (lstat(dst.c_str(), &expected))
         Fail(dst);
+      VerifyMoveMetadata(st, expected, dst);
       Tick(src);
       Guard();
       parent.Verify();
@@ -1030,6 +1061,9 @@ struct Runner {
         RequireSameMoveVolume(guardedJob->expectedDestination.device,
                               stagingIdentity.st_dev);
       if (S_ISLNK(st.st_mode)) {
+        if (UnlinksMoveSource() && !SameOwner(st, stagingIdentity) &&
+            fchownat(parent, leaf.c_str(), st.st_uid, st.st_gid, AT_SYMLINK_NOFOLLOW))
+          Fail(tmp + ": cannot preserve move link ownership");
         // BNode opens the link itself, including a dangling link.
         Attributes(src, tmp, false, -1, stagingIdentity.st_dev);
         struct timespec times[2] = {st.st_atim, st.st_mtim};
@@ -1050,6 +1084,7 @@ struct Runner {
         const bool removableSource =
             backingDevices.at(st.st_dev).removable;
         if (removableSource || backingDevices.at(stagingIdentity.st_dev).removable) {
+          SetMoveOwner(out.n, st, tmp);
           const bool useSourceMode = copyAttributes();
           // No filename is passed to the worker: only this queue thread can
           // replace the final target, after checking both identities again.
@@ -1102,6 +1137,7 @@ struct Runner {
           struct stat after;
           if (fstat(in.n, &after) || !SameEntry(after, st))
             throw std::runtime_error(src + ": source changed while copying");
+          SetMoveOwner(out.n, st, tmp);
           if (copyAttributes() && !SetCopyMode(out.n, st.st_mode, stagingIdentity.st_dev, tmp))
             PermissionNotice(src);
           CheckDestinationDevice(stagingIdentity.st_dev);
@@ -1117,6 +1153,7 @@ struct Runner {
           staged.st_dev != stagingIdentity.st_dev ||
           staged.st_ino != stagingIdentity.st_ino)
         throw std::runtime_error(tmp + ": staging file changed");
+      VerifyMoveMetadata(st, staged, tmp);
       if (S_ISREG(st.st_mode) && staged.st_size != st.st_size)
         throw std::runtime_error(src + ": copied size does not match the source");
       if (out.n >= 0 && close(std::exchange(out.n, -1)))
