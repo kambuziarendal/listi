@@ -426,11 +426,20 @@ PropertySnapshot PropertySession::Read() {
       info << "\nLink target: " << std::string(link, n) << " (not followed)";
   }
   result.summary = info.str();
-  Require(node.RewindAttrs(), "Read attributes");
+  // Haiku caches the attribute directory on each BNode. RewindAttrs()
+  // alone can miss a file-backed attribute removed and recreated by name.
+  BEntry entry(path.c_str(), false);
+  Require(entry.InitCheck(), "Locate file for attribute refresh");
+  BNode attributes(&entry);
+  node_ref enumerated;
+  Require(attributes.GetNodeRef(&enumerated), "Open attribute directory");
+  if (!(enumerated == identity))
+    throw std::runtime_error(
+        "This file was moved, removed or replaced. Close properties and open it again.");
   char name[B_ATTR_NAME_LENGTH];
   size_t total = 0;
   for (;;) {
-    status_t status = node.GetNextAttrName(name);
+    status_t status = attributes.GetNextAttrName(name);
     if (status == B_ENTRY_NOT_FOUND)
       break;
     Require(status, "Read attribute name");

@@ -113,6 +113,15 @@ int main(){BApplication app("application/x-vnd.Kambuzi-PropertiesFaults");try{
  attr_info info;
  Check(raw.GetAttrInfo(removeName, &info) == B_ENTRY_NOT_FOUND,
        "remove an existing zero-length string");
+ const auto afterRemoval = removeSession.Read();
+ bool foundRemoved = false;
+ for (const auto &attribute : afterRemoval.attributes)
+   foundRemoved |= attribute.name == removeName;
+ Check(!foundRemoved, "refresh does not show the removed attribute");
+ Check(createEmpty(removeName), "recreate the same attribute by name");
+ const auto recreated = Get(removeSession, removeName);
+ Check(recreated.editable && recreated.size == 0,
+       "the same Properties session refreshes a recreated attribute");
  std::ifstream f(p);std::string content((std::istreambuf_iterator<char>(f)),{});Check(content=="payload","all injected failures preserve file contents");unlink(p);
  std::cout<<"TOTAL "<<passed<<" passed"<<std::endl;return 0;
  }catch(const std::exception &e){std::cerr<<"FAIL "<<e.what()<<std::endl;return 1;}}
