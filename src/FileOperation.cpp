@@ -568,27 +568,6 @@ struct Runner {
       replaceAll = true;
     return true;
   }
-  bool Remove(const std::string &p) {
-    Check();
-    struct stat st;
-    if (lstat(p.c_str(), &st) != 0)
-      Fail(p);
-    if (S_ISDIR(st.st_mode)) {
-      Dir dir(opendir(p.c_str()), closedir);
-      if (!dir)
-        Fail(p);
-      while (auto e = NextEntry(dir.get(), p)) {
-        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
-          continue;
-        Remove(Join(p, e->d_name));
-      }
-      if (rmdir(p.c_str()) != 0)
-        Fail(p);
-    } else if (unlink(p.c_str()) != 0)
-      Fail(p);
-    Tick(p);
-    return true;
-  }
   using Snapshot = std::map<std::string, struct stat>;
   void SnapshotTree(const std::string &path, Snapshot &entries, dev_t volume,
                     unsigned depth = 0) {
