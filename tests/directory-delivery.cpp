@@ -38,6 +38,16 @@ std::atomic<int> readsAfterLoss{0};
 sem_id openEntered, allowOpen;
 }
 
+static std::atomic<int> inspectionError{0};
+extern "C" int __real_fstatat(int, const char *, struct stat *, int);
+extern "C" int __wrap_fstatat(int fd, const char *name, struct stat *st, int flags) {
+  const int error = inspectionError.load();
+  if (error && strcmp(name, "file-159") == 0) {
+    errno = error;
+    return -1;
+  }
+  return __real_fstatat(fd, name, st, flags);
+}
 extern "C" dirent *__real_readdir(DIR *);
 extern "C" dirent *__wrap_readdir(DIR *dir) {
   if (watchedReader.load() == find_thread(nullptr))
@@ -83,12 +93,12 @@ extern "C" status_t __wrap__ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl(c
 class Receiver:public BLooper {
 public:
   sem_id done=create_sem(0,"scan test done");
-  int count=0;std::set<std::string> names;std::string error;
+  int count=0;std::set<std::string> names;std::string error, warning;
   Receiver():BLooper("scan test receiver"){}
   ~Receiver(){delete_sem(done);}
   void MessageReceived(BMessage *m) override {
     if(m->what==kRows) { BMessage row;for(int32 i=0;m->FindMessage("entry",i,&row)==B_OK;++i)if(!row.GetBool("parent",false)){++count;names.insert(row.GetString("name",""));} }
-    else if(m->what==kScanDone){error=m->GetString("error","");release_sem(done);}
+    else if(m->what==kScanDone){error=m->GetString("error","");warning=m->GetString("inspectionWarning","");release_sem(done);}
     else BLooper::MessageReceived(m);
   }
 };
@@ -132,6 +142,33 @@ int main() {
   status=acquire_sem_etc(receiver->done,1,B_RELATIVE_TIMEOUT,10000000);
   receiver->Lock();check(status==B_OK&&receiver->error.empty()&&receiver->count==160&&receiver->names.size()==160,label+" next scan recovers");receiver->Unlock();
   generation->store(4);if(scan->Lock())scan->Quit();if(receiver->Lock())receiver->Quit();
+ }
+ {
+   auto *receiver = new Receiver;
+   receiver->Run();
+   auto epoch = std::make_shared<std::atomic<int64>>(0);
+   auto *reader = CreateDirectoryScanner(BMessenger(receiver), epoch, {});
+   reader->Run();
+   for (int failure : {EACCES, EIO, ENOENT, 0}) {
+     inspectionError = failure;
+     BMessage request(kScan);
+     request.AddString("path", folder.c_str());
+     request.AddBool("icons", false);
+     request.AddInt64("serial", ++*epoch);
+     reader->PostMessage(&request);
+     const auto status = acquire_sem_etc(receiver->done, 1, B_RELATIVE_TIMEOUT, 5000000);
+     receiver->Lock();
+     check(status == B_OK && receiver->error.empty() &&
+           receiver->names.size() == (failure ? 159u : 160u) &&
+           (failure == EACCES || failure == EIO
+                ? receiver->warning.find("file-159") != std::string::npos
+                : receiver->warning.empty()),
+           "partial listing, disappearance, or recovered reload: " + std::to_string(failure));
+     receiver->names.clear();
+     receiver->Unlock();
+   }
+   if (reader->Lock()) reader->Quit();
+   if (receiver->Lock()) receiver->Quit();
  }
  // A successful port send is not a UI receipt. Keep only one batch in flight
  // for this fixture; retiring an unacknowledged scan must not join the pane.

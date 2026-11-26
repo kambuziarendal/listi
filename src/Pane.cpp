@@ -1499,6 +1499,8 @@ void Pane::MessageReceived(BMessage *m) {
       }
       restoring.reset();
     }
+    if (locationValid && m->HasString("inspectionWarning"))
+      SetNavigationError(m->GetString("inspectionWarning", ""));
     if (refreshPending) {
       directoryRefreshTimer.reset();
       directoryRefreshPending = false;

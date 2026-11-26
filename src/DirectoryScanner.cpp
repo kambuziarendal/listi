@@ -156,6 +156,7 @@ public:
       count = 0;
       batchLimit = 80;
     };
+    std::string inspectionWarning;
     auto row = [&](const char *full, const char *label, bool parent = false,
                    int directory = -1, const struct stat *opened = nullptr,
                    const Listi::DiskListing *disk = nullptr) {
@@ -163,9 +164,15 @@ public:
           Listi::InterruptedVolumes().Contains(full))
         return;
       struct stat st;
-      if ((directory < 0 ? lstat(full, &st)
-                         : fstatat(directory, label, &st, AT_SYMLINK_NOFOLLOW)) ||
-          generation->load() != serial)
+      if (directory < 0 ? lstat(full, &st)
+                        : fstatat(directory, label, &st, AT_SYMLINK_NOFOLLOW)) {
+        const int error = errno;
+        if (directory >= 0 && error != ENOENT && inspectionWarning.empty())
+          inspectionWarning = std::string("Incomplete listing. Could not inspect ") +
+                              label + ": " + strerror(error);
+        return;
+      }
+      if (generation->load() != serial)
         return;
       BMessage item;
       item.AddInt32("iconSize", iconPixels);
@@ -411,6 +418,8 @@ public:
       if (deliveryFailed)
         done.AddString("error",
                        "Directory delivery failed. Reload to try again.");
+      if (!inspectionWarning.empty())
+        done.AddString("inspectionWarning", inspectionWarning.c_str());
       done.AddString("path", path);
       Complete(done, serial);
     }

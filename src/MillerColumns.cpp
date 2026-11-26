@@ -60,6 +60,7 @@ public:
   PaneModel entries;
   bool complete = false;
   bool failed = false;
+  bool partial = false;
 
   bool Current() const { return model != nullptr; }
 
@@ -82,7 +83,7 @@ public:
     }
     return nullptr;
   }
-  float ContentHeight() const { return float(Visible().size()) * height; }
+  float ContentHeight() const { return float(Visible().size() + (partial ? 1 : 0)) * height; }
   void Refresh(bool reveal = false) {
     font_height font;
     GetFontHeight(&font);
@@ -127,7 +128,10 @@ public:
     const auto focused = Current() ? model->Focused() : nullptr;
     font_height font;
     GetFontHeight(&font);
-    if (rows.empty() && !Current()) {
+    if (partial) {
+      SetHighUIColor(B_LIST_ITEM_TEXT_COLOR);
+      DrawString("Incomplete listing", BPoint(8, rows.size() * height + font.ascent + 5));
+    } else if (rows.empty() && !Current()) {
       SetHighUIColor(B_LIST_ITEM_TEXT_COLOR);
       DrawString(!complete ? "Reading…"
                  : failed  ? "Cannot open folder"
@@ -565,6 +569,7 @@ void MillerColumns::SetLocation(const std::string &path) {
       rows->Refresh(true);
     }
     rows->complete = false;
+    rows->partial = false;
     ++shared;
   }
   while (state->columns.size() > shared)
@@ -721,7 +726,10 @@ void MillerColumns::MessageReceived(BMessage *message) {
   }
   const bool deliveryFailed = state->delivery->failedSerial.load() == serial;
   if (message->what == kScanDone || deliveryFailed) {
-    state->Finish(rows, deliveryFailed || message->HasString("error"));
+    const bool failed = deliveryFailed || message->HasString("error");
+    rows->partial = !failed && message->HasString("inspectionWarning");
+    rows->SetToolTip(rows->partial ? message->GetString("inspectionWarning", "") : "");
+    state->Finish(rows, failed);
     state->ReadNext(this);
   }
 }
