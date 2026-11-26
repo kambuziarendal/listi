@@ -1,18 +1,22 @@
 // SPDX-License-Identifier: MIT
 #include "FileListExportWindow.h"
+#include "DirectoryFinalization.h"
+#include "ExclusiveFileOutput.h"
 #include "FileListExport.h"
 #include <Alert.h>
 #include <Button.h>
 #include <Directory.h>
-#include <File.h>
+#include <Entry.h>
 #include <FilePanel.h>
 #include <LayoutBuilder.h>
+#include <Path.h>
 #include <RadioButton.h>
 #include <ScrollView.h>
 #include <StringView.h>
 #include <TextView.h>
 #include <Window.h>
 #include <memory>
+#include <stdexcept>
 
 namespace Listi {
 namespace {
@@ -75,21 +79,23 @@ public:
       if (message->FindRef("directory", &ref) != B_OK ||
           message->FindString("name", &name) != B_OK)
         return;
-      BDirectory dir(&ref);
-      BFile output(&dir, name, B_WRITE_ONLY | B_CREATE_FILE | B_FAIL_IF_EXISTS);
-      if (output.InitCheck() != B_OK) {
-        (new BAlert("Export", "Could not create the CSV. Choose a new filename in a writable folder.", "OK"))->Go();
-        return;
-      }
-      auto write = [&](const std::string &s) {
-        return output.Write(s.data(), s.size()) == static_cast<ssize_t>(s.size());
-      };
-      bool ok = write(kExportHeader);
-      for (const auto &row : rows)
-        if (ok && (!selected->Value() || row.selected))
-          ok = write(row.csv);
-      if (!ok || output.Sync() != B_OK) {
-        (new BAlert("Export", "Writing failed. The CSV may be incomplete.", "OK"))->Go();
+      try {
+        BDirectory dir(&ref);
+        BEntry entry;
+        BPath path;
+        node_ref expected;
+        if (dir.GetNodeRef(&expected) != B_OK ||
+            dir.GetEntry(&entry) != B_OK || entry.GetPath(&path) != B_OK)
+          throw std::runtime_error("The destination folder is no longer available.");
+        PinnedDirectory folder(path.Path(), expected.device, expected.node, true);
+        SaveExclusiveFile(folder.Descriptor(), name, 0666, [&](int fd) {
+          WriteOutputBytes(fd, kExportHeader, sizeof(kExportHeader) - 1);
+          for (const auto &row : rows)
+            if (!selected->Value() || row.selected)
+              WriteOutputBytes(fd, row.csv.data(), row.csv.size());
+        }, [&] { folder.Verify(); });
+      } catch (const std::exception &error) {
+        (new BAlert("Export", error.what(), "OK"))->Go();
         return;
       }
       PostMessage(B_QUIT_REQUESTED);

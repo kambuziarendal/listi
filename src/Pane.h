@@ -156,14 +156,15 @@ private:
   bool HandleQueryReply(BMessage &);
   BPoint ScrollPosition();
   PaneEntry *ScrollRow(const std::string *, float &);
-  Listi::VisitPosition CaptureVisit();
+  Listi::VisitPosition CaptureVisit(
+      size_t selectionLimit = Listi::VisitPosition::SelectionLimit);
   void RestoreVisit();
   std::optional<Listi::VisitPosition> pendingVisit;
   Listi::VisitPosition::Identity folderIdentity{-1, -1};
   void RestoreScroll(BPoint);
 
   void StartNavigation(const std::string &, int target = -1,
-                       bool trash = false, bool restore = false);
+                       bool trash = false, bool restore = false, bool refresh = false);
   void UpdateNavigation();
   BTextControl *filter;
   BButton *clearFilter, *clearEmptyFilter;

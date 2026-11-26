@@ -143,6 +143,8 @@ struct Runner {
   std::map<std::string, NodeIdentity> directories;
   std::string selectedSource;
   void Guard() {
+    if (job.checkDestinationWindow)
+      job.checkDestinationWindow();
     if (InterruptedVolumes().Contains(selectedSource))
       throw std::runtime_error(selectedSource + ": " + kUnavailableVolumeText);
     struct stat st;
@@ -183,9 +185,18 @@ struct Runner {
       result.outcomes.push_back(std::move(entry));
   }
   bool replaceAll = false, skipAll = false;
+  bool selectedDirectory = false;
   size_t visited = 0;
-  size_t delivered = 0, omittedEntries = 0;
+  size_t publishedEntries = 0, omittedEntries = 0;
   std::string firstOmission;
+  void RecordPartialRoot(const std::string &dst, size_t publishedBefore,
+                         const std::string &detail) {
+    if (!selectedDirectory || publishedEntries == publishedBefore)
+      return;
+    ++result.partialCopies;
+    if (!hooks.privateStaging)
+      RecordOutcome({selectedSource, dst, "partial", detail});
+  }
   TransferControl Control(const std::string &p, bool bytes = true) {
     return {[this] {
               Guard();
@@ -285,6 +296,8 @@ struct Runner {
       throw std::runtime_error(
           "Destination is a link; choose a real folder or file");
     if (source.directory) {
+      if (depth == 0)
+        selectedDirectory = true;
       if (exists && !target.directory)
         throw std::runtime_error("Destination is not a folder");
       std::vector<std::string> omitted;
@@ -311,8 +324,11 @@ struct Runner {
       if (localParent) {
         localParent->Verify();
         const auto leaf = LocationLeaf(dst);
-        if (!exists && mkdirat(localParent->Descriptor(), leaf.c_str(), 0755))
-          throw std::runtime_error(dst + ": " + strerror(errno));
+        if (!exists) {
+          if (mkdirat(localParent->Descriptor(), leaf.c_str(), 0755))
+            throw std::runtime_error(dst + ": " + strerror(errno));
+          ++publishedEntries;
+        }
         struct stat named;
         if (fstatat(localParent->Descriptor(), leaf.c_str(), &named,
                     AT_SYMLINK_NOFOLLOW) || !S_ISDIR(named.st_mode))
@@ -322,14 +338,18 @@ struct Runner {
         directory.emplace(dst, named.st_dev, named.st_ino);
       } else if (!exists) {
         MakeFolder(dst, control);
+        ++publishedEntries;
       }
       int skippedBefore = result.skipped;
       for (const auto &e : entries)
         Copy(e.path, ChildLocation(dst, e.name), depth + 1, &e);
       control.Check();
+      const bool ordinaryCopy = job.action == Action::Copy &&
+          !job.copyForArchiveMove && !hooks.privateStaging;
+      std::string limitations;
       if (!exists && !IsVirtual(dst)) {
-        if (fchmod(directory->Descriptor(), source.permissions & 0777))
-          throw std::runtime_error(strerror(errno));
+        if (!directory->SetCopyMode(source.permissions & 0777, ordinaryCopy))
+          limitations = kNtfsPermissionNotice;
         if (source.modifiedKnown || source.modified > 0) {
           struct timespec times[2] = {
               {0, UTIME_OMIT}, {source.modified, source.ModifiedNanoseconds()}};
@@ -337,11 +357,17 @@ struct Runner {
             throw std::runtime_error(strerror(errno));
         }
       }
-      if (directory)
-        FinalizeDirectory(*directory, *localParent, [&] { control.Check(); });
+      if (directory && !FinalizeDirectory(*directory, *localParent,
+                                          [&] { control.Check(); }, ordinaryCopy)) {
+        if (!limitations.empty())
+          limitations += " ";
+        limitations += kNtfsDurabilityNotice;
+      }
+      if (!limitations.empty()) {
+        result.copyLimitations = true;
+        RecordOutcome({src, dst, "filesystem limitations", std::move(limitations)});
+      }
       if (result.skipped == skippedBefore && omittedEntries == omittedBefore) {
-        if (!exists)
-          ++delivered;
         if (hooks.fileDone)
           hooks.fileDone(src, dst);
       }
@@ -368,7 +394,9 @@ struct Runner {
       local.fileDone = {};
       local.fileFailed = {};
       local.fileSize = {};
-      local.privateStaging = true;
+      // The temporary source is private, but the destination is public
+      // unless the containing job is itself staging an archive operation.
+      local.copyConflict = {};
       // Local Run has its own cancellation type. Let its proceed callback
       // drive cancellation and translate our conflict abort at the boundary.
       local.progress = [](const std::string &, uint64_t) {};
@@ -381,8 +409,14 @@ struct Runner {
       };
       Job publish{Action::Copy, {temp.path}, ParentLocation(dst)};
       publish.expectedDestination = directories.at(publish.destination);
+      publish.copyForArchiveMove = job.copyForArchiveMove;
       auto done = Run(publish, local);
       result.copyLimitations |= done.copyLimitations;
+      for (const auto &entry : done.outcomes)
+        if (entry.status == "copied" || entry.status == "partial" ||
+            entry.status == "published-flush-failed" ||
+            entry.status == "published-recovery-pending")
+          ++publishedEntries;
       // Replace already counted skipped conflicts. Completion is counted by
       // RunVirtual once per selected root, not once per published child.
       // A containing archive job must not report its private staging paths.
@@ -402,7 +436,6 @@ struct Runner {
       if (!done.errors.empty())
         throw std::runtime_error(done.errors.front());
       if (done.completed) {
-        ++delivered;
         if (hooks.fileDone)
           hooks.fileDone(src, dst);
       }
@@ -426,7 +459,6 @@ struct Runner {
       throw;
     }
     RecordOutcome(std::move(entry));
-    ++delivered;
   }
   void PublishUpload(const std::string &src, const std::string &dst,
                      const FileEntry &target, bool exists, const TempFile &temp,
@@ -489,6 +521,7 @@ struct Runner {
       RenameFile(staged, dst, control);
       stagedExists = false;
       committed = true;
+      ++publishedEntries;
       receipt.publication = Publication::Published;
       recovery.Advance(RecoveryPhase::Published);
       entry.status = "completed";
@@ -623,19 +656,21 @@ Result RunVirtual(const Job &job, const Hooks &hooks) {
       return runner.result;
     }
     for (auto &source : job.sources) {
+      const size_t publishedBefore = runner.publishedEntries;
+      std::string dst;
       try {
         runner.selectedSource = source;
+        runner.selectedDirectory = false;
         runner.firstOmission.clear();
         if (InterruptedVolumes().ContainsResolved(source))
           throw std::runtime_error(kUnavailableVolumeText);
         auto control = runner.Control(source);
         int skippedBefore = runner.result.skipped;
-        size_t deliveredBefore = runner.delivered;
         if (LocationLeaf(source).empty())
           throw std::runtime_error(
               "A location root cannot be transferred or deleted");
         control.Check();
-        auto dst = (job.action == Action::Rename)
+        dst = (job.action == Action::Rename)
                        ? job.destination
                        : ChildLocation(job.destination, LocationLeaf(source));
         const auto canonicalSource = TransferIdentity(source);
@@ -672,26 +707,29 @@ Result RunVirtual(const Job &job, const Hooks &hooks) {
           runner.Copy(source, dst);
         }
         if (!runner.firstOmission.empty()) {
-          const bool partial = runner.delivered != deliveredBefore;
-          if (partial)
-            ++runner.result.partialCopies;
-          if (!hooks.privateStaging)
-            runner.RecordOutcome({source, dst, partial ? "partial" : "failed",
+          runner.RecordPartialRoot(dst, publishedBefore, runner.firstOmission);
+          if (runner.publishedEntries == publishedBefore && !hooks.privateStaging)
+            runner.RecordOutcome({source, dst, "failed",
                                   runner.firstOmission});
           if (hooks.fileFailed)
             hooks.fileFailed(source, runner.firstOmission);
         } else if (runner.result.skipped == skippedBefore) {
           ++runner.result.completed;
+        } else {
+          runner.RecordPartialRoot(dst, publishedBefore, "Some entries were skipped.");
         }
       } catch (const RemovableCopyInterrupted &e) {
+        runner.RecordPartialRoot(dst, publishedBefore, e.what());
         runner.result.interruptedCopyFolder = e.folder.empty() ? job.destination : e.folder;
         runner.AddError(source + ": " + e.what());
         if (hooks.fileFailed)
           hooks.fileFailed(source, e.what());
         break;
       } catch (const Cancelled &) {
+        runner.RecordPartialRoot(dst, publishedBefore, "Cancelled after publishing part of the folder.");
         throw;
       } catch (const std::exception &e) {
+        runner.RecordPartialRoot(dst, publishedBefore, e.what());
         runner.AddError(source + ": " + e.what());
         if (hooks.fileFailed)
           hooks.fileFailed(source, e.what());

@@ -480,10 +480,10 @@ struct Runner {
     return false;
   }
   void PermissionNotice(const std::string &src) {
-    CopyNotice(src, "Haiku cannot set these permissions on NTFS; destination permissions were not preserved.");
+    CopyNotice(src, kNtfsPermissionNotice);
   }
   void DurabilityNotice(const std::string &src) {
-    CopyNotice(src, "Published with source retained. Haiku cannot flush this NTFS directory; safe eject and verify after reconnecting. Crash durability was not confirmed.");
+    CopyNotice(src, kNtfsDurabilityNotice);
   }
   bool Allow(std::string &dst, const std::string &src, const struct stat &incoming,
              const struct stat &existing, bool &keepBoth) {

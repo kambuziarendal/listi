@@ -586,7 +586,8 @@ void Pane::UpdateNavigation() {
   back->SetEnabled(history.Back() >= 0);
   forward->SetEnabled(history.Forward() >= 0);
 }
-void Pane::StartNavigation(const std::string &request, int target, bool trash, bool restore) {
+void Pane::StartNavigation(const std::string &request, int target, bool trash,
+                           bool restore, bool refresh) {
   try {
     const auto query = queries.find(request);
     if (Listi::InterruptedVolumes().Contains(
@@ -604,6 +605,8 @@ void Pane::StartNavigation(const std::string &request, int target, bool trash, b
     history.SavePosition(CaptureVisit());
   pendingVisit = restore ? restoring->pendingVisit
                          : target >= 0 ? history.PositionAt(target) : std::nullopt;
+  if (refresh && locationValid)
+    pendingVisit = CaptureVisit(entries.Visible().size());
   if (!restore) {
     restoring.reset();
     if (path != request.c_str())
@@ -618,7 +621,9 @@ void Pane::StartNavigation(const std::string &request, int target, bool trash, b
   reveal = {};
   columnAction.MakeEmpty();
   savedSelection.clear();
-  if (target < 0 && !trash && path == request.c_str()) {
+  if (refresh && pendingVisit) {
+    savedSelection = pendingVisit->selected;
+  } else if (target < 0 && !trash && path == request.c_str()) {
     for (auto entry : entries.Visible())
       if (entries.IsSelected(entry->path))
         savedSelection.emplace(entry->path,
@@ -651,7 +656,7 @@ void Pane::StartNavigation(const std::string &request, int target, bool trash, b
   generation->store(serial);
   directoryWatch->Begin(serial, sameDirectory, BMessenger(this));
   ClearRows();
-  if (IsSearchList() || wasQuery || restore)
+  if (IsSearchList() != wasQuery || restore)
     list->SetAttributes(IsSearchList() ? std::vector<std::string>{"Original folder"} : attributeColumns);
   SetDisplayMode(LocationMode());
   navigationFailed = false;
@@ -733,11 +738,13 @@ void Pane::RequestVisibleIcon(PaneEntry &row) {
   }
 }
 void Pane::Reload() {
+  if (!Window())
+    return;
   if (scanning) {
     refreshPending = true;
     return;
   }
-  Navigate(path);
+  StartNavigation(path.String(), -1, false, false, true);
 }
 std::vector<std::string> Pane::Selected() const { return entries.Selected(); }
 void Pane::ContextMenu(const std::string &path, BPoint screen) {
@@ -1048,8 +1055,10 @@ void Pane::MessageReceived(BMessage *m) {
         attributeColumns.push_back(name);
       attributeDetails = true;
     }
-    list->SetAttributes(attributeColumns);
-    StartNavigation(path.String());
+    if (!IsSearchList()) {
+      list->SetAttributes(attributeColumns);
+      StartNavigation(path.String());
+    }
     if (m->IsSourceWaiting())
       m->SendReply(&reply);
     break;

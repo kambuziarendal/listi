@@ -45,7 +45,7 @@ WRAPS = {
     "message-store-faults": ["mkstemp", "write", "close", "fsync", "renameat"],
     "inspector-document": ['fsync'],
     "bulk-rename": ['renameat', 'fstatat'],
-    "clipboard-text-file": ['write'],
+    "clipboard-text-file": ['write', 'close', 'fsync'],
     "archive-move-scaling": ['lstat'],
     "terminal-delivery": ["_ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl",
                           "_ZN5BView10DrawBitmapEPK7BBitmap5BRectS3_"],
@@ -53,7 +53,7 @@ WRAPS = {
     "operation-queue": ['_ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl', 'opendir'],
     "flat-view": ['_ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl', 'opendir'],
     "folder-compare": ['opendir'],
-    "properties-faults": ['_ZN5BNode9WriteAttrEPKcjlPKvm', '_ZN5BNode4SyncEv', 'fsync'],
+    "properties-faults": ['_ZN5BNode9WriteAttrEPKcjlPKvm', '_ZN5BNode4SyncEv', '_ZN8BMessage9AddStringEPKcS1_', 'fsync'],
 }
 
 

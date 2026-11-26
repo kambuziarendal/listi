@@ -109,7 +109,10 @@ bool ValidText(const std::string &text) {
 bool Text(FileAttribute &a) {
   switch (a.type) {
   case B_STRING_TYPE: {
-    if (a.bytes.empty() || a.bytes.size() > MaxText + 1 ||
+    // A native empty string may have no terminating byte at all.
+    if (a.bytes.empty())
+      return true;
+    if (a.bytes.size() > MaxText + 1 ||
         a.bytes.back() != 0 ||
         std::find(a.bytes.begin(), a.bytes.end() - 1, 0) != a.bytes.end() - 1)
       return false;
@@ -484,17 +487,26 @@ void PropertySession::Change(const FileAttribute *expected,
     throw std::runtime_error(
         "Metadata recovery folder must be a private directory owned by the current user.");
   BMessage record;
-  record.AddString("path", path.c_str());
-  record.AddString("attribute", name.c_str());
-  record.AddInt32("device", identity.device);
-  record.AddInt64("inode", identity.node);
-  record.AddBool("existed", expected != nullptr);
+  Require(record.AddString("path", path.c_str()), "Record recovery path");
+  Require(record.AddString("attribute", name.c_str()), "Record attribute name");
+  Require(record.AddInt32("device", identity.device), "Record device");
+  Require(record.AddInt64("inode", identity.node), "Record inode");
+  Require(record.AddBool("existed", expected != nullptr),
+          "Record original attribute existence");
   if (expected) {
-    record.AddInt32("type", expected->type);
-    record.AddData("bytes", B_RAW_TYPE, expected->bytes.data(),
-                   expected->bytes.size());
+    Require(record.AddInt32("type", expected->type), "Record attribute type");
+    // BMessage does not accept zero-length raw data. Distinguish an existing
+    // empty attribute from an absent attribute or a missing payload.
+    Require(record.AddInt64("size", expected->bytes.size()),
+            "Record attribute size");
+    if (!expected->bytes.empty())
+      Require(record.AddData("bytes", B_RAW_TYPE, expected->bytes.data(),
+                             expected->bytes.size()), "Record attribute bytes");
   }
-  std::vector<char> flattened(record.FlattenedSize());
+  const ssize_t size = record.FlattenedSize();
+  if (size <= 0 || size > ssize_t(MaxValue + PATH_MAX + B_ATTR_NAME_LENGTH + 1024))
+    throw std::runtime_error("Invalid metadata recovery record size. Nothing changed.");
+  std::vector<char> flattened(size);
   Require(record.Flatten(flattened.data(), flattened.size()),
           "Prepare recovery record");
   std::string pattern = std::string(directory.Path()) + "/change-XXXXXX";
@@ -545,6 +557,7 @@ void PropertySession::Change(const FileAttribute *expected,
         verified = now.type == type && now.bytes == *bytes;
       }
       if (verified) {
+        Guard();
         unlink(recovery.c_str());
         return;
       }
@@ -587,6 +600,10 @@ void PropertySession::Permissions(mode_t expected, const std::string &octal) {
     throw std::runtime_error(
         "Permissions changed or this entry is read-only here. Refresh first.");
   Require(node.SetPermissions(requested), "Set permissions");
+  if (node.Sync() != B_OK)
+    throw std::runtime_error(
+        "Permissions were changed, but could not be flushed. Refresh before retrying.");
+  Guard();
   Require(node.GetStat(&st), "Verify permissions");
   if ((st.st_mode & 07777) != requested)
     throw std::runtime_error(

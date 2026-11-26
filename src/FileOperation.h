@@ -131,7 +131,7 @@ struct Result {
   bool bulkRenameRecoveryNeeded = false;
   // Do not reread this folder automatically after a removable transfer lost it.
   std::string interruptedCopyFolder;
-  int partialCopies = 0; // Selected folders copied with unavailable entries omitted.
+  int partialCopies = 0; // Selected folders changed but not fully copied.
 };
 Result Run(const Job &, const Hooks &);
 std::string Join(const std::string &, const std::string &);

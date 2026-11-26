@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Compile on POSIX: c++ -std=c++17 -Isrc tests/virtual-operation-faults.cpp
 // src/JobReportStore.cpp src/DirectoryFinalization.cpp src/VirtualOperation.cpp
-// src/VirtualFile.cpp src/VirtualLocation.cpp src/Sha256.cpp -lsqlite3 -o /tmp/listi-faults
+// src/VirtualFile.cpp src/VirtualLocation.cpp src/Sha256.cpp src/RemovableCopy.cpp
+// -pthread -lsqlite3 -o /tmp/listi-faults
 // Real staging/dispatch code, deterministic fake network commit failures.
 #include "FileOperation.h"
 #include "JobReportStore.h"
@@ -56,8 +57,10 @@ bool failCommit = false, failRollback = false, failPartCleanup = false,
      failBackupCleanup = false, cancelAfterBackup = false, cancelled = false,
      mutateDestination = false, loseBackupReply = false, loseCommitReply = false;
 const std::string destination = "sftp://fixture/out/input";
+std::string unreadableSource;
 enum class LocalPublish { Unexpected, Limited, FlushFailure, CancelAfterPublish };
 LocalPublish localPublish = LocalPublish::Unexpected;
+bool expectPrivatePublication = false;
 bool suffix(const std::string &path, const char *part) {
   return path.find(part) != std::string::npos;
 }
@@ -65,8 +68,9 @@ bool suffix(const std::string &path, const char *part) {
 namespace Listi {
 Result RunVirtual(const Job &, const Hooks &);
 Result Run(const Job &job, const Hooks &hooks) {
-  if (localPublish == LocalPublish::Unexpected || !hooks.privateStaging ||
-      hooks.report || job.sources.size() != 1)
+  if (localPublish == LocalPublish::Unexpected ||
+      hooks.privateStaging != expectPrivatePublication ||
+      hooks.report || hooks.copyConflict || job.sources.size() != 1)
     throw std::runtime_error("Unexpected local dispatch");
   const auto &source = job.sources.front();
   const auto target = ChildLocation(job.destination, LocationLeaf(source));
@@ -150,6 +154,8 @@ void ReadNetwork(const Location &l, const DataSink &sink, const TransferControl 
   if (cancelled)
     ++postCancelReadCalls;
   c.Check();
+  if (l.URL() == unreadableSource)
+    throw std::runtime_error("Source read denied");
   if (cancelReadback && suffix(l.URL(), ".part")) {
     cancelled = true;
     c.Check();
@@ -286,11 +292,18 @@ int main() {
   if (mkdir(downloadFolder.c_str(), 0700)) return 1;
   const auto localTarget = downloadFolder + "/input";
   const Job downloadJob{Action::Copy, {remote}, downloadFolder};
-  auto download = [&](LocalPublish publication, Decision decision, bool report) {
+  auto download = [&](LocalPublish publication, Decision decision, bool report,
+                      bool privateStaging = false) {
     reset();
     localPublish = publication;
+    expectPrivatePublication = privateStaging;
     files[remote] = {"downloaded payload", 1};
     Hooks local = hooks;
+    local.privateStaging = privateStaging;
+    local.copyConflict = [](const CopyConflict &) {
+      throw std::runtime_error("Synthetic file should not reach user conflict preview");
+      return Decision::Abort;
+    };
     local.conflict = [=](const std::string &target) {
       if (target != localTarget)
         throw std::runtime_error("Wrong conflict target");
@@ -303,6 +316,7 @@ int main() {
     if (report)
       local.report = std::make_shared<JobReportStore>();
     auto result = RunVirtual(downloadJob, local);
+    expectPrivatePublication = false;
     localPublish = LocalPublish::Unexpected;
     return std::make_pair(std::move(result), local.report);
   };
@@ -348,7 +362,36 @@ int main() {
             cancelledPublish.outcomes.front().detail.find("durability is unknown") != std::string::npos &&
             localContents() == "downloaded payload",
         "download cancelled after publish retains the durability outcome without claiming completion");
+  auto privatePublish = download(LocalPublish::Limited, Decision::Replace, false, true).first;
+  check(privatePublish.completed == 1 && privatePublish.errors.empty() &&
+            privatePublish.outcomes.empty() && done == 1,
+        "archive staging keeps strict local publication policy and hides internal receipts");
   unlink(localTarget.c_str());
+
+  const std::string sourceFolder = "sftp://fixture/in/folder";
+  const std::string healthy = sourceFolder + "/a-readable";
+  const std::string denied = sourceFolder + "/z-unreadable";
+  files[sourceFolder] = {"", 1, 0, true};
+  files[healthy] = {"healthy payload", 1};
+  files[denied] = {"not readable", 1};
+  localPublish = LocalPublish::Limited;
+  unreadableSource = denied;
+  auto partial = RunVirtual({Action::Copy, {sourceFolder}, downloadFolder}, {});
+  unreadableSource.clear();
+  localPublish = LocalPublish::Unexpected;
+  const auto copiedFolder = downloadFolder + "/folder";
+  check(!partial.completed && partial.partialCopies == 1 &&
+            errorHas(partial, "Source read denied") && partial.outcomes.size() == 2 &&
+            partial.outcomes.front().source == healthy &&
+            partial.outcomes.front().status == "copied" &&
+            partial.outcomes.back().source == sourceFolder &&
+            partial.outcomes.back().destination == copiedFolder &&
+            partial.outcomes.back().status == "partial" &&
+            !access((copiedFolder + "/a-readable").c_str(), F_OK) &&
+            access((copiedFolder + "/z-unreadable").c_str(), F_OK),
+        "folder download keeps the successful child receipt after a later read failure");
+  unlink((copiedFolder + "/a-readable").c_str());
+  rmdir(copiedFolder.c_str());
   rmdir(downloadFolder.c_str());
   const timespec referenceTime[] = {{0, UTIME_OMIT}, {1, 654000000}};
   FileEntry expected;

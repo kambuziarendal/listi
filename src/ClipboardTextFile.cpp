@@ -2,7 +2,7 @@
 #include "ClipboardTextFile.h"
 #include "ClipboardImage.h"
 #include "ClipboardLock.h"
-#include "NamedEntry.h"
+#include "ExclusiveFileOutput.h"
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
@@ -95,59 +95,24 @@ ClipboardFile PrepareClipboardFile(const std::string &folder,
 }
 
 void SaveClipboardFile(const ClipboardFile &file, const std::string &name) {
-  ValidateEntryLeaf(name);
   FD directory(open(file.folder.c_str(), O_RDONLY | O_DIRECTORY));
-  struct stat folder;
-  if (directory.value < 0 || fstat(directory.value, &folder) ||
-      folder.st_dev != file.destination.device ||
-      folder.st_ino != file.destination.inode)
+  auto verifyFolder = [&] {
+    struct stat current;
+    if (directory.value < 0 || stat(file.folder.c_str(), &current) ||
+        current.st_dev != file.destination.device ||
+        current.st_ino != file.destination.inode)
+      throw std::runtime_error(
+          "The destination folder changed. Check the saved file before retrying.");
+  };
+  struct stat pinned;
+  if (directory.value < 0 || fstat(directory.value, &pinned) ||
+      pinned.st_dev != file.destination.device ||
+      pinned.st_ino != file.destination.inode)
     throw std::runtime_error(
         "The destination folder changed. Start the save again.");
-
-  const int dir = directory.value;
-  const char *leaf = name.c_str();
-  // BFS has no hard links or atomic rename without replacement. Exclusive
-  // create is the publication guard; clean up incomplete writes on failure.
-  FD output(openat(dir, leaf, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600));
-  if (output.value < 0) {
-    if (errno == EEXIST)
-      throw std::runtime_error(
-          "That name already exists. No file was replaced.");
-    Fail("Create clipboard file");
-  }
-  struct stat identity;
-  if (fstat(output.value, &identity))
-    Fail("Inspect new clipboard file");
-  try {
-    for (size_t offset = 0; offset < file.bytes.size();) {
-      ssize_t n = write(output.value, file.bytes.data() + offset,
-                        file.bytes.size() - offset);
-      if (n < 0 && errno == EINTR)
-        continue;
-      if (n < 0)
-        Fail("Write clipboard file");
-      if (n == 0)
-        throw std::runtime_error(
-            "Writing the clipboard file made no progress.");
-      offset += n;
-    }
-    if (fsync(output.value))
-      Fail("Sync clipboard file");
-  } catch (...) {
-    struct stat current;
-    if (fstatat(dir, leaf, &current, AT_SYMLINK_NOFOLLOW) == 0 &&
-        current.st_dev == identity.st_dev &&
-        current.st_ino == identity.st_ino && unlinkat(dir, leaf, 0))
-      Fail("Could not remove incomplete clipboard file");
-    throw;
-  }
-  // A descriptor remains valid after a rename. Keep completed bytes, but do
-  // not report success at a path that no longer names the saved file.
-  struct stat namedFolder, namedFile;
-  if (stat(file.folder.c_str(), &namedFolder) ||
-      namedFolder.st_dev != folder.st_dev || namedFolder.st_ino != folder.st_ino ||
-      fstatat(dir, leaf, &namedFile, AT_SYMLINK_NOFOLLOW) ||
-      namedFile.st_dev != identity.st_dev || namedFile.st_ino != identity.st_ino)
-    throw std::runtime_error("The clipboard file or its folder moved during the save.");
+  verifyFolder();
+  SaveExclusiveFile(directory.value, name, 0600, [&](int fd) {
+    WriteOutputBytes(fd, file.bytes.data(), file.bytes.size());
+  }, verifyFolder);
 }
 }

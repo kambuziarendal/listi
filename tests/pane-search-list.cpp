@@ -6,6 +6,7 @@
 #include "WrappedLabel.h"
 #include <MessageFilter.h>
 #include <Application.h>
+#include <ColumnListView.h>
 #include <LayoutBuilder.h>
 #include <Window.h>
 #include <cstdlib>
@@ -98,6 +99,15 @@ int main() {
     std::cerr << error.what() << '\n';
     check(false, "copy and Shelf");
   }
+  auto *files = dynamic_cast<BColumnListView *>(pane->FindView("files"));
+  auto *originalFolder = files ? files->ColumnAt(3) : nullptr;
+  if (originalFolder)
+    files->SetSortColumn(originalFolder, false, false);
+  auto folderSort = [&] {
+    const auto sort = pane->Sorting();
+    return sort.column == 3 && !sort.ascending;
+  };
+  check(originalFolder && folderSort(), "search Details can sort by Original folder descending");
   const auto selected = pane->CaptureNavigation();
   auto *status = static_cast<WrappedLabel *>(pane->FindView("status"));
   auto nextCompletion = [&] {
@@ -120,12 +130,14 @@ int main() {
     pane->Reload(); // Queue a refresh while the first reload is still scanning.
     check(await([&] { return ready() && replies->completed >= before + 2; }, 15000000),
           "Reload starts another reader and preserves a pending refresh");
+    check(folderSort(), "Reload retains descending Original folder sort");
   }
 
   std::ofstream(a + "/extra.live") << "extra";
   check(matches(3) && pane->Selected().size() == 2 &&
         pane->CaptureNavigation().focused == selected.focused,
         "new live hit preserves multi-selection and focused original");
+  check(folderSort(), "a changed live result retains descending Original folder sort");
   rename(left.c_str(), (a + "/old").c_str());
   check(matches(2) && pane->Selected() == std::vector<std::string>{right},
         "no-longer-matching original leaves without selecting its namesake");
@@ -141,6 +153,7 @@ int main() {
   pane->RestoreNavigation(selected);
   check(matches(3) && pane->Selected() == std::vector<std::string>{right},
         "restored query rejects replacement at identical path");
+  check(folderSort(), "restored search restores descending Original folder sort");
   pane->MessageReceived(&back);
   check(await(folder), "restored history has independent cursor and folder");
   saved.request.root = root + "/missing";
@@ -161,6 +174,15 @@ int main() {
   pane->RestoreNavigation(scrolled);
   check(await(folder) && pane->CaptureNavigation().scroll.y == 300,
         "fixture starts below the first screen");
+  pane->MatchPattern("scroll-?", true);
+  pane->Select(1);
+  const auto beforeReload = pane->CaptureNavigation();
+  pane->Reload();
+  check(await(folder) && beforeReload.selection.size() > VisitPosition::SelectionLimit &&
+            pane->CaptureNavigation().selection == beforeReload.selection &&
+            pane->CaptureNavigation().focused == beforeReload.focused &&
+            pane->CaptureNavigation().scroll == beforeReload.scroll,
+        "Reload preserves the viewport, focus and selections larger than history's limit");
   pane->MatchPattern("original", true);
   auto before = pane->CaptureNavigation();
   pane->Navigate(a.c_str());

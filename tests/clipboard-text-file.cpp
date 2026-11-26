@@ -18,6 +18,7 @@ using namespace Listi;
 
 namespace {
 int failWrite = 0;
+bool failOutputClose = false, failDirectorySync = false;
 std::string swapOutput, movedOutput;
 struct Fixture {
   char folder[64] = "/boot/home/Listi-clipboard-text-test-XXXXXX";
@@ -29,7 +30,7 @@ struct Fixture {
     std::string root(folder);
     for (const char *name :
          {"Clipboard.txt", "note.txt", "link", "partial.txt", "image.png",
-          "replaced.txt", "moved.txt"})
+          "replaced.txt", "moved.txt", "close.txt", "dir-sync.txt"})
       unlink((root + "/" + name).c_str());
     rmdir((root + "/destination").c_str());
     rmdir((root + "/old-destination").c_str());
@@ -86,6 +87,33 @@ extern "C" ssize_t __wrap_write(int fd, const void *buffer, size_t size) {
     return __real_write(fd, buffer, 1);
   errno = ENOSPC;
   return -1;
+}
+
+extern "C" int __real_close(int);
+extern "C" int __wrap_close(int fd) {
+  if (failOutputClose) {
+    struct stat st;
+    if (!fstat(fd, &st) && S_ISREG(st.st_mode)) {
+      failOutputClose = false;
+      __real_close(fd);
+      errno = EIO;
+      return -1;
+    }
+  }
+  return __real_close(fd);
+}
+
+extern "C" int __real_fsync(int);
+extern "C" int __wrap_fsync(int fd) {
+  if (failDirectorySync) {
+    struct stat st;
+    if (!fstat(fd, &st) && S_ISDIR(st.st_mode)) {
+      failDirectorySync = false;
+      errno = EIO;
+      return -1;
+    }
+  }
+  return __real_fsync(fd);
 }
 
 int main(int argc, char **argv) {
@@ -167,6 +195,16 @@ int main(int argc, char **argv) {
     Check(rejected && lstat((folder + "/partial.txt").c_str(), &partial) < 0 &&
               errno == ENOENT,
           "failed partial write leaves no output");
+    failOutputClose = true;
+    Check(Rejected([&] { SaveClipboardFile(frozen, "close.txt"); }) &&
+              !failOutputClose &&
+              lstat((folder + "/close.txt").c_str(), &partial) < 0 &&
+              errno == ENOENT,
+          "file close error is reported and removes the incomplete output");
+    failDirectorySync = true;
+    Check(Rejected([&] { SaveClipboardFile(frozen, "dir-sync.txt"); }) &&
+              !failDirectorySync && Read(folder + "/dir-sync.txt") == original,
+          "directory flush error is reported without deleting completed bytes");
     swapOutput = folder + "/replaced.txt";
     movedOutput = folder + "/moved.txt";
     Check(Rejected([&] { SaveClipboardFile(frozen, "replaced.txt"); }) &&
