@@ -108,8 +108,11 @@ std::string LocationLeaf(const std::string &);
 bool SetConnection(const std::string &url, const Connection &);
 void RequireConnection(const std::string &url);
 Connection GetConnection(const std::string &url);
+// Browsers hide interrupted volumes. Integrity-sensitive callers also collect
+// the exact paths that were omitted without opening them.
 std::vector<FileEntry> ListFiles(const std::string &,
-                                 const TransferControl & = {});
+                                 const TransferControl & = {},
+                                 std::vector<std::string> *omitted = nullptr);
 // Only a copy's initial FTP/SFTP lookup may reuse an entry from its traversal.
 // Leave discovered unset when checking the current revision.
 bool StatFile(const std::string &, FileEntry &, const TransferControl & = {},

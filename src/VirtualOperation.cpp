@@ -6,6 +6,7 @@
 #include "StagingSpace.h"
 #include "Sha256.h"
 #include "RecoveryInventory.h"
+#include "UnavailableVolume.h"
 #include "VirtualFile.h"
 #include <atomic>
 #include <cerrno>
@@ -142,6 +143,8 @@ struct Runner {
   std::map<std::string, NodeIdentity> directories;
   std::string selectedSource;
   void Guard() {
+    if (InterruptedVolumes().Contains(selectedSource))
+      throw std::runtime_error(selectedSource + ": " + kUnavailableVolumeText);
     struct stat st;
     auto source = job.expectedSources.find(selectedSource);
     if (source != job.expectedSources.end() &&
@@ -181,6 +184,8 @@ struct Runner {
   }
   bool replaceAll = false, skipAll = false;
   size_t visited = 0;
+  size_t delivered = 0, omittedEntries = 0;
+  std::string firstOmission;
   TransferControl Control(const std::string &p, bool bytes = true) {
     return {[this] {
               Guard();
@@ -246,6 +251,8 @@ struct Runner {
             const FileEntry *discovered = nullptr) {
     if (depth > 128 || ++visited > 200000)
       throw std::runtime_error("Folder tree exceeds the transfer limit");
+    if (InterruptedVolumes().Contains(src))
+      throw std::runtime_error(src + ": " + kUnavailableVolumeText);
     const auto parent = ParentLocation(dst);
     struct DirectoryScope {
       std::map<std::string, NodeIdentity> &entries;
@@ -280,6 +287,22 @@ struct Runner {
     if (source.directory) {
       if (exists && !target.directory)
         throw std::runtime_error("Destination is not a folder");
+      std::vector<std::string> omitted;
+      auto entries = ListFiles(src, control, &omitted);
+      // Track completeness for this subtree independently of earlier siblings.
+      const size_t omittedBefore = omittedEntries;
+      omittedEntries += omitted.size();
+      for (const auto &path : omitted) {
+        auto error = path + ": " + kUnavailableVolumeText;
+        if (firstOmission.empty())
+          firstOmission = error;
+        AddError(error);
+        if (!hooks.privateStaging)
+          RecordOutcome({path, ChildLocation(dst, LocationLeaf(path)),
+                         "unprocessed", kUnavailableVolumeText});
+      }
+      if (entries.empty() && !omitted.empty())
+        return;
       std::optional<PinnedDirectory> localParent, directory;
       if (!IsVirtual(dst)) {
         const auto &identity = directories.at(parent);
@@ -301,7 +324,7 @@ struct Runner {
         MakeFolder(dst, control);
       }
       int skippedBefore = result.skipped;
-      for (const auto &e : ListFiles(src, control))
+      for (const auto &e : entries)
         Copy(e.path, ChildLocation(dst, e.name), depth + 1, &e);
       control.Check();
       if (!exists && !IsVirtual(dst)) {
@@ -316,8 +339,12 @@ struct Runner {
       }
       if (directory)
         FinalizeDirectory(*directory, *localParent, [&] { control.Check(); });
-      if (result.skipped == skippedBefore && hooks.fileDone)
-        hooks.fileDone(src, dst);
+      if (result.skipped == skippedBefore && omittedEntries == omittedBefore) {
+        if (!exists)
+          ++delivered;
+        if (hooks.fileDone)
+          hooks.fileDone(src, dst);
+      }
       return;
     }
     if (exists && target.directory)
@@ -374,8 +401,11 @@ struct Runner {
         throw Cancelled();
       if (!done.errors.empty())
         throw std::runtime_error(done.errors.front());
-      if (done.completed && hooks.fileDone)
-        hooks.fileDone(src, dst);
+      if (done.completed) {
+        ++delivered;
+        if (hooks.fileDone)
+          hooks.fileDone(src, dst);
+      }
       return;
     }
     if (ParseLocation(dst).Archive())
@@ -396,6 +426,7 @@ struct Runner {
       throw;
     }
     RecordOutcome(std::move(entry));
+    ++delivered;
   }
   void PublishUpload(const std::string &src, const std::string &dst,
                      const FileEntry &target, bool exists, const TempFile &temp,
@@ -594,8 +625,12 @@ Result RunVirtual(const Job &job, const Hooks &hooks) {
     for (auto &source : job.sources) {
       try {
         runner.selectedSource = source;
+        runner.firstOmission.clear();
+        if (InterruptedVolumes().ContainsResolved(source))
+          throw std::runtime_error(kUnavailableVolumeText);
         auto control = runner.Control(source);
         int skippedBefore = runner.result.skipped;
+        size_t deliveredBefore = runner.delivered;
         if (LocationLeaf(source).empty())
           throw std::runtime_error(
               "A location root cannot be transferred or deleted");
@@ -636,8 +671,18 @@ Result RunVirtual(const Job &job, const Hooks &hooks) {
                 "Cannot copy an entry onto itself or its descendants");
           runner.Copy(source, dst);
         }
-        if (runner.result.skipped == skippedBefore)
+        if (!runner.firstOmission.empty()) {
+          const bool partial = runner.delivered != deliveredBefore;
+          if (partial)
+            ++runner.result.partialCopies;
+          if (!hooks.privateStaging)
+            runner.RecordOutcome({source, dst, partial ? "partial" : "failed",
+                                  runner.firstOmission});
+          if (hooks.fileFailed)
+            hooks.fileFailed(source, runner.firstOmission);
+        } else if (runner.result.skipped == skippedBefore) {
           ++runner.result.completed;
+        }
       } catch (const RemovableCopyInterrupted &e) {
         runner.result.interruptedCopyFolder = e.folder.empty() ? job.destination : e.folder;
         runner.AddError(source + ": " + e.what());

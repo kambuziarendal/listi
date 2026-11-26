@@ -29,16 +29,18 @@ constexpr uint32 kCancelAll = 'jcab', kJobAccepted = 'jacp',
                  kDismissError = 'jder';
 
 void RequireAvailableEndpoints(const Listi::Job &job, bool resolveLinks = false) {
-  const auto blocked = [resolveLinks](const std::string &path) {
+  const auto requireAvailable = [resolveLinks](const std::string &path) {
     auto &volumes = Listi::InterruptedVolumes();
-    return resolveLinks ? volumes.ContainsResolved(path) : volumes.Contains(path);
+    if (resolveLinks ? volumes.ContainsResolved(path) : volumes.Contains(path))
+      throw std::runtime_error(path + ": " + Listi::kUnavailableVolumeText);
   };
-  if (blocked(job.destination) || blocked(job.destinationFolder) ||
-      blocked(job.archivePath) ||
-      std::any_of(job.restoreTargets.begin(), job.restoreTargets.end(),
-                  [&](const auto &entry) { return blocked(entry.second); }) ||
-      std::any_of(job.sources.begin(), job.sources.end(), blocked))
-    throw std::runtime_error(Listi::kUnavailableVolumeText);
+  requireAvailable(job.destination);
+  requireAvailable(job.destinationFolder);
+  requireAvailable(job.archivePath);
+  for (const auto &entry : job.restoreTargets)
+    requireAvailable(entry.second);
+  for (const auto &source : job.sources)
+    requireAvailable(source);
 }
 
 uint64_t EstimateBytes(const std::vector<std::string> &sources,
@@ -1138,6 +1140,10 @@ void OperationQueue::Loop() {
     summary << Verb(job.action) << ": " << result.completed << " completed, "
             << result.skipped << " skipped, " << int32(details.ErrorCount())
             << " errors";
+    if (result.partialCopies == 1)
+      summary << ". 1 folder partially copied.";
+    else if (result.partialCopies > 1)
+      summary << ". " << result.partialCopies << " folders partially copied.";
     if (result.bulkRenameRecoveryNeeded)
       summary << ". Check entry locations in the operation report.";
     else if (result.cancelled)
@@ -1187,7 +1193,8 @@ void OperationQueue::Loop() {
       if (details.ErrorCount() == 1 && !details.Incomplete() && failedFiles == 1)
         done.AddString("onlyFailedFile", failedSource.c_str());
       std::string issue = std::string(Verb(job.action)) + " #" + std::to_string(operation);
-      issue += result.completed ? " partially completed" : " not confirmed";
+      issue += (result.completed || result.partialCopies)
+                   ? " partially completed" : " not confirmed";
       if (!failedSource.empty())
         issue += ": " + Listi::LocationLeaf(failedSource);
       if (!job.destination.empty() && transfer)

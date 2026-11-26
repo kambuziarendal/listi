@@ -93,10 +93,11 @@ Connection GetConnection(const std::string &url) {
   return BoundConnection(ParseLocation(url));
 }
 std::vector<FileEntry> ListFiles(const std::string &p,
-                                 const TransferControl &c) {
+                                 const TransferControl &c,
+                                 std::vector<std::string> *omitted) {
   c.Check();
   if (InterruptedVolumes().ContainsResolved(p))
-    throw std::runtime_error(kUnavailableVolumeText);
+    throw std::runtime_error(p + ": " + kUnavailableVolumeText);
   auto l = ParseLocation(p);
   if (l.Archive())
     return ListArchive(l, c);
@@ -119,7 +120,12 @@ std::vector<FileEntry> ListFiles(const std::string &p,
       if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
         continue;
       auto path = ChildLocation(p, e->d_name);
-      if (InterruptedVolumes().Contains(path) || IsListiPrivateEntry(path))
+      if (InterruptedVolumes().Contains(path)) {
+        if (omitted)
+          omitted->push_back(path);
+        continue;
+      }
+      if (IsListiPrivateEntry(path))
         continue;
       struct stat st;
       if (lstat(path.c_str(), &st))

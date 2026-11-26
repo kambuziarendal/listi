@@ -6,6 +6,7 @@
 #include "FileOperation.h"
 #include "JobReportStore.h"
 #include "VirtualFile.h"
+#include "UnavailableVolume.h"
 #include <fcntl.h>
 #include <fstream>
 #include <iostream>
@@ -37,7 +38,12 @@ void RecoveryRecord::NoteFailure(bool) noexcept {}
 }
 #endif
 namespace {
-struct Remote { std::string data; int64_t modified = 1; long nanoseconds = 0; };
+struct Remote {
+  std::string data;
+  int64_t modified = 1;
+  long nanoseconds = 0;
+  bool directory = false;
+};
 std::map<std::string, Remote> files;
 bool corruptUpload = false, denyReadback = false, cancelReadback = false;
 bool cancelAtReadyCheck = false;
@@ -123,6 +129,7 @@ bool StatNetwork(const Location &l, FileEntry &entry, const TransferControl &c,
   auto it = files.find(l.URL());
   if (it == files.end()) return false;
   entry.path = l.URL(); entry.name = LocationLeaf(entry.path);
+  entry.directory = it->second.directory;
   entry.sizeKnown = !omitStageSize || !suffix(l.URL(), ".part");
   entry.size = it->second.data.size();
   entry.SetModification(it->second.modified, it->second.nanoseconds);
@@ -175,6 +182,10 @@ void ChangeNetwork(const Location &l, const char *action,
                    const std::string &target, const TransferControl &c) {
   c.Check();
   std::string source = l.URL();
+  if (std::string(action) == "mkdir") {
+    files.emplace(source, Remote{"", 1, 0, true});
+    return;
+  }
   if (std::string(action) == "remove") {
     if ((suffix(source, ".part") && failPartCleanup) ||
         (suffix(source, ".previous") && failBackupCleanup))
@@ -471,6 +482,74 @@ int main() {
   reset(); r = RunVirtual({Action::Copy, {"sftp://fixture:22/out/input"}, "sftp://fixture/out"}, hooks);
   check(!r.errors.empty() && !r.completed && files.at(destination).data == "old contents",
         "explicit default port cannot bypass self-copy rejection");
+  const auto folder = std::string(dir) + "/upload-folder";
+  const auto blocked = folder + "/unavailable";
+  const auto sibling = folder + "/sibling";
+  const std::string remoteFolder = "sftp://fixture/out/upload-folder";
+  const auto remoteSibling = remoteFolder + "/sibling";
+  if (mkdir(folder.c_str(), 0700) || mkdir(blocked.c_str(), 0700))
+    return 1;
+  InterruptedVolumes().Block(blocked);
+  reset();
+  r = RunVirtual({Action::Copy, {blocked}, "sftp://fixture/out"}, hooks);
+  check(!r.completed && !r.partialCopies && !done && files.size() == 1 &&
+            errorHas(r, blocked.c_str()),
+        "upload refuses a registered unavailable root without publishing anything");
+  const Job folderJob{Action::Copy, {folder}, "sftp://fixture/out"};
+  r = RunVirtual(folderJob, hooks);
+  check(!r.completed && !r.partialCopies && !done && files.size() == 1 &&
+            errorHas(r, blocked.c_str()),
+        "folder with only unavailable children is not uploaded as an empty success");
+  std::ofstream(sibling) << "healthy sibling";
+  r = RunVirtual(folderJob, hooks);
+  const auto hasReceipt = [&](const Result &result) {
+    for (const auto &entry : result.outcomes)
+      if (entry.source == sibling && entry.destination == remoteSibling &&
+          entry.status == "completed" && entry.upload &&
+          entry.upload->contentVerified &&
+          entry.upload->publication == Publication::Published)
+        return true;
+    return false;
+  };
+  check(!r.completed && r.partialCopies == 1 && !r.cancelled && done == 1 &&
+            errorHas(r, blocked.c_str()) && hasReceipt(r) &&
+            files.count(remoteSibling) && files.at(remoteSibling).data == "healthy sibling" &&
+            !files.count(remoteFolder + "/unavailable"),
+        "partial folder upload retains verified sibling receipts but never completes the root");
+  reset();
+  Hooks reporting = hooks;
+  reporting.report = std::make_shared<JobReportStore>();
+  r = RunVirtual(folderJob, reporting);
+  const auto uploadReport = reporting.report->Page(0, 10);
+  check(!r.completed && r.partialCopies == 1 && done == 1 &&
+            uploadReport.errors.size() == 1 &&
+            uploadReport.errors.front().find(blocked) != std::string::npos &&
+            uploadReport.outcomes.size() == 3 &&
+            uploadReport.outcomes[0].source == blocked &&
+            uploadReport.outcomes[0].status == "unprocessed" &&
+            uploadReport.outcomes[1].source == sibling &&
+            uploadReport.outcomes[1].status == "completed" &&
+            uploadReport.outcomes[1].detail.find("Uploaded contents verified.") != std::string::npos &&
+            uploadReport.outcomes[1].detail.find("Destination published.") != std::string::npos &&
+            uploadReport.outcomes[2].source == folder &&
+            uploadReport.outcomes[2].status == "partial",
+        "queue-style report distinguishes the omitted child, delivered sibling and partial root");
+  const auto nested = folder + "/nested";
+  const auto nestedBlocked = nested + "/other-unavailable";
+  if (rmdir(blocked.c_str()) || mkdir(nested.c_str(), 0700) ||
+      mkdir(nestedBlocked.c_str(), 0700))
+    return 1;
+  InterruptedVolumes().Block(nestedBlocked);
+  reset();
+  r = RunVirtual(folderJob, hooks);
+  check(!r.completed && r.partialCopies == 1 && done == 1 && hasReceipt(r) &&
+            errorHas(r, nestedBlocked.c_str()) &&
+            !files.count(remoteFolder + "/nested"),
+        "nested omissions propagate to the selected folder without hiding healthy receipts");
+  rmdir(nestedBlocked.c_str());
+  rmdir(nested.c_str());
+  unlink(sibling.c_str());
+  rmdir(folder.c_str());
   unlink(source.c_str()); rmdir(dir);
   std::cout << checks << " fault checks, " << failures << " failures\n";
   return failures ? 1 : 0;

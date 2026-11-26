@@ -2,6 +2,7 @@
 #include "FolderCompare.h"
 #include "ArchiveVolumes.h"
 #include "Sha256.h"
+#include "UnavailableVolume.h"
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
@@ -60,6 +61,9 @@ Tree Scan(std::string root, size_t limit,
   if (ParseLocation(root).Local())
     while (root.size() > 1 && root.back() == '/')
       root.pop_back();
+  control.Check();
+  Need(!InterruptedVolumes().ContainsResolved(root),
+       root + ": " + kUnavailableVolumeText);
   FileEntry first;
   Need(StatFile(root, first, control) && first.directory && !first.link,
        "Choose an existing folder, not a symbolic link: " + root);
@@ -77,7 +81,11 @@ Tree Scan(std::string root, size_t limit,
     pending.pop_back();
     Need(p.depth < 256,
          "Folder nesting limit reached. Comparison is incomplete.");
-    for (auto e : ListFiles(p.path, control)) {
+    std::vector<std::string> omitted;
+    auto entries = ListFiles(p.path, control, &omitted);
+    if (!omitted.empty())
+      throw std::runtime_error(omitted.front() + ": " + kUnavailableVolumeText);
+    for (auto &e : entries) {
       control.Check();
       Need(!e.name.empty() && e.name != "." && e.name != ".." &&
                e.name.find('/') == std::string::npos,
@@ -152,6 +160,8 @@ std::string Digest(const Item &i, const TransferControl &control) {
 }
 std::string ArchiveGuard(const std::string &root) {
   auto location = ParseLocation(root);
+  if (location.Archive() && InterruptedVolumes().ContainsResolved(root))
+    throw std::runtime_error(root + ": " + kUnavailableVolumeText);
   return location.Archive() ? FindArchiveVolumes(location.archive).Fingerprint()
                             : std::string();
 }

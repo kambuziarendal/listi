@@ -2,6 +2,7 @@
 #include "ArchiveJobs.h"
 #include "FolderCompare.h"
 #include "Sha256.h"
+#include "UnavailableVolume.h"
 #include <Application.h>
 #include <CheckBox.h>
 #include <ColumnListView.h>
@@ -10,6 +11,7 @@
 #include <Entry.h>
 #include <Path.h>
 #include <Window.h>
+#include <TextView.h>
 #include <cerrno>
 #include <dirent.h>
 #include <fstream>
@@ -78,6 +80,29 @@ bool NumericSizeOrder(BApplication &app, const std::string &left,
   }
   target.SendMessage(B_QUIT_REQUESTED);
   return sorted;
+}
+bool ShowsIncompletePath(BApplication &app, const std::string &left,
+                         const std::string &right, const std::string &blocked) {
+  OpenFolderCompare(left, right);
+  BWindow *window = app.WindowAt(0);
+  if (!window)
+    return false;
+  BMessenger target(window);
+  target.SendMessage('cmha');
+  bool incomplete = false;
+  for (int i = 0; i < 250 && !incomplete; ++i) {
+    if (window->LockWithTimeout(20000) == B_OK) {
+      auto summary = dynamic_cast<BTextView *>(window->FindView("compare summary"));
+      const std::string text = summary ? summary->Text() : "";
+      incomplete = text.find("Incomplete:") != std::string::npos &&
+                   text.find(blocked) != std::string::npos &&
+                   text.find("No differences found") == std::string::npos;
+      window->Unlock();
+    }
+    snooze(10000);
+  }
+  target.SendMessage(B_QUIT_REQUESTED);
+  return incomplete;
 }
 bool FilterResetsFocusedRow(BApplication &app, const std::string &left,
                             const std::string &right) {
@@ -174,6 +199,28 @@ int main() {
     unlink((l + "/overflow").c_str());
     unlink((l + "/single").c_str());
     unlink((r + "/single").c_str());
+    const auto blockedParent = root + "/blocked-parent";
+    const auto blocked = blockedParent + "/unavailable";
+    const auto peer = root + "/blocked-peer";
+    mkdir(blockedParent.c_str(), 0700);
+    mkdir(blocked.c_str(), 0700);
+    mkdir(peer.c_str(), 0700);
+    InterruptedVolumes().Block(blocked);
+    check(ListFiles(blockedParent).empty(),
+          "browsing still hides a registered unavailable child");
+    const auto onlyBlocked = CompareFolders({blockedParent, peer, true});
+    check(!onlyBlocked.complete && onlyBlocked.error.find(blocked) != std::string::npos,
+          "SHA-256 comparison cannot mistake an omitted child for an empty folder");
+    put(blockedParent + "/sibling", "identical");
+    put(peer + "/sibling", "identical");
+    const auto withSibling = CompareFolders({peer, blockedParent, true});
+    check(!withSibling.complete && withSibling.error.find(blocked) != std::string::npos,
+          "matching healthy siblings cannot hide an omitted child on the right");
+    check(ShowsIncompletePath(app, blockedParent, peer, blocked),
+          "SHA-256 window reports incomplete and names the omitted directory");
+    const auto blockedRoot = CompareFolders({blocked, peer, true});
+    check(!blockedRoot.complete && blockedRoot.error.find(blocked) != std::string::npos,
+          "a registered unavailable comparison root is reported by its exact path");
     symlink(r.c_str(), (root + "/folder-link").c_str());
     check(!CompareFolders({l, root + "/folder-link/", true}).complete,
           "a trailing slash cannot make a symbolic root a compared folder");
