@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.38.0-45 (private alpha candidate)
+
+- FTP operations distinguish an entry that is absent from one the server may have hidden. An incomplete listing cannot authorize a rename, certify a folder download, or hide a possible recovery file.
+- Folder comparison and single-file transfers check the server's file identity when available, even if the size and modification time match.
+- TAR-to-TAR moves preserve member ownership. Archive edits retain empty typed BFS attributes on the archive itself.
+- CSV exports distinguish a known Unix epoch from an unknown modification time.
+
 ## 0.38.0-44 (private alpha candidate)
 
 - Permanent network deletion checks the selected type and available revision information before removing anything from that selection. If a folder deletion stops partway, the report identifies entries already removed.

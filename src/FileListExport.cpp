@@ -31,7 +31,7 @@ std::vector<ExportRow> FreezeFileList(const PaneModel &model) {
     const time_t seconds = entry->modified;
     struct tm utc;
     char modified[32] = {};
-    if (seconds && gmtime_r(&seconds, &utc))
+    if ((entry->modifiedKnown || seconds != 0) && gmtime_r(&seconds, &utc))
       strftime(modified, sizeof(modified), "%Y-%m-%dT%H:%M:%SZ", &utc);
     rows.push_back({TextCell(entry->name) + "," + TextCell(entry->path) + "," +
                     type + "," + size + "," + modified + "\r\n", model.IsSelected(entry->path)});
