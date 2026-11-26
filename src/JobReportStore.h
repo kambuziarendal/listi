@@ -8,6 +8,8 @@
 #include <vector>
 
 namespace Listi {
+std::string OutcomeLabel(const std::string &status);
+
 struct ReportPage {
   size_t total = 0;
   bool incomplete = false;

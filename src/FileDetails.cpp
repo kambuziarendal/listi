@@ -461,8 +461,7 @@ public:
   bool InitiateDrag(BPoint point, bool) override {
     BMessage drag;
     try {
-      drag = Listi::MakeFileDrag(
-          model->SelectedFiles(), model->SelectedLocalIdentities(Listi::kFileSelectionLimit));
+      drag = Listi::MakePaneFileDrag(*model);
     } catch (const std::exception &e) {
       pane->ShowStatus(e.what());
       return false;

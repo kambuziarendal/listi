@@ -74,7 +74,7 @@ BMessage EncodeJob(const Job &job, uint32 what) {
     item.AddInt64("node", entry.second.inode);
     m.AddMessage("identity", &item);
   }
-  for (const auto &[path, entry] : job.expectedRemoteDeletes) {
+  for (const auto &[path, entry] : job.expectedRemoteSources) {
     BMessage item;
     item.AddString("path", path.c_str());
     item.AddBool("directory", entry.directory);
@@ -86,6 +86,7 @@ BMessage EncodeJob(const Job &job, uint32 what) {
       item.AddString("fraction", entry.modifiedFraction.c_str());
     }
     item.AddString("providerIdentity", entry.providerIdentity.c_str());
+    // Retain the original field name for previously encoded Delete jobs.
     m.AddMessage("remoteDelete", &item);
   }
   for (const auto &[source, target] : job.restoreTargets) {
@@ -144,7 +145,7 @@ Job DecodeJob(const BMessage &m) {
     entry.modified = item.GetInt64("modified", 0);
     entry.modifiedFraction = item.GetString("fraction", "");
     entry.providerIdentity = item.GetString("providerIdentity", "");
-    job.expectedRemoteDeletes.emplace(path, std::move(entry));
+    job.expectedRemoteSources.emplace(path, std::move(entry));
   }
   for (int32 i = 0; m.FindMessage("archiveSet", i, &item) == B_OK; ++i)
     job.expectedArchiveSets[item.GetString("path", "")] =

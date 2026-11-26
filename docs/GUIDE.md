@@ -614,7 +614,17 @@ A network copy transfers file contents, not Haiku BFS attributes. Downloads
 apply available portable permissions and modification time. Uploads verify the
 staged file contents before publication; an upload is not a promise to retain
 source permissions, timestamps or other metadata on the server. Remote
-progress can show the current file and bytes without a total.
+progress can show the current file and bytes without a total. Job Details
+distinguishes bytes acknowledged by the transport, verification of the staged
+file, and publication under the final name. If publication is unknown, inspect
+the final name and any reported recovery paths before retrying.
+
+For a panel Copy, Rename, Move or Delete of a network entry, Listi rechecks the type and
+the size, timestamp and provider identity that the selected row actually
+supplied. With no stable server ID, a replacement with matching metadata
+may be indistinguishable. This check does not lock out changes between the
+last lookup and the server operation. Direct FTP/FTPS Rename and Move are
+refused because those protocols cannot safely preserve a competing target.
 
 For SFTP, open **Connect** and enter the address and username. Under **Advanced**,
 **SSH private key** defaults to the first readable `id_ed25519`, `id_ecdsa` or

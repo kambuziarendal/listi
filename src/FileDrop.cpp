@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 #include "TransferCommand.h"
 #include "FileDrop.h"
+#include "JobSnapshot.h"
+#include "PaneModel.h"
 #include "FileClipboard.h"
 #include "VirtualFile.h"
 #include <algorithm>
@@ -15,6 +17,7 @@
 #include <cstdlib>
 namespace Listi {
 namespace {
+constexpr const char *kRemoteSelection = "listi:remote-selection";
 constexpr const char *kSelection = "listi:drag-selection";
 void Require(status_t s) {
   if (s != B_OK)
@@ -76,6 +79,17 @@ BMessage MakeFileDrag(const std::vector<std::string> &paths,
   Require(drag.AddMessage(kSelection, &selection));
   return drag;
 }
+BMessage MakePaneFileDrag(const PaneModel &model) {
+  const auto paths = model.SelectedFiles();
+  auto drag = MakeFileDrag(paths, model.SelectedLocalIdentities(kFileSelectionLimit));
+  if (!paths.empty() && IsVirtual(paths.front()) && !ParseLocation(paths.front()).Archive()) {
+    Job snapshot;
+    snapshot.expectedRemoteSources = model.SelectedRemoteEntries();
+    const auto encoded = EncodeJob(snapshot, 0);
+    Require(drag.AddMessage(kRemoteSelection, &encoded));
+  }
+  return drag;
+}
 Job PrepareFileDrop(const BMessage &message, const std::string &destination,
                     bool allowSameFolder, std::string *missingLeaf) {
   if (missingLeaf)
@@ -92,6 +106,18 @@ Job PrepareFileDrop(const BMessage &message, const std::string &destination,
       if (i >= 1024 || !IsVirtual(path))
         throw std::runtime_error("Invalid virtual drop selection.");
       job.sources.emplace_back(path);
+    }
+    // Older drags carry URLs only. A drag with a snapshot must cover the
+    // entire selection; never silently downgrade it to the old behaviour.
+    if (message.HasMessage(kRemoteSelection)) {
+      BMessage snapshot;
+      Require(message.FindMessage(kRemoteSelection, &snapshot));
+      job.expectedRemoteSources = DecodeJob(snapshot).expectedRemoteSources;
+      if (job.expectedRemoteSources.size() != job.sources.size() ||
+          std::any_of(job.sources.begin(), job.sources.end(), [&](const std::string &source) {
+            return !job.expectedRemoteSources.count(source);
+          }))
+        throw std::runtime_error("The dragged network selection changed. Select the entries again.");
     }
   } else {
     for (const auto &item : ReadDragRefs(message)) {
