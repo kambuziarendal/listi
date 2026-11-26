@@ -2,12 +2,14 @@
 """Link native regression cases against the current Haiku build and run them."""
 from pathlib import Path
 import hashlib
+import os
 import platform
 import re
 import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -55,6 +57,32 @@ WRAPS = {
     "folder-compare": ['opendir'],
     "properties-faults": ['_ZN5BNode9WriteAttrEPKcjlPKvm', '_ZN5BNode4SyncEv', '_ZN8BMessage9AddStringEPKcS1_', 'fsync'],
 }
+
+
+def run_disk_actions(binary):
+    # Never format a supplied device. When no fixture was supplied, use only
+    # the new file in our private directory and unregister that same file.
+    folder = Path(tempfile.mkdtemp(prefix="listi-disk-audit-"))
+    image = folder / "volume.bfs"
+    try:
+        with image.open("xb") as stream:
+            stream.truncate(32 * 1024 * 1024)
+        subprocess.run(["mkfs", "-q", "-t", "bfs", image, "ListiMountQA"], check=True)
+        registration = subprocess.check_output(["diskimage", "register", image], text=True)
+        try:
+            device = re.search(r'"(/dev/disk/virtual/files/[0-9]+/raw)"', registration)
+            if device is None:
+                raise RuntimeError(f"Cannot identify file device for {image}: {registration}")
+            subprocess.run([binary], cwd=ROOT, check=True, timeout=90,
+                           env={**os.environ, "LISTI_TEST_DISK_DEVICE": device.group(1)})
+        finally:
+            # On cleanup failure leave the backing file available for inspection.
+            subprocess.run(["diskimage", "unregister", image], check=True)
+    except BaseException:
+        print(f"Disk audit fixture retained at {folder}", file=sys.stderr)
+        raise
+    image.unlink()
+    folder.rmdir()
 
 
 def build_configuration():
@@ -132,7 +160,10 @@ def run():
             *(f"-Wl,--wrap={symbol}" for symbol in WRAPS.get(name, [])),
             "-o", binary,
         ], cwd=SRC, check=True)
-        subprocess.run([binary], cwd=ROOT, check=True, timeout=90)
+        if name == "disk-actions" and not os.environ.get("LISTI_TEST_DISK_DEVICE"):
+            run_disk_actions(binary)
+        else:
+            subprocess.run([binary], cwd=ROOT, check=True, timeout=90)
         print("PASS", name, flush=True)
     print("TEST Listi --self-test", flush=True)
     subprocess.run([app, "--self-test"], cwd=ROOT, check=True, timeout=120)
