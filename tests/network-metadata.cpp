@@ -336,7 +336,7 @@ void CheckFtpCompare(const std::string &ftp, const std::string &local) {
              [&](const char *p, size_t n) { hidden.append(p, n); });
     Expect(hidden == "hidden\n", remote + " has a readable dotfile");
     auto result = CompareFolders({folder, remote, true});
-    Expect(result.verified == 1, remote + " verifies the visible file pair");
+    Expect(result.verified == 1, remote + " verifies the visible file pair: " + result.error);
     if (mode != "list-only") {
       Expect(!result.complete && result.different == 1 &&
                  result.entries.front().relative == ".settings" &&
