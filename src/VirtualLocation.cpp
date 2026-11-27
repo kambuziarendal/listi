@@ -138,6 +138,20 @@ std::string Location::CanonicalAuthority() const {
                                scheme == "ftps" ? 990 : scheme == "smb" ? 445 : 0;
   return port == defaultPort ? scheme + "://" + host : Authority();
 }
+void CheckNetworkTransferDestination(const std::vector<std::string> &sources,
+                                     const Location &destination) {
+  if (destination.Local() || destination.Archive())
+    return;
+  const auto server = destination.CanonicalAuthority();
+  for (const auto &path : sources) {
+    const auto source = ParseLocation(path);
+    if (source.CanonicalAuthority() != server)
+      continue;
+    if (source.path == "/" || destination.path == source.path ||
+        destination.path.rfind(source.path + "/", 0) == 0)
+      throw std::runtime_error("A selected entry contains the destination folder. Choose another destination.");
+  }
+}
 std::string Location::URL() const {
   if (Local())
     return path;

@@ -152,6 +152,10 @@ For focused SFTP checks, use the same fixture with these environment variables:
   pointing at the fixture’s `wrong_known_hosts`.
 - `LISTI_SFTP_AUTH_CASE=agent` needs a disposable SSH agent with the fixture's
   client key loaded. It checks cancellation followed by a successful transfer.
+- `LISTI_SFTP_AUTH_CASE=agent-password` uses a silent fixture agent. It checks
+  that cancelling does not fall back to a password, but a timeout does.
+- `LISTI_SFTP_TRANSFER_ONLY=1` includes the sparse-directory comparison. Start
+  a fresh fixture to trigger the change in an already-hashed file.
 
 ## Enabling public CI without paid services
 

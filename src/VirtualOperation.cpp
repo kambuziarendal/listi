@@ -693,7 +693,12 @@ struct Runner {
       if (IsVirtual(src) && !ParseLocation(src).Archive()) {
         local.checkReplacementSource = [&] {
           FileEntry current;
-          if (!StatFile(src, current, control) || !source.SameRevision(current))
+          // Provider identity and coarse timestamps do not bind file contents.
+          // Only an actual overwrite rereads the source and its private staged copy.
+          auto verify = Control(src, false);
+          if (!StatFile(src, current, verify) || !source.SameRevision(current) ||
+              RemoteDigest(temp.path, verify) != RemoteDigest(src, verify) ||
+              !StatFile(src, current, verify) || !source.SameRevision(current))
             throw std::runtime_error("Source changed before replacement; destination was not replaced: " + src);
         };
       }
@@ -744,18 +749,31 @@ struct Runner {
       throw std::runtime_error(
           "This direct transfer cannot update an archive. Copy entries to a "
           "regular folder to edit them.");
+    std::string originalDigest;
     if (exists) {
       if (boundSftpParent)
         VerifyRemoteDirectories(control);
+      // The answer authorizes the bytes present before the question, not a
+      // new version written while it is open. An unreadable file can still be skipped.
+      std::exception_ptr readFailure;
+      if (!skipAll && (replaceAll || hooks.conflict)) {
+        try {
+          originalDigest = RemoteDigest(dst, Control(dst, false));
+        } catch (const std::runtime_error &) {
+          readFailure = std::current_exception();
+        }
+      }
       if (!Replace(dst))
         return;
+      if (readFailure)
+        std::rethrow_exception(readFailure);
     }
     TempFile temp(LocationLeaf(dst), src, dst);
     Sha256 expected;
     const auto stagedBytes = Stage(src, source, temp, Control(src, false), &expected);
     EntryOutcome entry{src, dst, "upload not published", "", UploadVerification{}};
     try {
-      PublishUpload(src, dst, target, exists, temp, expected, stagedBytes,
+      PublishUpload(src, dst, target, exists, originalDigest, temp, expected, stagedBytes,
                     control, entry);
     } catch (...) {
       RecordOutcome(std::move(entry));
@@ -764,7 +782,8 @@ struct Runner {
     RecordOutcome(std::move(entry));
   }
   void PublishUpload(const std::string &src, const std::string &dst,
-                     const FileEntry &target, bool exists, const TempFile &temp,
+                     const FileEntry &target, bool exists, const std::string &originalDigest,
+                     const TempFile &temp,
                      Sha256 &expected, uint64_t stagedBytes,
                      const TransferControl &control, EntryOutcome &entry) {
     auto &receipt = *entry.upload;
@@ -772,7 +791,6 @@ struct Runner {
     const auto &staged = recovery.Stage();
     const auto &backup = recovery.Backup();
     const auto expectedDigest = expected.Finish();
-    std::string originalDigest;
     FileEntry stagedRevision;
     bool stagedExists = false, backupExists = false, committed = false,
          commitAttempted = false;
@@ -780,10 +798,6 @@ struct Runner {
       FileEntry check;
       if (StatFile(staged, check, control) || StatFile(backup, check, control))
         throw std::runtime_error("Temporary transfer name collision");
-      // Record the bytes an acknowledged backup must still contain before
-      // rollback or cleanup. A name, timestamp and size alone are not evidence.
-      if (exists)
-        originalDigest = RemoteDigest(dst, control);
       recovery.Advance(RecoveryPhase::Writing);
       VerifyRemoteDirectories(control);
       stagedExists = true;
@@ -1136,6 +1150,8 @@ Result RunVirtual(const Job &job, const Hooks &hooks) {
         runner.directories[folder] = job.expectedDestination;
     }
     runner.Guard();
+    if (job.action == Action::Copy || job.action == Action::Move)
+      CheckNetworkTransferDestination(job.sources, ParseLocation(job.destination));
     if (job.displayedRemoteDestination) {
       const bool named = job.action == Action::Rename || job.action == Action::MakeDirectory;
       const auto parent = named ? ParentLocation(job.destination)

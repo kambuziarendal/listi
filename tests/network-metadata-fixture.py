@@ -182,6 +182,8 @@ class Auth(paramiko.ServerInterface):
         self.client_key = client_key
 
     def get_allowed_auths(self, username):
+        if username == "agent-password":
+            return "publickey,password"
         return "publickey" if username == "key-test" else "password"
 
     def check_auth_publickey(self, username, key):
@@ -189,7 +191,7 @@ class Auth(paramiko.ServerInterface):
                 else paramiko.AUTH_FAILED)
 
     def check_auth_password(self, username, password):
-        return (paramiko.AUTH_SUCCESSFUL if (username, password) == (USER, PASSWORD)
+        return (paramiko.AUTH_SUCCESSFUL if username in (USER, "agent-password") and password == PASSWORD
                 else paramiko.AUTH_FAILED)
 
     def check_channel_request(self, kind, ident):
@@ -230,6 +232,8 @@ class MetadataSFTP(paramiko.SFTPServerInterface):
                 entry = ListAttributes.from_stat(child.lstat(), child.name)
                 if path in {"/compare", "/compare-changing", "/compare-short"}:
                     entry.st_size = None
+                if path == "/compare-late":
+                    entry.st_size = entry.st_atime = entry.st_mtime = None
                 if path == "/compare-stale":
                     entry.st_mtime -= 1
                 entries.append(entry)
@@ -278,6 +282,10 @@ class MetadataSFTP(paramiko.SFTPServerInterface):
         if flags != os.O_RDONLY:
             return paramiko.SFTP_PERMISSION_DENIED
         try:
+            if path == "/compare-late/1":
+                first = self.resolve("/compare-late/0")
+                if first.read_bytes() == b"unchanged":
+                    first.write_bytes(b"grown after hashing")
             if path == "/signal-conflict":
                 with self.resolve("/conflict").open("ab") as conflict:
                     conflict.write(b"!")
@@ -381,6 +389,10 @@ def main():
     (sftp_root / "aliases").mkdir()
     (sftp_root / "aliases" / "Report").write_bytes(b"original")
     (sftp_root / "aliases" / "third").write_bytes(b"third")
+    late = sftp_root / "compare-late"
+    late.mkdir()
+    for i in range(8):
+        (late / str(i)).write_bytes(b"unchanged")
     for name in ("compare", "compare-changing", "compare-stale", "compare-short"):
         (sftp_root / name).mkdir()
     for name in ("known", "unknown", "compare/known", "compare-changing/known",

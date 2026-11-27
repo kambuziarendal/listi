@@ -21,6 +21,7 @@ struct Item {
   struct stat native {};
   bool local = false;
   bool fromMlsd = false;
+  bool hashedSftpRevision = false;
   ListingMethod listing = ListingMethod::Provider;
   std::string link;
 };
@@ -122,16 +123,6 @@ bool Same(const Item &a, const Item &b) {
     return Stable(a.native, b.native) && a.link == b.link;
   return a.entry.SameRevision(b.entry);
 }
-void Validate(const Tree &before, const Tree &after) {
-  Need(before.size() == after.size(),
-       "A folder changed during comparison. Run it again.");
-  for (const auto &p : before) {
-    auto f = after.find(p.first);
-    Need(f != after.end() && p.second.listing == f->second.listing &&
-             Same(p.second, f->second),
-         "An entry changed during comparison: " + p.second.entry.path);
-  }
-}
 // READDIR and LSTAT can return different subsets of the SFTP v3 fields.
 bool MatchesListedFields(const FileEntry &listed, const FileEntry &current) {
   return listed.directory == current.directory && listed.link == current.link &&
@@ -141,7 +132,29 @@ bool MatchesListedFields(const FileEntry &listed, const FileEntry &current) {
           (current.permissionsKnown && listed.permissions == current.permissions)) &&
          (listed.providerIdentity.empty() || listed.providerIdentity == current.providerIdentity);
 }
-std::string Digest(const Item &i, const TransferControl &control) {
+bool MatchesFinalScan(const Item &before, const Item &after, const TransferControl &control) {
+  if (!before.hashedSftpRevision)
+    return Same(before, after);
+  if (MatchesListedFields(before.entry, after.entry))
+    return true;
+  // A sparse final READDIR must not discard the revision used for hashing.
+  // Both observations must agree with the same final LSTAT.
+  FileEntry current;
+  return StatFile(before.entry.path, current, control) &&
+         MatchesListedFields(before.entry, current) && MatchesListedFields(after.entry, current);
+}
+void Validate(const Tree &before, const Tree &after, const TransferControl &control) {
+  Need(before.size() == after.size(),
+       "A folder changed during comparison. Run it again.");
+  for (const auto &p : before) {
+    control.Check();
+    auto f = after.find(p.first);
+    Need(f != after.end() && p.second.listing == f->second.listing &&
+             MatchesFinalScan(p.second, f->second, control),
+         "An entry changed during comparison: " + p.second.entry.path);
+  }
+}
+std::string Digest(Item &i, const TransferControl &control) {
   if (i.local) {
     struct stat now;
     Need(!lstat(i.entry.path.c_str(), &now) && Stable(i.native, now),
@@ -150,7 +163,8 @@ std::string Digest(const Item &i, const TransferControl &control) {
          "Special file cannot be compared: " + i.entry.path);
   }
   Item expected = i;
-  if (ParseLocation(i.entry.path).scheme == "sftp") {
+  const bool sftp = ParseLocation(i.entry.path).scheme == "sftp";
+  if (sftp) {
     FileEntry before;
     Need(StatFile(i.entry.path, before, control) && MatchesListedFields(i.entry, before),
          "File changed before reading: " + i.entry.path);
@@ -174,6 +188,10 @@ std::string Digest(const Item &i, const TransferControl &control) {
       : StatFile(i.entry.path, after, control);
   Need(found && Same(expected, Inspect(after)),
        "File changed while reading: " + i.entry.path);
+  if (sftp) {
+    i.entry = std::move(expected.entry);
+    i.hashedSftpRevision = true;
+  }
   return hash.Finish();
 }
 std::string ArchiveGuard(const std::string &root) {
@@ -337,8 +355,8 @@ CompareResult CompareFolders(const CompareRequest &r,
     }
     // Re-list names and identities so missing/unreadable or changing trees
     // never turn into a successful comparison of a partial scan.
-    Validate(left, Scan(r.left, r.entryLimit, control));
-    Validate(right, Scan(r.right, r.entryLimit, control));
+    Validate(left, Scan(r.left, r.entryLimit, control), control);
+    Validate(right, Scan(r.right, r.entryLimit, control), control);
     Need(leftGuard == ArchiveGuard(r.left) &&
              rightGuard == ArchiveGuard(r.right),
          "An archive changed during comparison. Run it again.");

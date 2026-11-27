@@ -52,6 +52,7 @@ struct Remote {
   bool directory = false;
   std::string identity;
   std::optional<unsigned> permissions;
+  bool modifiedKnown = true;
 };
 std::map<std::string, Remote> files;
 bool foldDirectoryNames = false;
@@ -182,7 +183,8 @@ bool StatNetwork(const Location &l, FileEntry &entry, const TransferControl &c,
   entry.providerIdentity = it->second.identity;
   entry.sizeKnown = !omitStageSize || !suffix(l.URL(), ".part");
   entry.size = it->second.data.size();
-  entry.SetModification(it->second.modified, it->second.nanoseconds);
+  if (it->second.modifiedKnown)
+    entry.SetModification(it->second.modified, it->second.nanoseconds);
   return true;
 }
 std::set<std::string> ListSftpNames(const Location &folder, const TransferControl &c) {
@@ -449,11 +451,12 @@ int main() {
   const auto localTarget = downloadFolder + "/input";
   const Job downloadJob{Action::Copy, {remote}, downloadFolder};
   auto download = [&](LocalPublish publication, Decision decision, bool report,
-                      bool privateStaging = false, bool changeSource = false) {
+                      bool privateStaging = false, const char *edit = nullptr, bool hasTime = true) {
     reset();
     localPublish = publication;
     expectPrivatePublication = privateStaging;
     files[remote] = {"downloaded payload", 1};
+    files[remote].modifiedKnown = hasTime;
     Hooks local = hooks;
     local.privateStaging = privateStaging;
     local.copyConflict = [](const CopyConflict &) {
@@ -463,8 +466,8 @@ int main() {
     local.conflict = [=](const std::string &target) {
       if (target != localTarget)
         throw std::runtime_error("Wrong conflict target");
-      if (changeSource)
-        files.at(remote).data = "changed while answering";
+      if (edit)
+        files.at(remote).data = edit;
       return decision;
     };
     local.fileDone = [&](const std::string &from, const std::string &to) {
@@ -501,12 +504,17 @@ int main() {
             skipped.errors.empty() && actualPaths(skipped.outcomes, "skipped") &&
             localContents() == "existing data",
         "download collision is recorded and counted only once when skipped");
-  for (auto answer : {Decision::Replace, Decision::Skip, Decision::ReplaceAll}) {
-    auto changed = download(LocalPublish::Limited, answer, false, false, true).first;
-    check(!changed.completed && !done && localContents() == "existing data" &&
-              (answer == Decision::Skip ? changed.skipped == 1 && changed.errors.empty()
-                                        : errorHas(changed, "Source changed before replacement")),
-          "a changed network source cannot replace a local conflict; Skip still skips");
+  for (bool hasTime : {false, true}) {
+    for (const char *edit : {"Downloaded payload", "different length"}) {
+      for (auto answer : {Decision::Replace, Decision::Skip, Decision::ReplaceAll}) {
+        auto changed = download(LocalPublish::Limited, answer, false, false, edit, hasTime).first;
+        check(!changed.completed && !done && localContents() == "existing data" &&
+                  files.at(remote).data == edit &&
+                  (answer == Decision::Skip ? changed.skipped == 1 && changed.errors.empty()
+                                            : errorHas(changed, "Source changed before replacement")),
+              "a changed network source cannot replace a local conflict; Skip still skips");
+      }
+    }
   }
   auto aborted = download(LocalPublish::Limited, Decision::Abort, false).first;
   check(aborted.cancelled && !aborted.skipped && !aborted.completed && !done &&
@@ -804,6 +812,21 @@ int main() {
   check(r.completed == 0 && done == 0 && files.size() == 1 &&
         files.at(destination).data == "concurrent edit",
         "observable destination race leaves concurrent edit untouched");
+  for (const char *edit : {"Old contents", "different length"}) {
+    for (auto answer : {Decision::Replace, Decision::Skip, Decision::ReplaceAll}) {
+      reset();
+      Hooks edited = hooks;
+      edited.conflict = [&](const std::string &target) {
+        files.at(target).data = edit;
+        return answer;
+      };
+      r = RunVirtual(job, edited);
+      check(!r.completed && !done && files.size() == 1 && files.at(destination).data == edit &&
+                (answer == Decision::Skip ? r.skipped == 1 && r.errors.empty()
+                                          : errorHas(r, "Destination changed")),
+            "upload preserves edits during the conflict even with unchanged size and time");
+    }
+  }
   reset(); hooks.conflict = [](const std::string &) { return Decision::Skip; };
   r = RunVirtual(job, hooks);
   check(r.completed == 0 && r.skipped == 1 && done == 0 &&
@@ -825,6 +848,45 @@ int main() {
         "explicit default port cannot bypass self-copy rejection");
   const std::string in = "sftp://fixture/in/selection";
   const std::string out = "sftp://fixture/out/selection";
+  const std::string pickedFile = "sftp://fixture/input";
+  const std::string work = "sftp://fixture/work";
+  for (auto action : {Action::Copy, Action::Move}) {
+    for (bool reverse : {false, true}) {
+      for (bool occupied : {false, true}) {
+        for (const auto &target : {work, work + "/sub"}) {
+          reset();
+          files.clear();
+          files[pickedFile] = {"selected"};
+          files[work] = files[work + "/sub"] = {"", 1, 0, true};
+          if (occupied)
+            files[target + "/input"] = {"keep"};
+          const auto count = files.size();
+          const auto alias = "sftp://FIXTURE:22/%77ork";
+          Job overlap{action, reverse ? std::vector<std::string>{alias, pickedFile}
+                                      : std::vector<std::string>{pickedFile, alias}, target};
+          StatFile(pickedFile, overlap.expectedRemoteSources[pickedFile]);
+          StatFile(work, overlap.expectedRemoteSources[alias]);
+          r = RunVirtual(overlap, hooks);
+          check(!r.completed && !r.partialCopies && !done && files.size() == count &&
+                    errorHas(r, "contains the destination") && files.at(pickedFile).data == "selected" &&
+                    files.at(work).directory && files.at(work + "/sub").directory &&
+                    (occupied ? files.at(target + "/input").data == "keep"
+                              : !files.count(target + "/input")),
+                "overlap rejects the entire remote selection before copying or moving any root");
+        }
+      }
+    }
+  }
+  reset();
+  const std::string drafts = "sftp://fixture/drafts", other = work + "copy";
+  files[drafts] = files[work] = files[other] = {"", 1, 0, true};
+  files[work + "/one"] = {"first"};
+  files[drafts + "/two"] = {"second"};
+  r = RunVirtual({Action::Copy, {work, drafts}, other}, hooks);
+  check(r.completed == 2 && r.errors.empty() && files.at(other + "/work/one").data == "first" &&
+            files.at(other + "/drafts/two").data == "second" &&
+            files.at(work + "/one").data == "first" && files.at(drafts + "/two").data == "second",
+        "two remote folders copy to a distinct destination sharing a path prefix");
   for (bool mergeFolder : {false, true}) {
     reset();
     const auto target = std::string("sftp://fixture/out");

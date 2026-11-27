@@ -160,6 +160,20 @@ extern "C" int __wrap_closedir(DIR *dir) {
 int main() {
   BApplication app("application/x-vnd.Listi-TransferPreflight");
   try {
+    const std::string selected = "sftp://FIXTURE:22/%77ork";
+    for (auto action : {Action::Copy, Action::Move}) {
+      for (auto target : {"sftp://fixture/work", "sftp://fixture/work/sub"}) {
+        bool refused = false;
+        try {
+          PrepareTransfer({action, {"sftp://fixture/document", selected}, target});
+        } catch (const std::runtime_error &error) {
+          refused = std::string_view(error.what()).find("contains the destination") != std::string_view::npos;
+        }
+        Require(refused, "overlapping network selection must be refused at submission");
+      }
+      PrepareTransfer({action, {"sftp://fixture/document", selected}, "sftp://fixture/workcopy"});
+    }
+    puts("PASS network preflight rejects component overlap, not a shared prefix");
     Fixture fixture;
     scanPaused = create_sem(0, "preflight paused");
     resumeScan = create_sem(0, "resume preflight");

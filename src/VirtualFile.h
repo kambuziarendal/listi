@@ -91,6 +91,8 @@ std::string ResolveVirtualRelativePath(const std::string &base,
                                        const std::string &relative);
 std::string ParentLocation(const std::string &);
 std::string LocationLeaf(const std::string &);
+void CheckNetworkTransferDestination(const std::vector<std::string> &sources,
+                                     const Location &destination);
 // Interim single-account mode: a normalized route can be registered only
 // once per process. Existing panes and queued work never adopt new credentials.
 bool SetConnection(const std::string &url, const Connection &);

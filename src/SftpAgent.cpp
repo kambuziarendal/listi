@@ -88,7 +88,7 @@ private:
   void Check() {
     control.Check();
     if (Clock::now() >= deadline)
-      throw std::runtime_error("SSH agent authentication timed out.");
+      throw SftpAgentTimeout();
   }
   void Wait(short events) {
     pollfd p{fd, events, 0};

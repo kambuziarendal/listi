@@ -139,6 +139,7 @@ Job PrepareTransfer(Job job, bool allowSameFolder) {
   if (target.Local() && (job.destination.empty() || job.destination[0] != '/'))
     throw std::runtime_error("Open a destination folder first.");
 
+  CheckNetworkTransferDestination(job.sources, target);
   FreezeLocalJob(job, job.destination);
   FreezeArchiveTargets(job);
   if (job.action == Action::Move &&

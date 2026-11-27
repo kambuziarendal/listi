@@ -83,7 +83,7 @@ void CheckSftpAuthentication(const std::string &server, const std::string &local
                              const std::string &mode, Connection auth) {
   const bool key = mode == "key" || mode == "wrong-passphrase";
   const bool success = mode == "password" || mode == "key" || mode == "change-pin";
-  if (!success && mode != "port-pins" && mode != "agent" && mode != "wrong-password" && mode != "wrong-host" && mode != "wrong-passphrase")
+  if (!success && mode != "port-pins" && mode != "agent" && mode != "agent-password" && mode != "wrong-password" && mode != "wrong-host" && mode != "wrong-passphrase")
     throw std::runtime_error("Invalid SFTP authentication test case");
   if (key) {
     auth.username = "key-test";
@@ -97,6 +97,10 @@ void CheckSftpAuthentication(const std::string &server, const std::string &local
     auth.username = "key-test";
     auth.password.clear();
     auth.privateKey = local + "/no-key"; // only the disposable agent can authenticate
+  }
+  if (mode == "agent-password") {
+    auth.username = "agent-password";
+    auth.privateKey = local + "/no-key";
   }
   if (mode == "wrong-password")
     auth.password = "incorrect";
@@ -134,10 +138,11 @@ void CheckSftpAuthentication(const std::string &server, const std::string &local
     verify(true);
     return;
   }
-  if (mode == "agent") {
+  if (mode == "agent" || mode == "agent-password") {
     const char *running = getenv("SSH_AUTH_SOCK");
-    Expect(running && *running, "disposable agent has the fixture key loaded");
-    const std::string original = running;
+    if (mode == "agent")
+      Expect(running && *running, "disposable agent has the fixture key loaded");
+    const std::string original = running ? running : "";
     const auto silent = local + "/silent-agent";
     sockaddr_un address{};
     address.sun_family = AF_UNIX;
@@ -157,12 +162,26 @@ void CheckSftpAuthentication(const std::string &server, const std::string &local
     const auto start = std::chrono::steady_clock::now();
     const auto stopped = Copy(selected, local, hooks);
     const auto elapsed = std::chrono::steady_clock::now() - start;
-    setenv("SSH_AUTH_SOCK", original.c_str(), 1);
-    close(listener);
     Expect(agentContacted && stopped.cancelled && !stopped.completed &&
         elapsed < std::chrono::seconds(5) && !std::filesystem::exists(destination),
         "cancelled silent agent without publishing");
-    verify(true); // next job, same credentials, responsive real agent
+    if (mode == "agent-password") {
+      const int cancelledSocket = accept(listener, nullptr, nullptr);
+      Expect(cancelledSocket >= 0, "accepted the cancelled agent connection");
+      close(cancelledSocket);
+      const auto retryStart = std::chrono::steady_clock::now();
+      verify(true);
+      Expect(poll(&pending, 1, 0) == 1 &&
+                 std::chrono::steady_clock::now() - retryStart >= std::chrono::seconds(19),
+             "silent agent timed out before the supplied password delivered the file");
+    }
+    close(listener);
+    if (original.empty())
+      unsetenv("SSH_AUTH_SOCK");
+    else
+      setenv("SSH_AUTH_SOCK", original.c_str(), 1);
+    if (mode == "agent")
+      verify(true); // next job, same credentials, responsive real agent
     return;
   }
   verify(success);
@@ -369,6 +388,19 @@ void CheckRecursiveRevision(const std::string &server, const std::string &local)
   }
 }
 void CheckSftpCompare(const std::string &sftp, const std::string &local) {
+  const auto reference = local + "/late-change";
+  std::filesystem::create_directory(reference);
+  for (int i = 0; i < 8; ++i)
+    std::ofstream(reference + "/" + std::to_string(i)) << "unchanged";
+  const auto sparse = ChildLocation(sftp, "compare-late");
+  const auto changing = CompareFolders({reference, sparse, true});
+  Expect(!changing.complete && changing.error.find("changed during comparison") != std::string::npos &&
+             changing.error.find(sparse + "/0") != std::string::npos,
+         "final sparse listing rechecks the first hashed file after another file is opened");
+  const auto stable = CompareFolders({reference, sparse, true});
+  Expect(stable.complete && stable.verified == 7 && stable.different == 1,
+         "fresh comparison of sparse listings sees seven matches and the changed file");
+
   std::filesystem::create_directory(local + "/compare");
   std::ofstream(local + "/compare/known") << "fixture contents\n";
   auto compare = CompareFolders(

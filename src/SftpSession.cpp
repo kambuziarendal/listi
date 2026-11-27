@@ -216,8 +216,15 @@ void SftpSession::Authenticate(Connection &account, const TransferControl &contr
                                                  account.keyPassphrase.c_str());
     }) == 0)
       return;
-    if (!control.cleanup && AuthenticateWithAgent(*this, ssh, user, control))
-      return;
+    try {
+      if (!control.cleanup && AuthenticateWithAgent(*this, ssh, user, control))
+        return;
+    } catch (const SftpAgentTimeout &) {
+      control.Check(); // Cancellation must not turn into another login attempt.
+      if (account.password.empty() || (offered.find(",password,") == std::string::npos &&
+                                       offered.find(",keyboard-interactive,") == std::string::npos))
+        throw;
+    }
   }
   if (offered.find(",password,") != std::string::npos && !Request(control, [&] {
     return libssh2_userauth_password(ssh, user, account.password.c_str());
