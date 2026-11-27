@@ -451,6 +451,10 @@ public:
         BWindow::MessageReceived(m);
       }
     } catch (const std::exception &e) {
+      if (job.archivePasswordToken) {
+        Listi::DiscardArchiveCreationPassword(job.archivePasswordToken);
+        job.archivePasswordToken = 0;
+      }
       Status(e.what());
     }
   }

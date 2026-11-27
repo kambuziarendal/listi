@@ -34,7 +34,7 @@ bool FileDropFlow::Handle(const BMessage &message) {
           PrepareFileDrop(message, message.GetString("destination", ""), true, &missingLeaf);
       if (!missingLeaf.empty()) {
         BMessage accepted(kDropAccepted);
-        accepted.AddInt64("request", serial);
+        RequireJobField(accepted.AddInt64("request", serial));
         const auto path = job.destination + (job.destination == "/" ? "" : "/") + missingLeaf;
         const auto text = "Create this folder and copy " + std::to_string(job.sources.size()) +
                           " item(s) into it? Originals are kept.\n" + path;
@@ -50,12 +50,12 @@ bool FileDropFlow::Handle(const BMessage &message) {
       const bool canConvert = CanProbeImageDrop(job);
       const bool sameFolder = InTransferSourceFolder(job);
       auto accepted = EncodeJob(job, kDropAccepted);
-      accepted.AddInt64("request", serial);
+      RequireJobField(accepted.AddInt64("request", serial));
       if (sameFolder) {
         if (!canConvert)
           throw std::runtime_error(
               "Drop into a different folder, not the source folder.");
-        accepted.AddBool("convertOnly", true);
+        RequireJobField(accepted.AddBool("convertOnly", true));
         actionArea.Ask(
             "Convert an image in its current folder. The original is kept.",
             "Convert here", accepted);
@@ -123,8 +123,8 @@ bool FileDropFlow::Handle(const BMessage &message) {
       PostMainWindowNotice(message.GetString("error", ""));
       break;
     }
-    auto job = DecodeJob(message);
-    if (job.sources.size() != 1)
+    auto job = DecodeSubmittedJob(message, {Action::Copy});
+    if (!job || job->sources.size() != 1)
       break;
     std::vector<std::string> labels;
     BMessage output;
@@ -141,11 +141,11 @@ bool FileDropFlow::Handle(const BMessage &message) {
     accepted.what = kImageDropConvert;
     accepted.RemoveName("replyTo");
     accepted.RemoveName("which");
-    std::string text = "Convert " + Leaf(job.sources.front()) +
-                       " into:\n" + job.destination +
+    std::string text = "Convert " + Leaf(job->sources.front()) +
+                       " into:\n" + job->destination +
                        "\nThe original and existing files are kept.";
     actionArea.Ask(text.c_str(), "Convert", accepted, nullptr,
-                   InTransferSourceFolder(job) ? nullptr : "Copy original instead",
+                   InTransferSourceFolder(*job) ? nullptr : "Copy original instead",
                    nullptr, labels);
     break;
   }

@@ -567,7 +567,8 @@ capabilities. A successful listing does not establish member-data integrity.
   verified content copy and retain the source when the destination cannot
   represent its metadata. TAR rewrites also retain access, metadata-change
   and creation timestamps when present in the original header, and verify
-  them before publication. A move out of TAR refuses these extra timestamps
+  them before publication at nanosecond precision. PAX fractions longer than
+  nine decimal places lose the extra digits during a rebuild. A move out of TAR refuses these extra timestamps
   when their preservation at the destination is not supported.
   Editing a TAR with recognized extended ACLs,
   xattrs, sparse records or file flags is refused; a rebuild is not a
