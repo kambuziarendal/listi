@@ -5,6 +5,7 @@
 #include <Entry.h>
 #include <Node.h>
 #include <String.h>
+#include <TypeConstants.h>
 #include <cstring>
 #include <fs_attr.h>
 #include <filesystem>
