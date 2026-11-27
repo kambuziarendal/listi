@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "ArchiveActions.h"
+#include "ArchiveBackend.h"
 #include "ArchiveWindow.h"
 #include "ArchiveJobs.h"
 #include "ArchivePasswords.h"
@@ -759,6 +760,24 @@ void *run(void *) {
   auto late=PrepareArchiveJob(true,{archive});SetArchiveDestination(late,out,"late-directory");Hooks lateHook;bool lateMade=false;
   lateHook.progress=[&](auto &,uint64_t){if(!lateMade){lateMade=true;mkdir(late.destination.c_str(),0700);write(late.destination+"/existing","preserve");}};
   check(!Run(late,lateHook).errors.empty() && read(late.destination+"/existing")=="preserve","late extraction destination is preserved");
+  write(input + "/7:30.txt", "breakfast");
+  for (const std::string format : {"zip", "7z"}) {
+    if (format == "7z" && !SevenZipCanCreate())
+      continue;
+    auto clock = PrepareArchiveJob(false, {input + "/7:30.txt"});
+    clock.archiveFormat = format;
+    SetArchiveDestination(clock, out, "clock." + format);
+    auto created = Run(clock, {});
+    check(created.errors.empty() && created.completed == 1 &&
+              vread(ChildLocation(OpenArchive(clock.destination), "7:30.txt")) == "breakfast",
+          format + " writes and reads the exact colon-containing root name");
+    auto unpack = PrepareArchiveJob(true, {clock.destination});
+    SetArchiveDestination(unpack, out, "clock-" + format);
+    auto extracted = Run(unpack, {});
+    check(extracted.errors.empty() && extracted.completed == 1 &&
+              read(unpack.destination + "/7:30.txt") == "breakfast",
+          format + " extracts the original colon-containing root name");
+  }
   write(input+"/C:unsafe","payload");auto drive=PrepareArchiveJob(false,{input+"/C:unsafe"});SetArchiveDestination(drive,out,"drive.zip");
   check(!Run(drive,{}).errors.empty()&&!exists(drive.destination),"unsafe drive-style archive names fail explicitly");unlink((input+"/C:unsafe").c_str());
   auto create=[&](std::string name){auto j=PrepareArchiveJob(false,{input+"/folder"});SetArchiveDestination(j,out,name);return j;};

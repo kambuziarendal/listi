@@ -31,7 +31,23 @@ private:
 class ArchiveListingChildren {
 public:
   ArchiveListingChildren(const Location &location, ArchiveMetadataBudget &budget)
-      : budget(budget), url(location.URL()) {}
+      : budget(budget), url(location.URL()), folder(location.path.substr(1)) {}
+
+  std::string_view RelativeMember(std::string_view name, bool directory) {
+    if (folder.empty())
+      return name;
+    if (name.compare(0, folder.size(), folder) != 0)
+      return {};
+    if (name.size() == folder.size()) {
+      if (!directory)
+        throw std::runtime_error("Archive member is not a folder.");
+      explicitDirectory = true;
+      return {};
+    }
+    if (name[folder.size()] != '/')
+      return {};
+    return name.substr(folder.size() + 1);
+  }
 
   FileEntry &Get(std::string_view leaf, bool *inserted = nullptr) {
     auto found = children.find(leaf);
@@ -53,6 +69,8 @@ public:
   }
 
   std::vector<FileEntry> Finish() {
+    if (!folder.empty() && !explicitDirectory && children.empty())
+      throw std::runtime_error("Archive folder does not exist.");
     budget.Charge(children.size() * sizeof(FileEntry));
     std::vector<FileEntry> out;
     out.reserve(children.size());
@@ -64,6 +82,8 @@ public:
 private:
   ArchiveMetadataBudget &budget;
   std::string url;
+  std::string folder;
+  bool explicitDirectory = false;
   std::map<std::string, FileEntry, std::less<>> children;
 };
 } // namespace Listi

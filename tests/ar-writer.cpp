@@ -176,9 +176,18 @@ void ExternalFixtures(const Scratch &scratch) {
   Write(archive, magic + Header("abc/", 3) + "abc");
   Reject([&] { ArList(ParseLocation(ArOpen(archive, {})), {}); }, "truncated");
   Write(archive, magic + Header("dir/file/", 1) + "x\n");
-  Require(Read(ChildLocation(ChildLocation(ArOpen(archive, {}), "dir"),
-                             "file")) == "x",
+  const auto nestedRoot = ArOpen(archive, {});
+  const auto implicitFolder = ChildLocation(nestedRoot, "dir");
+  const auto children = ArList(ParseLocation(implicitFolder), {});
+  Require(children.size() == 1 && children.front().name == "file" &&
+              !children.front().directory,
+          "Cannot list implicit ar directory");
+  const auto nestedFile = ChildLocation(implicitFolder, "file");
+  Require(Read(nestedFile) == "x",
           "Cannot read ar member with directory path");
+  Reject([&] { ArList(ParseLocation(nestedFile), {}); }, "not a folder");
+  Reject([&] { ArList(ParseLocation(ChildLocation(nestedRoot, "di")), {}); },
+         "folder does not exist");
   Reject([&] { Format(archive); }, "flat ar archives");
   Write(archive, magic + Header("../unsafe/", 0));
   Reject([&] { Format(archive); }, "unsafe parent");

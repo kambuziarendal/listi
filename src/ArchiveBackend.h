@@ -3,6 +3,7 @@
 #include "ArchivePasswords.h"
 #include "FileOperation.h"
 #include "VirtualFile.h"
+#include <string_view>
 namespace Listi {
 // Bounded, worker-local metadata reuse during one archive job. Contents are
 // still decoded from disk; fingerprints and password generations guard hits.
@@ -23,6 +24,7 @@ struct ArchiveBackend {
   std::vector<FileEntry> (*list)(const Location &, const TransferControl &);
   void (*read)(const Location &, const DataSink &, const TransferControl &);
 };
+bool HasArchiveDrivePrefix(std::string_view name);
 std::string SafeArchivePath(const char *);
 bool SevenZipAvailable();
 std::string SevenZipFormat(const std::string &);

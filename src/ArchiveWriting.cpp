@@ -208,7 +208,7 @@ struct Pack {
             "Archive exceeds the folder or entry limit.");
     Require(!name.empty() &&
                 name.find_first_of("\r\n\\") == std::string::npos &&
-                !(depth == 0 && name.size() > 1 && name[1] == ':'),
+                !(depth == 0 && HasArchiveDrivePrefix(name)),
             "Unsupported archive entry name.");
     struct stat before, after;
     Require(!lstat(path.c_str(), &before), "Cannot read source: " + path);
