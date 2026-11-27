@@ -784,7 +784,7 @@ struct WriteState {
             "Archive exceeds the folder or entry limit.");
     Require(!name.empty() &&
                 name.find_first_of("\r\n\\") == std::string::npos &&
-                !(depth == 0 && name.size() > 1 && name[1] == ':'),
+                !(depth == 0 && HasArchiveDrivePrefix(name)),
             "Unsupported archive entry name.");
     struct stat before, opened;
     Require(!lstat(path.c_str(), &before), "Cannot read archive source");
@@ -1173,12 +1173,9 @@ std::vector<FileEntry> SevenZipList(const Location &location,
                                     ArchiveMetadataBudget &budget) {
   auto entries = Contents(location.archive, c, budget);
   ArchiveListingChildren children(location, budget);
-  const auto prefix = location.path == "/" ? "" : location.path.substr(1) + "/";
   for (const auto &entry : entries) {
     c.Check();
-    if (entry.name.compare(0, prefix.size(), prefix))
-      continue;
-    const auto rest = std::string_view(entry.name).substr(prefix.size());
+    const auto rest = children.RelativeMember(entry.name, entry.directory);
     if (rest.empty())
       continue;
     const auto slash = rest.find('/');

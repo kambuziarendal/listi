@@ -398,11 +398,11 @@ std::vector<FileEntry> ArList(const Location &location,
   const auto index = OpenIndex(fd.value, location.archive, control);
   const auto prefix = location.path == "/" ? "" : location.path.substr(1) + "/";
   std::map<std::string, FileEntry> children;
-  auto first =
-      std::lower_bound(index->members.begin(), index->members.end(), prefix,
-                       [](const Member &member, const std::string &name) {
-                         return member.name < name;
-                       });
+  const auto byName = [](const Member &member, std::string_view name) {
+    return member.name < name;
+  };
+  auto first = std::lower_bound(index->members.begin(), index->members.end(),
+                                prefix, byName);
   for (; first != index->members.end() &&
          !first->name.compare(0, prefix.size(), prefix);
        ++first) {
@@ -425,6 +425,15 @@ std::vector<FileEntry> ArList(const Location &location,
     children.emplace(leaf, std::move(entry));
   }
   VerifySame(fd.value, location.archive, index->state);
+  if (!prefix.empty() && children.empty()) {
+    const auto folder = std::string_view(prefix).substr(0, prefix.size() - 1);
+    const auto member =
+        std::lower_bound(index->members.begin(), index->members.end(), folder,
+                         byName);
+    if (member != index->members.end() && member->name == folder)
+      throw std::runtime_error("Archive member is not a folder.");
+    throw std::runtime_error("Archive folder does not exist.");
+  }
   std::vector<FileEntry> entries;
   for (auto &entry : children)
     entries.push_back(std::move(entry.second));

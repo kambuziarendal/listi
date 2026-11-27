@@ -325,8 +325,6 @@ std::vector<FileEntry> LibarchiveList(const Location &location,
   ArchiveTextLocale locale;
   Reader reader(location.archive, c);
   ArchiveListingChildren children(location, budget);
-  const std::string prefix =
-      location.path == "/" ? "" : location.path.substr(1) + "/";
   size_t count = 0;
   MemberPath paths;
   while (auto entry = reader.Next()) {
@@ -337,9 +335,7 @@ std::vector<FileEntry> LibarchiveList(const Location &location,
       continue;
     const auto type = LIBCALL(reader.lib, archive_entry_filetype)(entry);
     paths.Insert(name, type == AE_IFDIR, budget);
-    if (name.compare(0, prefix.size(), prefix) != 0)
-      continue;
-    const auto rest = std::string_view(name).substr(prefix.size());
+    const auto rest = children.RelativeMember(name, type == AE_IFDIR);
     if (rest.empty())
       continue;
     const auto slash = rest.find('/');

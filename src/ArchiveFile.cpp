@@ -11,6 +11,12 @@
 #include <memory>
 
 namespace Listi {
+bool HasArchiveDrivePrefix(std::string_view name) {
+  return name.size() > 1 && name[1] == ':' &&
+         ((name[0] >= 'A' && name[0] <= 'Z') ||
+          (name[0] >= 'a' && name[0] <= 'z'));
+}
+
 std::string SafeArchivePath(const char *raw) {
   if (!raw)
     throw std::runtime_error("Archive entry has no name");
@@ -30,7 +36,7 @@ std::string SafeArchivePath(const char *raw) {
     if (end == std::string::npos)
       end = name.size();
     auto part = name.substr(at, end - at);
-    if (part == ".." || (out.empty() && part.size() > 1 && part[1] == ':'))
+    if (part == ".." || (out.empty() && HasArchiveDrivePrefix(part)))
       throw std::runtime_error(
           "Archive contains an unsafe parent or drive path");
     if (!part.empty() && part != ".") {

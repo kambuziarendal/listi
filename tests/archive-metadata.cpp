@@ -66,6 +66,10 @@ void TestAdapter(const fs::path &root, const std::string &format,
             normal.front().directory,
         format + " default listing is unaffected by the rejected scan");
 
+  const auto nested = normal.front().path;
+  Check(ListFiles(ChildLocation(nested, "empty")).empty(),
+        format + " lists an existing empty folder");
+
   ArchiveMetadataBudget shortBudget(96 * 1024);
   auto shortLocation =
       ParseLocation(ChildLocation(OpenArchive(shortArchive), "short"));
@@ -73,6 +77,18 @@ void TestAdapter(const fs::path &root, const std::string &format,
   Check(entries.size() == 128 && entries.front().name == "item-1000" &&
             entries.back().name == "item-1127",
         format + " lists 128 short names with a modest budget");
+  auto rejectFolder = [&](const std::string &path, std::string_view expected) {
+    bool rejected = false;
+    try {
+      ListFiles(path);
+    } catch (const std::runtime_error &error) {
+      rejected = error.what() == expected;
+    }
+    Check(rejected, format + " " + std::string(expected));
+  };
+  rejectFolder(entries.front().path, "Archive member is not a folder.");
+  rejectFolder(ChildLocation(shortLocation.URL(), "item"),
+               "Archive folder does not exist.");
   std::string contents;
   ReadFile(entries.front().path, [&](const char *bytes, size_t count) {
     contents.append(bytes, count);
@@ -98,6 +114,7 @@ int main() {
       fs::create_directories(directory);
       std::ofstream(directory / "member") << "nested";
     }
+    fs::create_directory(root / "nested" / "empty");
 
     TestAdapter(root, "zip", LibarchiveList);
     TestAdapter(root, "7z", SevenZipList);
