@@ -507,6 +507,7 @@ int main() {
   for (bool hasTime : {false, true}) {
     for (const char *edit : {"Downloaded payload", "different length"}) {
       for (auto answer : {Decision::Replace, Decision::Skip, Decision::ReplaceAll}) {
+        std::ofstream(localTarget) << "existing data";
         auto changed = download(LocalPublish::Limited, answer, false, false, edit, hasTime).first;
         check(!changed.completed && !done && localContents() == "existing data" &&
                   files.at(remote).data == edit &&
@@ -516,6 +517,7 @@ int main() {
       }
     }
   }
+  std::ofstream(localTarget) << "existing data";
   auto aborted = download(LocalPublish::Limited, Decision::Abort, false).first;
   check(aborted.cancelled && !aborted.skipped && !aborted.completed && !done &&
             aborted.errors.empty() && actualPaths(aborted.outcomes, "unprocessed") &&
