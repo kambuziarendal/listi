@@ -133,10 +133,12 @@ BButton *PromptButton(BWindow *window, const std::string &label) {
 }
 void LocalDestinationCases(BWindow *window, WorkspaceSplit &split, BrowserReplies &replies,
                            const fs::path &root) {
-  for (bool flat : {false, true}) {
+  enum Route { PanelMove, FlatMove, PasteCut, PasteMixed, PasteArchive };
+  for (auto route : {PanelMove, FlatMove, PasteCut, PasteMixed, PasteArchive}) {
+    const bool flat = route == FlatMove, paste = route >= PasteCut;
     auto &source = split.Panel(0);
     auto &destination = split.Panel(1).Files();
-    const auto work = root / (flat ? "local-flat" : "local-panel");
+    const auto work = root / ("local-route-" + std::to_string(route));
     const auto inputs = work / "inputs", shown = work / "shown", held = work / "held";
     fs::create_directories(inputs);
     fs::create_directory(shown);
@@ -163,6 +165,33 @@ void LocalDestinationCases(BWindow *window, WorkspaceSplit &split, BrowserReplie
     } else {
       Check(source.Files().MatchPattern("incoming.txt", true) == 1, "local source selected");
     }
+    const auto extra = inputs / "copied.txt";
+    std::string archiveView;
+    if (route == PasteArchive) {
+      const auto archive = work / "source.zip";
+      CreateZip(work / "zip-input", archive, "original ");
+      archiveView = OpenArchive(archive.string());
+      PutFileClipboard({ChildLocation(archiveView, "note.txt")}, false);
+    } else if (route == PasteMixed) {
+      std::ofstream(extra) << "retained bytes";
+      auto selection = MakeFileSelection({input.string(), extra.string()}, true);
+      for (const auto &item : ReadFileClipboard(selection)) {
+        if (item.path == extra.string()) {
+          auto mode = item.key;
+          mode[0] = 'm';
+          Check(selection.ReplaceInt32(mode.c_str(), 'Tcsl') == B_OK, "set Tracker copy mode");
+        }
+      }
+      Check(be_clipboard->Lock(), "open Tracker clipboard");
+      be_clipboard->Clear();
+      *be_clipboard->Data() = selection;
+      const auto committed = be_clipboard->Commit();
+      be_clipboard->Unlock();
+      Check(committed == B_OK, "publish mixed Tracker selection");
+    } else if (route == PasteCut) {
+      BMessage cut(kClipboardCut);
+      window->MessageReceived(&cut);
+    }
     auto submit = [&](bool replace) {
       // Run on the window looper: inspect the displayed identity, swap the
       // folder and dispatch the real command before a refresh can intervene.
@@ -174,12 +203,12 @@ void LocalDestinationCases(BWindow *window, WorkspaceSplit &split, BrowserReplie
         const auto [device, node] = destination.FolderIdentity();
         if (device != expected.st_dev || node != expected.st_ino) return;
         dispatched = true;
-        split.SetSource(0);
+        split.SetSource(paste ? 1 : 0);
         if (replace) {
           fs::rename(shown, held);
           fs::create_directory(shown);
         }
-        BMessage move(kMove);
+        BMessage move(paste ? kClipboardPaste : kMove);
         window->MessageReceived(&move);
       };
       const bool delivered = Until(window, [&] {
@@ -196,14 +225,26 @@ void LocalDestinationCases(BWindow *window, WorkspaceSplit &split, BrowserReplie
       throw std::runtime_error("Missing stale-target refusal. Notice: " + notice +
                                "; source panel " + std::to_string(split.Source()) +
                                "; destination " + destination.Path());
-    Check(Bytes(input) == "original bytes" && fs::is_empty(shown) && fs::is_empty(held),
+    Check(Bytes(input) == "original bytes" && fs::is_empty(shown) && fs::is_empty(held) &&
+              (route != PasteMixed || Bytes(extra) == "retained bytes") &&
+              (route != PasteArchive || Member(archiveView, "note.txt") == "original note.txt"),
           "Move refuses the replacement and leaves original and both destinations untouched");
     destination.Reload();
     Check(WaitForPane(window, &destination, shown.string()), "explicitly reload local destination");
     submit(false);
+    if (route == PasteArchive) {
+      Check(Until(window, [&] { return fs::exists(shown / "note.txt"); }) &&
+                Bytes(shown / "note.txt") == "original note.txt" &&
+                Member(archiveView, "note.txt") == "original note.txt" && fs::is_empty(held),
+            "archive Paste after reload keeps source and copies only to the refreshed folder");
+      continue;
+    }
     Check(Until(window, [&] { return !fs::exists(input) && fs::exists(shown / "incoming.txt"); }) &&
               Bytes(shown / "incoming.txt") == "original bytes" && fs::is_empty(held),
           "Move after reload delivers only to the newly displayed destination");
+    if (route == PasteMixed)
+      Check(Bytes(extra) == "retained bytes" && Bytes(shown / "copied.txt") == "retained bytes",
+            "mixed Tracker Paste retains the copy source and delivers both jobs after reload");
     if (flat) source.CloseCurrent();
   }
 }

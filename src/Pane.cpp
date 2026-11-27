@@ -1398,6 +1398,7 @@ void Pane::MessageReceived(BMessage *m) {
       row->size = e.GetInt64("size", 0);
       row->sizeKnown = e.GetBool("sizeKnown", true);
       row->modified = e.GetInt64("date", 0);
+      row->permissions = e.GetInt32("permissions", -1);
       row->modifiedKnown = e.GetBool("modifiedKnown", false);
       row->modifiedFraction = e.GetString("modifiedFraction", "");
       row->providerIdentity = e.GetString("providerIdentity", "");

@@ -81,6 +81,10 @@ class MetadataFS(AbstractedFS):
         for row in super().format_mlsx(basedir, listing, perms, facts, ignore_err):
             attrs, name = row.split(b" ", 1)
             leaf = name.rstrip().decode()
+            if leaf in {"missing-mode", "private-memo"}:
+                attrs = re.sub(rb"unix\.mode=[^;]*;", b"", attrs, flags=re.I)
+            if leaf == "reported-mode":
+                attrs = re.sub(rb"unix\.mode=[^;]*;", b"", attrs, flags=re.I) + b"unix.mode=0640;"
             replacement = FACTS.get(leaf)
             if leaf == "changed":
                 mtime = (Path(basedir) / leaf).stat().st_mtime_ns
@@ -251,6 +255,14 @@ class MetadataSFTP(paramiko.SFTPServerInterface):
             handle.readfile = self.resolve(path).open("rb")
             # curl may use FSTAT for size on the open handle.
             handle.stat = lambda: self.stat(path)
+            if path in {"/tightens", "/tightens-installed"}:
+                def read_private(offset, length):
+                    handle.readfile.seek(offset)
+                    data = handle.readfile.read(length)
+                    if data:
+                        self.resolve(path).chmod(0o600)
+                    return data
+                handle.read = read_private
             if path == "/recursive/changed":
                 def read(offset, length):
                     handle.readfile.seek(offset)
@@ -276,6 +288,9 @@ def main():
     staging.mkdir()
     ftp_root = staging / "ftp"
     ftp_root.mkdir()
+    (ftp_root / "missing-mode").mkdir()
+    (ftp_root / "missing-mode" / "private-memo").write_bytes(b"private")
+    (ftp_root / "reported-mode").write_bytes(b"explicit")
     for name in FACTS:
         (ftp_root / name).write_bytes(b"fixture contents\n")
     for directory in ("mlsd", "list-only", "list-all"):
@@ -329,6 +344,10 @@ def main():
         file = sftp_root / name
         file.write_bytes(b"fixture contents\n")
         os.utime(file, (MODIFIED, MODIFIED))
+    for name in ("tightens", "tightens-installed"):
+        tightens = sftp_root / name
+        tightens.write_bytes(b"private")
+        tightens.chmod(0o644)
     (sftp_root / "recursive").mkdir()
     recursive_sftp = sftp_root / "recursive" / "changed"
     recursive_sftp.write_bytes(changed.read_bytes())

@@ -336,7 +336,7 @@ void CheckFtpCompare(const std::string &ftp, const std::string &local) {
              [&](const char *p, size_t n) { hidden.append(p, n); });
     Expect(hidden == "hidden\n", remote + " has a readable dotfile");
     auto result = CompareFolders({folder, remote, true});
-    Expect(result.verified == 1, remote + " verifies the visible file pair");
+    Expect(result.verified == 1, remote + " verifies the visible file pair: " + result.error);
     if (mode != "list-only") {
       Expect(!result.complete && result.different == 1 &&
                  result.entries.front().relative == ".settings" &&
@@ -392,6 +392,37 @@ int main() {
     CheckUncertainOperations(ftp, local);
     CheckSftpAlias(sftp);
     CheckPrivateDownload(sftp, local);
+    const auto unknownFolder = ChildLocation(ftp, "missing-mode");
+    const auto memo = ChildLocation(unknownFolder, "private-memo");
+    const auto folderEntry = Stat(ftp, "missing-mode");
+    const auto memoEntry = Stat(unknownFolder, "private-memo");
+    Expect(!folderEntry.permissionsKnown && !memoEntry.permissionsKnown &&
+               folderEntry.permissions == 0700 && memoEntry.permissions == 0600,
+           "omitted MLSD permissions are unknown, not a grant");
+    const auto modeOf = [](const std::string &path) -> int {
+      struct stat st;
+      return !lstat(path.c_str(), &st) ? st.st_mode & 0777 : -1;
+    };
+    const auto finalFolder = local + "/missing-mode";
+    Hooks stopAtFolder;
+    stopAtFolder.proceed = [&] { return modeOf(finalFolder) < 0; };
+    const auto stopped = Copy(unknownFolder, local, stopAtFolder);
+    Expect(stopped.cancelled && modeOf(finalFolder) == 0700,
+           "partial FTP folder without access facts starts private");
+    const auto retried = Copy(unknownFolder, local);
+    Expect(retried.partialCopies && modeOf(finalFolder) == 0700 &&
+               modeOf(finalFolder + "/private-memo") == 0600 && Read(finalFolder + "/private-memo") == "private",
+           "retry delivers private FTP contents without claiming listing completeness");
+    Expect(Copy(memo, local).completed && modeOf(local + "/private-memo") == 0600,
+           "standalone FTP file without a reported mode stays private");
+    Expect(Stat(ftp, "reported-mode").permissionsKnown &&
+               Copy(ChildLocation(ftp, "reported-mode"), local).completed && modeOf(local + "/reported-mode") == 0640,
+           "explicit FTP file mode survives publication");
+    std::filesystem::remove(finalFolder + "/private-memo");
+    chmod(finalFolder.c_str(), 0755);
+    const auto tooOpen = Copy(unknownFolder, local);
+    Expect(!tooOpen.completed && !tooOpen.errors.empty() && modeOf(finalFolder) == 0755 &&
+               modeOf(finalFolder + "/private-memo") < 0, "unknown FTP mode refuses a more accessible merge");
     CheckIdentity(ftp, local);
     CheckStagedRecovery(ftp, sftp, local);
     // An explicit epoch is not the same as an omitted or malformed fact.
@@ -445,8 +476,8 @@ int main() {
     Expect(unknownCopy.errors.empty() && completed == 2 && notified == 2 &&
                Read(local + "/unknown") == "fixture contents\n" &&
                !stat((local + "/unknown").c_str(), &info) &&
-               info.st_mtime > modified,
-           "FTP download with absent time does not stamp the epoch");
+               info.st_mtime > modified && (info.st_mode & 0777) == 0600,
+           "FTP download with absent metadata stays private and does not stamp the epoch");
 
     std::ofstream(local + "/changed") << "original destination";
     auto before = Stat(ftp, "changed");
@@ -468,6 +499,19 @@ int main() {
            "SFTP curl STAT reports the server timestamp");
     Expect(!Stat(sftp, "unknown").modifiedKnown,
            "SFTP missing STAT timestamp stays unknown");
+    std::ofstream(local + "/tightens") << "original";
+    const auto tightens = ChildLocation(sftp, "tightens");
+    const auto firstMode = Stat(sftp, "tightens").permissions;
+    const auto denied = copy(sftp, "tightens");
+    Expect(firstMode == 0644 && Stat(sftp, "tightens").permissions == 0600 &&
+               !denied.completed && !denied.errors.empty() && Read(local + "/tightens") == "original",
+           "SFTP permission change during read retains original local file");
+    Hooks retryHooks;
+    retryHooks.conflict = hooks.conflict;
+    const auto privateRetry = Copy(tightens, local, retryHooks);
+    Expect(privateRetry.completed == 1 && !stat((local + "/tightens").c_str(), &info) &&
+               (info.st_mode & 0777) == 0600 && Read(local + "/tightens") == "private",
+           "fresh SFTP download preserves tightened mode and contents");
     auto sftpCopy = copy(sftp, "known");
     Expect(sftpCopy.errors.empty() && completed == 3 && notified == 3 &&
                Read(local + "/known") == "fixture contents\n" &&
@@ -482,6 +526,7 @@ int main() {
            "SFTP folder comparison verifies content with before/after STAT");
 
     std::filesystem::create_directory(local + "/recursive");
+    chmod((local + "/recursive").c_str(), 0700);
     const auto destination = local + "/recursive/changed";
     for (const auto &server : {ftp, sftp}) {
       std::ofstream(destination) << "original destination";

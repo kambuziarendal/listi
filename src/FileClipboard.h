@@ -37,7 +37,8 @@ void PutFileClipboard(const std::vector<std::string> &, bool cut,
                       const std::map<std::string, std::string> &archiveVersions = {});
 ClipboardPaste PrepareFilePaste(const std::string &destination,
                                 BClipboard *clipboard = be_clipboard,
-                                const std::map<std::string, std::string> &destinationVersion = {});
+                                const std::map<std::string, std::string> &destinationVersion = {},
+                                NodeIdentity expectedDestination = {});
 // Consume only successfully moved roots, and never a newer clipboard selection.
 void FinishFilePaste(const ClipboardPaste &,
                      const std::vector<std::string> &moved,

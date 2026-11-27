@@ -103,6 +103,11 @@ extern "C" ssize_t __wrap_write(int fd, const void *data, size_t size) {
   if (fd != stageFd || !size)
     return __real_write(fd, data, size);
   ++writes;
+  struct stat info{};
+  if (fstat(fd, &info) || (info.st_mode & 0077)) {
+    errno = EACCES;
+    return -1;
+  }
   if (full) {
     errno = ENOSPC;
     return -1;

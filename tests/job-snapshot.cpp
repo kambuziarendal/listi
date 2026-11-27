@@ -115,6 +115,8 @@ int main() {
     Listi::Job selection{action, {path}, ""};
     auto &entry = selection.expectedRemoteSources[path];
     entry.link = true;
+    entry.permissionsKnown = action != Listi::Action::Delete;
+    entry.permissions = 0600;
     entry.size = 42;
     entry.SetModification(123, 456000000);
     entry.providerIdentity = "object-7";
@@ -125,6 +127,8 @@ int main() {
     }
     const auto &saved = captured->expectedRemoteSources.at(path);
     check(!saved.directory && saved.link && saved.sizeKnown && saved.size == entry.size &&
+              saved.permissionsKnown == entry.permissionsKnown &&
+              (!saved.permissionsKnown || saved.permissions == entry.permissions) &&
               saved.SameModification(entry) && saved.providerIdentity == entry.providerIdentity,
           "network mutation confirmation retains the selected type and revision");
   }

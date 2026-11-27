@@ -13,12 +13,30 @@
 #include <unistd.h>
 using namespace Listi;
 namespace {
-enum Fault { None, DestinationRename, SourceRename, CorruptDestination } fault=None;
+enum Fault { None, DestinationRename, SourceRename, CorruptDestination, MismatchedReceipt } fault=None;
 std::string sourceArchive,destinationArchive;
 bool injected=false;
+bool awaitingReceipt=false;
+
 const std::string payload="Listi move fault payload";
 std::string readBytes(const std::string &path){std::ifstream in(path,std::ios::binary);return {std::istreambuf_iterator<char>(in),std::istreambuf_iterator<char>()};}
 void clean(const std::string &p){BDirectory d(p.c_str());BEntry e;while(d.GetNextEntry(&e,false)==B_OK){struct stat s;e.GetStat(&s);if(S_ISDIR(s.st_mode)){BPath path;e.GetPath(&path);clean(path.Path());}e.Remove();}rmdir(p.c_str());}
+}
+// Model a writer receipt for a different revision without changing any real
+// archive bytes. Only the post-publication stat of this fixture is affected.
+extern "C" int __real_fstat(int, struct stat *);
+extern "C" int __wrap_fstat(int fd, struct stat *st) {
+  const auto status = __real_fstat(fd, st);
+  if (!status && awaitingReceipt) {
+    struct stat destination;
+    if (!lstat(destinationArchive.c_str(), &destination) &&
+        st->st_dev == destination.st_dev && st->st_ino == destination.st_ino) {
+      st->st_ino ^= 1;
+      injected = true;
+      awaitingReceipt = false;
+    }
+  }
+  return status;
 }
 extern "C" int __real_renameat(int,const char *,int,const char *);
 extern "C" int __wrap_renameat(int from,const char *oldLeaf,int target,const char *newLeaf){
@@ -29,6 +47,8 @@ extern "C" int __wrap_renameat(int from,const char *oldLeaf,int target,const cha
   injected=true;errno=fault==DestinationRename?ENOSPC:EIO;return -1;
  }
  int status=__real_renameat(from,oldLeaf,target,newLeaf);
+ if (!status && replacement && fault == MismatchedReceipt && to == destinationArchive)
+   awaitingReceipt = true;
  if(replacement&&!status&&!injected&&fault==CorruptDestination&&to==destinationArchive){
   auto bytes=readBytes(to);auto at=bytes.find(payload);
   if(at!=std::string::npos){int fd=open(to.c_str(),O_WRONLY);if(fd>=0){injected=pwrite(fd,"X",1,at)==1;fsync(fd);close(fd);}}
@@ -64,6 +84,30 @@ int main(){
     check(detected && readBytes(destinationArchive).find("X" + payload.substr(1)) != std::string::npos,
           "damaged published destination detected before source cleanup");
   }
+ }
+ for (const bool localSource : {false, true}) {
+   fault = None;
+   injected = awaitingReceipt = false;
+   auto dest = PrepareArchiveJob(false, {root + "/in/keep"});
+   dest.archiveFormat = localSource ? "tar" : "ar";
+   SetArchiveDestination(dest, root, localSource ? "receipt-local" : "receipt-archive");
+   if (Run(dest, {}).completed != 1) return 2;
+   destinationArchive = dest.destination;
+   const auto source = localSource ? root + "/in/item"
+                                  : ChildLocation(OpenArchive(sourceArchive), "item");
+   const auto original = readBytes(sourceArchive);
+   const auto job = PrepareArchiveMove(Job{Action::Move, {source}, OpenArchive(destinationArchive)});
+   fault = MismatchedReceipt;
+   auto result = Run(job, {});
+   fault = None;
+   check(injected && !result.errors.empty() && !result.completed && result.completedRoots.empty(),
+         "mismatched writer receipt prevents move completion");
+   std::string kept, copied;
+   ReadFile(source, [&](const char *data, size_t n) { kept.append(data, n); });
+   ReadFile(ChildLocation(OpenArchive(destinationArchive), "item"),
+            [&](const char *data, size_t n) { copied.append(data, n); });
+   check(kept == payload && copied == payload && readBytes(sourceArchive) == original,
+         "identical destination member does not authorize source cleanup");
  }
  clean(root);std::cout<<checks<<" checks, "<<failures<<" failures\n";return failures?1:0;
 }

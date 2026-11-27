@@ -43,19 +43,13 @@ bool IsListiPrivateEntry(const std::string &path) {
 namespace {
 std::mutex connectionsMutex;
 std::map<std::string, const Connection> connections;
-std::string ConnectionRoute(Location location) {
-  if (!location.port)
-    location.port = location.scheme == "smb" ? 445 : location.scheme == "sftp" ? 22 :
-                    location.scheme == "ftps" ? 990 : 21;
-  return location.Authority();
-}
 auto Credentials(const Connection &auth) {
   return std::tie(auth.username, auth.password, auth.domain, auth.privateKey,
                   auth.knownHosts, auth.keyPassphrase);
 }
 const Connection &BoundConnection(const Location &location) {
   std::lock_guard<std::mutex> guard(connectionsMutex);
-  const auto it = connections.find(ConnectionRoute(location));
+  const auto it = connections.find(location.CanonicalAuthority());
   if (it == connections.end())
     throw std::runtime_error("No account is bound to this server. Use Network / Connect first.");
   // Entries are immutable and never erased during this process.
@@ -81,7 +75,7 @@ bool SetConnection(const std::string &url, const Connection &auth) {
   if (location.Local() || location.Archive())
     return false;
   std::lock_guard<std::mutex> guard(connectionsMutex);
-  const auto [it, inserted] = connections.try_emplace(ConnectionRoute(location), auth);
+  const auto [it, inserted] = connections.try_emplace(location.CanonicalAuthority(), auth);
   return inserted || Credentials(it->second) == Credentials(auth);
 }
 void RequireConnection(const std::string &url) {
@@ -260,7 +254,7 @@ void RenameFile(const std::string &a, const std::string &b,
   if (l.Archive() || to.Archive())
     throw std::runtime_error(
         "Use the archive editing actions to change a writable archive");
-  if (l.Authority() != to.Authority())
+  if (l.CanonicalAuthority() != to.CanonicalAuthority())
     throw std::runtime_error("Rename requires the same connection");
   if (!l.Local()) {
     ChangeNetwork(l, "rename", b, c);

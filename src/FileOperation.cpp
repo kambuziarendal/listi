@@ -1078,6 +1078,9 @@ struct Runner {
       } scope{copyDirectories};
       // A merge keeps the destination folder's own metadata. Never remove
       // the source folder on Move if that would discard a distinct attribute.
+      if (existed && !deferCompletion && (before.st_mode & 0077 & ~st.st_mode))
+        throw std::runtime_error(dst + ": destination folder grants access not present on the source. "
+                                "Nothing was added here. Choose a separate destination.");
       if (existed && deferCompletion) {
         VerifyMoveMetadata(st, before, dst);
         Attributes(src, dst, true);

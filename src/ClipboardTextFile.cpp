@@ -68,7 +68,8 @@ std::optional<ClipboardContent> DetectClipboardSaveContent(BClipboard *clipboard
 
 ClipboardFile PrepareClipboardFile(const std::string &folder,
                                    ClipboardContent content,
-                                   BClipboard *clipboard) {
+                                   BClipboard *clipboard,
+                                   NodeIdentity expectedDestination) {
   if (InterruptedVolumes().ContainsResolved(folder))
     throw std::runtime_error(kUnavailableVolumeText);
   FD directory(IsFullPath(folder) ? open(folder.c_str(), O_RDONLY | O_DIRECTORY)
@@ -76,6 +77,9 @@ ClipboardFile PrepareClipboardFile(const std::string &folder,
   struct stat st;
   if (!IsWritable(directory.value) || fstat(directory.value, &st))
     throw std::runtime_error("Open a writable local folder first.");
+  if (expectedDestination.device >= 0 &&
+      (expectedDestination.device != st.st_dev || expectedDestination.inode != st.st_ino))
+    throw std::runtime_error("The selected destination folder was replaced: " + folder);
   const bool image = content == ClipboardContent::Image;
   std::string extension = image ? ".png" : ".txt";
   ClipboardFile file{folder,

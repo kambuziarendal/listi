@@ -1,8 +1,13 @@
 // SPDX-License-Identifier: MIT
+#include "ArchiveJobChecks.h"
+#include "ArchiveJobs.h"
+#include "ArchiveVolumes.h"
 #include "FileOperation.h"
 #include "NameFilter.h"
 #include "PaneModel.h"
 #include "Trash.h"
+#include "VirtualFile.h"
+#include <algorithm>
 #include <File.h>
 #include <Node.h>
 #include <String.h>
@@ -18,6 +23,106 @@
 #include <thread>
 #include <unistd.h>
 namespace Listi {
+namespace {
+// Optional installed-package check against a disposable, loopback FTP server.
+// MLSD provides a stable unique fact but omits unix.mode in this fixture.
+void TestLoopbackTransfer(const std::string &root) {
+  auto require = [](bool ok, const std::string &why) {
+    if (!ok)
+      throw std::runtime_error(why);
+  };
+  auto bytes = [](const std::string &path) {
+    std::string value;
+    ReadFile(path, [&](const char *data, size_t n) { value.append(data, n); });
+    return value;
+  };
+  const std::string endpoint = "ftp://127.0.0.1:2128/";
+  Connection auth;
+  auth.username = "listitest";
+  auth.password = "fixture-only";
+  SetConnection(endpoint, auth);
+  const auto target = ChildLocation(endpoint, LocationLeaf(root));
+  MakeFolder(target); // Exclusive, unique test namespace.
+  const auto source = Join(root, "upload");
+  MakeFolder(source);
+  for (const auto name : {"first", "second"})
+    std::ofstream(Join(source, name)) << name;
+  const auto selected = ChildLocation(target, "upload");
+  const auto moved = ChildLocation(target, "previous");
+  std::string delivered;
+  Hooks hooks;
+  hooks.fileDone = [&](const std::string &, const std::string &path) {
+    if (delivered.empty()) {
+      delivered = LocationLeaf(path);
+      RenameFile(selected, moved);
+      MakeFolder(selected);
+    }
+  };
+  const Job job{Action::Copy, {source}, target};
+  const auto stopped = Run(job, hooks);
+  require(!delivered.empty() && !stopped.completed && stopped.partialCopies == 1 &&
+              !stopped.errors.empty() && stopped.errors.front().find(selected) != std::string::npos &&
+              ListFiles(moved).size() == 1 && ListFiles(selected).empty() &&
+              bytes(ChildLocation(moved, delivered)) == delivered,
+          "changed destination did not stop at the first acknowledged child");
+  require(std::any_of(stopped.outcomes.begin(), stopped.outcomes.end(), [&](const auto &entry) {
+            return entry.destination == ChildLocation(selected, delivered) &&
+                   entry.upload && entry.upload->publication == Publication::Published;
+          }), "missing first delivery receipt");
+  const auto retry = Run(job, {});
+  require(retry.completed == 1 && retry.errors.empty(), "fresh upload retry failed");
+  for (const auto name : {"first", "second"})
+    require(bytes(Join(source, name)) == name && bytes(ChildLocation(selected, name)) == name,
+            "fresh upload retry did not preserve both originals and both deliveries");
+
+  FileEntry folder, file;
+  require(StatFile(selected, folder) && StatFile(ChildLocation(selected, delivered), file) &&
+              !folder.permissionsKnown && !file.permissionsKnown, "fixture unexpectedly supplied modes");
+  const auto downloads = Join(root, "downloads");
+  MakeFolder(downloads);
+  const Job download{Action::Copy, {selected}, downloads};
+  const auto local = Join(downloads, "upload");
+  const auto partial = Run(download, {});
+  struct stat info{};
+  require(partial.partialCopies == 1 && !stat(local.c_str(), &info) && (info.st_mode & 0777) == 0700,
+          "unknown FTP directory mode did not stay private");
+  for (const auto name : {"first", "second"})
+    require(!stat(Join(local, name).c_str(), &info) && (info.st_mode & 0777) == 0600 &&
+                bytes(Join(local, name)) == name, "unknown FTP file mode did not stay private");
+  require(!chmod(local.c_str(), 0755) && !unlink(Join(local, delivered).c_str()), "retry setup failed");
+  const auto blocked = Run(download, {});
+  require(!blocked.completed && !blocked.errors.empty() && access(Join(local, delivered).c_str(), F_OK),
+          "FTP retry populated a more accessible existing folder");
+}
+bool TestLoopbackSftpMode(const std::string &root, const char *knownHosts) {
+  const std::string endpoint = "sftp://127.0.0.1:2227/";
+  Connection auth;
+  auth.username = "listitest";
+  auth.password = "fixture-only";
+  auth.knownHosts = knownHosts;
+  SetConnection(endpoint, auth);
+  const auto path = ChildLocation(endpoint, "tightens-installed");
+  const auto destination = Join(root, "tightens-installed");
+  std::ofstream(destination) << "original";
+  Hooks hooks;
+  hooks.conflict = [](const std::string &) { return Decision::Replace; };
+  FileEntry before, after;
+  if (!StatFile(path, before) || before.permissions != 0644)
+    return false;
+  const Job copy{Action::Copy, {path}, root};
+  const auto failed = Run(copy, hooks);
+  std::string contents;
+  std::ifstream(destination) >> contents;
+  if (failed.completed || failed.errors.empty() || contents != "original" ||
+      !StatFile(path, after) || after.permissions != 0600)
+    return false;
+  const auto retry = Run(copy, hooks);
+  std::ifstream(destination) >> contents;
+  struct stat st{};
+  return retry.completed == 1 && retry.errors.empty() && contents == "private" &&
+         !stat(destination.c_str(), &st) && (st.st_mode & 0777) == 0600;
+}
+} // namespace
 int SelfTest() {
   char pattern[] = "/boot/home/Listi-test-XXXXXX";
   char *dir = mkdtemp(pattern);
@@ -31,6 +136,23 @@ int SelfTest() {
       failures++;
     std::cout << (ok ? "PASS " : "FAIL ") << name << std::endl;
   };
+  if (const auto *hosts = getenv("LISTI_TEST_SFTP_AUDIT_HOSTS")) {
+    try {
+      check(TestLoopbackSftpMode(root, hosts), "loopback SFTP chmod during download and private retry");
+    } catch (const std::exception &e) {
+      std::cerr << e.what() << std::endl;
+      check(false, "loopback SFTP chmod during download and private retry");
+    }
+  }
+  if (getenv("LISTI_TEST_FTP_AUDIT")) {
+    try {
+      TestLoopbackTransfer(root);
+      check(true, "loopback FTP upload folder identity, retry receipts and private download modes");
+    } catch (const std::exception &e) {
+      std::cerr << e.what() << std::endl;
+      check(false, "loopback FTP upload folder identity, retry receipts and private download modes");
+    }
+  }
   check(MatchesNameFilter("notes.txt", ""), "empty filter shows all names");
   check(MatchesNameFilter("Holiday Notes.txt", "NOTES"),
         "name filter matches literal substring without ASCII case sensitivity");
@@ -56,6 +178,45 @@ int SelfTest() {
     std::ofstream f(p);
     f << s;
   };
+  try {
+    const auto seed = Join(root, "receipt-seed"), added = Join(root, "receipt-added");
+    write(seed, "keep");
+    write(added, "addition");
+    auto create = PrepareArchiveJob(false, {seed});
+    create.archiveFormat = "ar";
+    SetArchiveDestination(create, root, "receipt-test");
+    if (Run(create, {}).completed != 1)
+      throw std::runtime_error("could not create receipt fixture");
+    auto edit = PrepareArchiveEditJob(create.destination, {added}, {});
+    const auto oldVersion = edit.expectedArchiveSets.at(create.destination);
+    const auto saved = Run(edit, {});
+    auto guard = ArchiveJobChecks::PublishedArchiveGuard(edit, saved.publishedArchiveVersion);
+    ArchiveJobChecks::VerifyArchiveSets(guard);
+    bool refused = false;
+    try {
+      ArchiveJobChecks::PublishedArchiveGuard(edit, oldVersion);
+    } catch (const std::runtime_error &) {
+      refused = true;
+    }
+    check(saved.completed == 1 && refused && text(added) == "addition",
+          "move cleanup guard accepts writer receipt and rejects prior archive version");
+  } catch (const std::exception &e) {
+    std::cerr << e.what() << std::endl;
+    check(false, "archive move publication guard");
+  }
+  try {
+    for (char separator : {'\n', '\r'}) {
+      const auto prefix = Join(root, std::string("split") + separator + "archive.7z.");
+      write(prefix + "001", "first");
+      write(prefix + "002", "second");
+      const auto set = FindArchiveVolumes(prefix + "002");
+      check(set.files.size() == 2 && set.files.front().path == prefix + "001",
+            "split archive name containing a line break includes both volumes");
+    }
+  } catch (const std::exception &e) {
+    std::cerr << e.what() << std::endl;
+    check(false, "split archive name with line break");
+  }
   PaneModel model;
   for (auto name : {"..", "a.txt", "b.txt", "c.png", "d.txt"}) {
     auto entry = std::make_unique<PaneEntry>();

@@ -19,6 +19,7 @@ struct PaneEntry {
   int kind = 0, transferState = 0;
   int64_t device = -1, node = -1;
   int64_t size = 0, modified = 0;
+  int32_t permissions = -1; // A virtual listing may omit its mode.
   bool modifiedKnown = false;
   std::string modifiedFraction, providerIdentity;
   float fraction = 0;

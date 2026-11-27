@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Paste uses the destination shown in the pane. Moving into an archive keeps the source if the published archive is replaced, even if the selected bytes still match. Multipart archive names may contain line breaks.
+- Folder uploads stop when an identifiable destination changes and report the limits of servers without stable IDs. Network deletion reports distinguish confirmed removals, uncertain requests and untouched siblings.
+- Downloads reject observed source permission changes. Missing FTP modes default to private access, and copying a private folder into a more accessible folder no longer exposes its children.
+- SFTP moves recognize an explicitly specified default port as the same connection. Merging many existing remote folders reuses an identity-checked directory listing where possible.
+
 - Copying selected archive members to disk keeps the displayed archive version for the whole transfer. If the archive is replaced, already delivered files stay in place.
 - Two-pane and Flat View transfers use the local destination folder shown in the other pane. If that folder is replaced, reload it before retrying.
 - If an external archive replacement arrives as the editor finishes saving, Listi keeps the working copy and pauses automatic saving instead of editing the replacement.

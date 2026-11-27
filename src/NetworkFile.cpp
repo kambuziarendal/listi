@@ -323,7 +323,7 @@ struct CurlSession {
       return 1;
     }
   }
-  CURLcode Perform(bool missingOK = false, bool accessDeniedOK = false, bool quoteErrorOK = false) {
+  CURLcode Perform(bool missingOK = false, bool accessDeniedOK = false, bool quoteErrorOK = false, bool mutation = false) {
     control.Check();
     if (control.cleanup) {
       // NOSIGNAL with a synchronous DNS resolver cannot bound a lookup.
@@ -332,6 +332,8 @@ struct CurlSession {
         throw std::runtime_error("Remote cleanup deferred: resolver has no deadline.");
       Set(CURLOPT_TIMEOUT_MS, control.cleanup->TimeoutMs());
     }
+    if (mutation && control.mutationSubmitted)
+      *control.mutationSubmitted = true;
     auto r = LIBCALL(lib, curl_easy_perform)(curl);
     if (failure)
       std::rethrow_exception(failure);
@@ -410,7 +412,7 @@ void ParseModify(const std::string &value, FileEntry &entry) {
 // FTP.
 FileEntry ParseList(const std::string &line, const Location &l, bool mlsd) {
   FileEntry e;
-  bool hasPermissions = false;
+  e.permissionsKnown = !mlsd;
   if (mlsd) {
     e.sizeKnown = false;
     auto at = line.find(' ');
@@ -455,8 +457,10 @@ FileEntry ParseList(const std::string &line, const Location &l, bool mlsd) {
         }
         sawModify = true;
       } else if (key == "unix.mode") {
+        if (v.empty() || v.find_first_not_of("01234567") != std::string::npos)
+          throw std::runtime_error("Invalid FTP file permissions");
         e.permissions = std::stoul(v, nullptr, 8) & 0777;
-        hasPermissions = true;
+        e.permissionsKnown = true;
       }
       i = end + 1;
     }
@@ -490,10 +494,8 @@ FileEntry ParseList(const std::string &line, const Location &l, bool mlsd) {
   }
   if (e.name.empty() || e.name == "." || e.name == "..")
     return {};
-  // MLSD servers need not provide POSIX permissions. Keep unknown directories
-  // traversable instead of applying the default regular-file mode (0644).
-  if (mlsd && e.directory && !hasPermissions)
-    e.permissions = 0755;
+  if (!e.permissionsKnown)
+    e.permissions = e.directory ? 0700 : 0600;
   e.path = ChildLocation(l.URL(), e.name);
   return e;
 }
@@ -826,6 +828,8 @@ void ChangeNetwork(const Location &l, const char *action,
     SMBSession s(l, c);
     SMBPermit permit(&c);
     int r;
+    if (c.mutationSubmitted)
+      *c.mutationSubmitted = true;
     if (a == "mkdir")
       r = LIBCALL(s.lib, smbc_getFunctionMkdir)(s.ctx)(s.ctx, s.URL(l).c_str(),
                                                        0755);
@@ -879,6 +883,6 @@ void ChangeNetwork(const Location &l, const char *action,
                 path);
   }
   s.Set(CURLOPT_QUOTE, s.commands);
-  s.Perform();
+  s.Perform(false, false, false, true);
 }
 } // namespace Listi

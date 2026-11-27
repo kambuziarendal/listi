@@ -189,6 +189,11 @@ int main(int argc, char **argv) {
               mkdir(destination.c_str(), 0700) == 0 &&
               Rejected([&] { SaveClipboardFile(stale, "unexpected.txt"); }),
           "a replaced destination is rejected");
+    Check(Rejected([&] { PrepareClipboardFile(destination, ClipboardContent::Text,
+                                              &clipboard, stale.destination); }) &&
+              Rejected([&] { PrepareClipboardFile(destination, ClipboardContent::Image,
+                                                  &clipboard, stale.destination); }),
+          "a stale pane cannot start a text or image save in its replacement");
     auto blocked = PrepareClipboardFile(destination, ClipboardContent::Text, &clipboard);
     InterruptedVolumes().Block(destination);
     Check(!CanSaveClipboardIn(destination) &&

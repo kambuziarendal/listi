@@ -45,7 +45,7 @@ int main(int argc, char **argv) {
   if (argc == 4 && !expectRefusal && !directoryConflict && !timeMismatch && !extraTime)
     changedArchive = argv[3];
   auto result = Run(PrepareArchiveMove(Job{Action::Move, sources, target}), {});
-  bool mismatch = false;
+  bool rejectedReplacement = false;
   for (const auto &error : result.errors) {
     std::cerr << error << std::endl;
     if (extraTime && error.find("Cannot preserve additional TAR timestamps") != std::string::npos)
@@ -56,10 +56,10 @@ int main(int argc, char **argv) {
       return result.completed == 0 && result.completedRoots.empty() ? 0 : 1;
     if (expectRefusal && error.find("Cannot preserve selected permissions or ownership") != std::string::npos)
       return result.completed == 0 && result.completedRoots.empty() ? 0 : 1;
-    mismatch |= error.find("ownership differs") != std::string::npos;
+    rejectedReplacement |= error.find("Destination archive changed after publication") != std::string::npos;
   }
   if (expectRefusal || directoryConflict || timeMismatch || extraTime) return 1;
   if (changedArchive)
-    return substituted && mismatch && result.completed == 0 && result.completedRoots.empty() ? 0 : 1;
+    return substituted && rejectedReplacement && result.completed == 0 && result.completedRoots.empty() ? 0 : 1;
   return result.completed == int(sources.size()) && result.errors.empty() ? 0 : 1;
 }

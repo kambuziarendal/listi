@@ -149,7 +149,16 @@ int main(){
   r=Run(paste.jobs[0],{});FinishFilePaste(paste,r.completed==1?std::vector<std::string>{input+"/item"}:std::vector<std::string>{},&clipboard);
   clipboard.Lock(); BMessage empty(*clipboard.Data()); clipboard.Unlock();
   check(r.completed==1&&rejects([&]{ReadFileClipboard(empty);}),"successful local move consumes cut reference");
-  member=ChildLocation(target,"item");PutFileClipboard({member},true,&clipboard);out=output();paste=PrepareFilePaste(out,&clipboard);check(paste.archiveCut&&!paste.lease.empty(),"archive cut into local folder reserves clipboard");FinishFilePaste(paste,{},&clipboard);paste=PrepareFilePaste(out,&clipboard);
+  member=ChildLocation(target,"item");PutFileClipboard({member},true,&clipboard);out=output();
+  struct stat shown;
+  check(stat(out.c_str(), &shown) == 0, "observe clipboard destination folder");
+  const NodeIdentity shownFolder{int32_t(shown.st_dev), int64_t(shown.st_ino)};
+  const auto held = out + "-held";
+  check(rename(out.c_str(), held.c_str()) == 0 && mkdir(out.c_str(),0700) == 0 &&
+        rejects([&]{PrepareFilePaste(out,&clipboard,{},shownFolder);}) &&
+        exists(member) && !exists(out+"/item") && !exists(held+"/item"),
+        "archive Cut refuses stale destination before reserving clipboard or moving bytes");
+  paste=PrepareFilePaste(out,&clipboard);check(paste.archiveCut&&!paste.lease.empty(),"archive cut into local folder reserves clipboard");FinishFilePaste(paste,{},&clipboard);paste=PrepareFilePaste(out,&clipboard);
   r=Run(paste.jobs[0],{});FinishFilePaste(paste,{member},&clipboard);check(r.completed==1&&content(out+"/item")=="payload"&&rejects([&]{PrepareFilePaste(out,&clipboard);}),"successful archive-to-local move consumes archive selection");
  }catch(const std::exception&e){check(false,std::string("unexpected: ")+e.what());}
  clean(root);std::cout<<checks<<" checks, "<<failures<<" failed"<<std::endl;return failures?1:0;

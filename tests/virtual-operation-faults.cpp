@@ -11,6 +11,8 @@
 #include "JobReportStore.h"
 #include "VirtualFile.h"
 #include "UnavailableVolume.h"
+#include <algorithm>
+#include <algorithm>
 #include <fcntl.h>
 #include <fstream>
 #include <iostream>
@@ -66,7 +68,10 @@ std::string StoragePath(std::string path) {
 bool corruptUpload = false, denyReadback = false, cancelReadback = false;
 bool cancelAtReadyCheck = false, cancelAfterStore = false, hideStoredPart = false;
 bool uncertainRollback = false, replaceStageOnRead = false;
-std::string changeIdentityOnRead, downgradeListing;
+std::string changeIdentityOnRead, tightenOnRead, downgradeListing;
+std::string lostRemoval, unreadableLookup;
+bool loseLookupAfterRemoval = false, giveCreatedFoldersIds = false;
+std::map<std::string, unsigned> listingCounts, listingRows;
 unsigned folderReads = 0;
 unsigned postCancelReadCalls = 0;
 bool commitFailed = false, expireDuringCleanup = false;
@@ -153,8 +158,16 @@ bool StatNetwork(const Location &l, FileEntry &entry, const TransferControl &c,
   if ((hideStoredPart && suffix(l.URL(), ".part") && files.count(l.URL())) ||
       (uncertainRollback && commitFailed && c.cleanup && l.URL() == destination))
     throw std::runtime_error("FTP LIST cannot confirm absence");
+  if (l.URL() == unreadableLookup)
+    throw std::runtime_error("Fixture lookup unavailable");
   auto it = files.find(StoragePath(l.URL()));
-  if (it == files.end()) return false;
+  if (it == files.end()) {
+    if (l.path != "/out" && l.path != "/")
+      return false;
+    entry.directory = true;
+    entry.providerIdentity = "fixture-parent";
+    return true;
+  }
   entry.path = l.URL(); entry.name = LocationLeaf(entry.path);
   entry.directory = it->second.directory;
   entry.permissions = it->second.permissions.value_or(entry.directory ? 0755 : 0644);
@@ -166,6 +179,7 @@ bool StatNetwork(const Location &l, FileEntry &entry, const TransferControl &c,
 }
 std::vector<FileEntry> ListNetwork(const Location &l, const TransferControl &c,
                                    ListingMethod *method) {
+  ++listingCounts[l.URL()];
   if (method)
     *method = l.URL() == downgradeListing && ++folderReads > 1
                   ? ListingMethod::FtpList : ListingMethod::Provider;
@@ -177,6 +191,7 @@ std::vector<FileEntry> ListNetwork(const Location &l, const TransferControl &c,
       out.push_back(entry);
     }
   }
+  listingRows[l.URL()] += out.size();
   return out;
 }
 void ReadNetwork(const Location &l, const DataSink &sink, const TransferControl &c) {
@@ -199,6 +214,8 @@ void ReadNetwork(const Location &l, const DataSink &sink, const TransferControl 
   } else {
     sink(data.data(), data.size());
   }
+  if (l.URL() == tightenOnRead)
+    files.at(l.URL()).permissions = 0600;
   if (l.URL() == changeIdentityOnRead || (replaceStageOnRead && suffix(l.URL(), ".part")))
     files.at(l.URL()).identity = "replaced";
   if (editSmbSourceOnRead && l.scheme == "smb") {
@@ -220,9 +237,11 @@ void UploadNetwork(const std::string &local, const Location &l, const TransferCo
 void ChangeNetwork(const Location &l, const char *action,
                    const std::string &target, const TransferControl &c) {
   c.Check();
+  if (c.mutationSubmitted)
+    *c.mutationSubmitted = true;
   std::string source = StoragePath(l.URL());
   if (std::string(action) == "mkdir") {
-    files.emplace(source, Remote{"", 1, 0, true});
+    files.emplace(source, Remote{"", 1, 0, true, giveCreatedFoldersIds ? "created:" + source : ""});
     return;
   }
   if (std::string(action) == "rmdir") {
@@ -240,7 +259,13 @@ void ChangeNetwork(const Location &l, const char *action,
     if ((suffix(source, ".part") && failPartCleanup) ||
         (suffix(source, ".previous") && failBackupCleanup))
       throw std::runtime_error("injected cleanup failure");
-    files.erase(source); return;
+    files.erase(source);
+    if (source == lostRemoval) {
+      if (loseLookupAfterRemoval)
+        unreadableLookup = source;
+      throw std::runtime_error("Removal acknowledgement lost");
+    }
+    return;
   }
   if (std::string(action) != "rename")
     throw std::runtime_error("Unexpected operation");
@@ -278,6 +303,12 @@ int main() {
     cleanupReadBytes = 0;
     cancelAtReadyCheck = cancelAfterStore = hideStoredPart = uncertainRollback = replaceStageOnRead = false;
     changeIdentityOnRead.clear();
+    tightenOnRead.clear();
+    unreadableLookup.clear();
+    lostRemoval.clear();
+    giveCreatedFoldersIds = loseLookupAfterRemoval = false;
+    listingCounts.clear();
+    listingRows.clear();
     downgradeListing.clear();
     folderReads = 0;
     cancelReadback = corruptUpload = denyReadback = truncateUpload = omitStageSize = false;
@@ -884,6 +915,106 @@ int main() {
         "concurrent source addition retains delivered child but suppresses root completion");
   unlink(arrived.c_str());
 
+  for (const bool nestedSwap : {false, true}) {
+    for (const bool preexisting : {false, true}) {
+      reset();
+      giveCreatedFoldersIds = true;
+      const auto localParent = nestedSwap ? nested : folder;
+      if (nestedSwap && mkdir(nested.c_str(), 0700))
+        return 1;
+      const auto firstLocal = localParent + "/sibling";
+      const auto secondLocal = localParent + "/another";
+      std::ofstream(firstLocal) << "healthy sibling";
+      std::ofstream(secondLocal) << "another";
+      const std::string serverOut = "smb://fixture/out";
+      const auto remoteRoot = serverOut + "/upload-folder";
+      const auto remoteParent = nestedSwap ? remoteRoot + "/nested" : remoteRoot;
+      const auto moved = serverOut + "/renamed-original";
+      if (preexisting) {
+        files[remoteRoot] = {"", 1, 0, true, "root"};
+        files[remoteParent] = {"", 1, 0, true, "original"};
+      }
+      std::string delivered;
+      auto swap = hooks;
+      swap.fileDone = [&](const auto &, const auto &path) {
+        if (!delivered.empty() || ParentLocation(path) != remoteParent)
+          return;
+        delivered = LocationLeaf(path);
+        files[moved] = files.at(remoteParent);
+        files[moved + "/" + delivered] = files.at(path);
+        files.erase(path);
+        files[remoteParent].identity = "replacement";
+      };
+      Job upload{Action::Copy, {folder}, serverOut};
+      r = RunVirtual(upload, swap);
+      check(!delivered.empty() && r.completed == 0 && r.partialCopies == 1 &&
+                errorHas(r, remoteParent.c_str()) &&
+                std::any_of(r.outcomes.begin(), r.outcomes.end(), [&](const auto &entry) {
+                  return entry.destination == remoteParent + "/" + delivered && entry.upload &&
+                         entry.upload->publication == Publication::Published;
+                }) && files.at(moved + "/" + delivered).data ==
+                         (delivered == "another" ? "another" : "healthy sibling") &&
+                !files.count(remoteParent + "/sibling") && !files.count(remoteParent + "/another") &&
+                access(firstLocal.c_str(), F_OK) == 0 && access(secondLocal.c_str(), F_OK) == 0,
+            preexisting ? "existing SMB upload folder changed: next write refused, delivery receipt retained" :
+                          "new SMB upload folder changed: next write refused, delivery receipt retained");
+      r = RunVirtual(upload, hooks);
+      check(r.completed == 1 && files.at(remoteParent + "/sibling").data == "healthy sibling" &&
+                files.at(remoteParent + "/another").data == "another" && files.count(moved + "/" + delivered),
+            "fresh SMB upload retry binds the current folder and preserves the first delivery");
+      unlink(secondLocal.c_str());
+      if (nestedSwap) {
+        unlink(firstLocal.c_str());
+        rmdir(nested.c_str());
+      }
+    }
+  }
+  for (unsigned count : {8u, 64u}) {
+    reset();
+    files[out] = {"", 1, 0, true, "root-id"};
+    files[in] = {"", 1, 0, true};
+    for (unsigned i = 0; i < count; ++i) {
+      const auto suffix = "/sub" + std::to_string(i);
+      files[in + suffix] = {"", 1, 0, true};
+      files[out + suffix] = {"", 1, 0, true, "id" + suffix};
+    }
+    r = RunVirtual({Action::Copy, {in}, "sftp://fixture/out"}, hooks);
+    check(r.completed == 1 && !r.copyLimitations && listingCounts.at(out) == 1 && listingRows.at(out) == count,
+          (std::to_string(count) + " stable destination siblings require one exact-name listing").c_str());
+    files[out + "/sub0"].identity.clear();
+    r = RunVirtual({Action::Copy, {in}, "sftp://fixture/out"}, hooks);
+    check(r.completed == 1 && r.copyLimitations && !r.outcomes.empty() &&
+              r.outcomes.back().detail.find(out + "/sub0") != std::string::npos,
+          "nested folder without an identity explicitly qualifies the selected root receipt");
+  }
+  for (const bool explicitSource : {false, true}) {
+    reset();
+    const std::string implicit = "sftp://fixture", explicitPort = "sftp://fixture:22";
+    const auto from = (explicitSource ? explicitPort : implicit) + "/in/item";
+    const auto to = (explicitSource ? implicit : explicitPort) + "/out";
+    files[from] = {"selected"};
+    Job move{Action::Move, {from}, "sftp://fixture:23/out"};
+    StatFile(from, move.expectedRemoteSources[from]);
+    r = RunVirtual(move, hooks);
+    check(!r.completed && !r.errors.empty() && files.count(from), "different SFTP ports cannot move");
+    move.destination = to;
+    r = RunVirtual(move, hooks);
+    check(r.completed == 1 && !files.count(from) && files.at(to + "/item").data == "selected",
+          "worker moves across implicit and explicit standard SFTP ports");
+  }
+  reset();
+  files[remote] = {"private", 1, 0, false, "private-file", 0644};
+  tightenOnRead = remote;
+  localPublish = LocalPublish::Limited;
+  mkdir(downloadFolder.c_str(), 0700);
+  std::ofstream(localTarget) << "keep";
+  r = RunVirtual(downloadJob, hooks);
+  check(!r.completed && errorHas(r, "Source changed") && files.at(remote).permissions == 0600 &&
+            std::ifstream(localTarget).peek() == 'k',
+        "permission change during download leaves previous destination intact");
+  unlink(localTarget.c_str());
+  rmdir(downloadFolder.c_str());
+
   for (const std::string server : {"sftp://fixture", "smb://fixture"}) {
     const auto picked = server + "/in/selected";
     const auto other = server + "/in/other";
@@ -974,9 +1105,10 @@ int main() {
     const auto rows = interrupt.report->Page(0, 10);
     check(!r.completed && r.cancelled == cancel && r.partialDeletions == 1 &&
               rows.errors.size() == (cancel ? 0u : 1u) && !files.count(first) &&
-              files.count(second) && files.count(tree) && rows.outcomes.size() == 2 &&
+              files.count(second) && files.count(tree) && rows.outcomes.size() == (cancel ? 2u : 3u) &&
+              (cancel || (rows.outcomes[1].source == second && rows.outcomes[1].status == "deletion unconfirmed")) &&
               rows.outcomes[0].source == first && rows.outcomes[0].status == "deleted" &&
-              rows.outcomes[1].source == tree && rows.outcomes[1].status == "partially deleted",
+              rows.outcomes.back().source == tree && rows.outcomes.back().status == "partially deleted",
           cancel ? "cancelled deletion reports acknowledged child and partial root"
                  : "failed deletion reports acknowledged child and partial root");
   }
@@ -986,6 +1118,36 @@ int main() {
             !files.count(tree) && r.outcomes.size() == 2 &&
             r.outcomes.back().source == tree && r.outcomes.back().status == "deleted",
         "completed network deletion reports each acknowledged removal");
+  for (bool firstLost : {false, true}) {
+    for (bool unknown : {false, true}) {
+      reset();
+      files[tree] = {"", 1, 0, true, "tree"};
+      files[first] = {"one", 1, 0, false, "first"};
+      files[second] = {"two", 1, 0, false, "second"};
+      StatFile(tree, deletion.expectedRemoteSources[tree]);
+      lostRemoval = firstLost ? first : second;
+      loseLookupAfterRemoval = unknown;
+      Job retry{Action::Delete, {lostRemoval}, ""};
+      StatFile(lostRemoval, retry.expectedRemoteSources[lostRemoval]);
+      r = RunVirtual(deletion, hooks);
+      const auto hasRow = [&](const auto &path, const auto &status) {
+        return std::any_of(r.outcomes.begin(), r.outcomes.end(), [&](const EntryOutcome &entry) {
+          return entry.source == path && entry.status == status;
+        });
+      };
+      check(!r.completed && !r.errors.empty() && !files.count(lostRemoval) &&
+                r.unconfirmedDeletions == int(unknown) && r.partialDeletions == int(!unknown || !firstLost) &&
+                hasRow(lostRemoval, unknown ? "deletion unconfirmed" : "deleted") &&
+                (firstLost ? (hasRow(second, "unprocessed") && files.count(second)) :
+                             (hasRow(first, "deleted") && !files.count(first))),
+            "lost removal reply distinguishes confirmed absence, unknown outcome and untouched siblings");
+      unreadableLookup.clear();
+      files[lostRemoval] = {"new", 1, 0, false, "replacement"};
+      r = RunVirtual(retry, hooks);
+      check(!r.completed && files.at(lostRemoval).identity == "replacement",
+            "replaying original selection never deletes replacement after failed removal");
+    }
+  }
   unlink(sibling.c_str());
   rmdir(folder.c_str());
   unlink(source.c_str()); rmdir(dir);

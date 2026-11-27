@@ -147,6 +147,7 @@ struct Result {
   // For EditArchive, identifies the verified output under its published name.
   std::string publishedArchiveVersion;
   int partialDeletions = 0;
+  int unconfirmedDeletions = 0;
   int partialCopies = 0; // Selected folders changed but not fully copied.
 };
 Result Run(const Job &, const Hooks &);
