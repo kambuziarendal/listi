@@ -20,5 +20,8 @@ struct ArchiveVolumes {
 // Only numbered siblings in one directory are eligible. No decoder-supplied
 // path can expand this captured set. Missing middle/first parts fail here;
 // the native reader must additionally verify that the last part is complete.
+struct TransferControl;
+void CheckOpenedArchiveVersion(const std::string &path, const std::string &identity,
+                               const TransferControl &);
 ArchiveVolumes FindArchiveVolumes(const std::string &path);
 } // namespace Listi

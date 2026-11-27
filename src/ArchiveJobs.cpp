@@ -662,19 +662,27 @@ Result RunArchiveEdit(const Job &job, const Hooks &hooks,
         !renameat(stageDir.n, "updated", parent.n, targetLeaf.c_str()),
         "Could not publish the updated archive. The original was left in place.");
     stage.retainRecovery = true;
+    // Rename may update ctime. Capture the new version from our still-open
+    // verified output, never from whatever now occupies the destination path.
+    struct stat published;
+    Require(!fstat(output.n, &published) && published.st_size == verifiedOutput.st_size &&
+                published.st_mtim.tv_sec == verifiedOutput.st_mtim.tv_sec &&
+                published.st_mtim.tv_nsec == verifiedOutput.st_mtim.tv_nsec,
+            "Archive was published, but its verified contents could not be confirmed.");
+    const auto identity = ArchivePasswordIdentity(published);
+    ArchiveVolumes receipt;
+    receipt.files.push_back({job.destination, identity, published.st_size,
+                             published.st_dev, published.st_ino});
+    result.publishedArchiveVersion = receipt.Fingerprint();
     Require(!fsync(parent.n),
             "Updated archive was published, but its directory could not be flushed. Durability after restart is unknown.");
     stage.recovery->Advance(RecoveryPhase::Published);
     stage.retainRecovery = false;
     if (secret)
       try {
-        struct stat published;
-        if (!lstat(job.destination.c_str(), &published))
-          RememberArchivePassword(ArchivePasswordIdentity(published), secret,
-                                  passwordGeneration);
-        RememberArchivePassword(
-            FindArchiveVolumes(job.destination).Fingerprint(), secret,
-            passwordGeneration);
+        RememberArchivePassword(identity, secret, passwordGeneration);
+        RememberArchivePassword(result.publishedArchiveVersion, secret,
+                                passwordGeneration);
       } catch (
           ...) { /* Password caching is optional after the archive is durable. */
       }

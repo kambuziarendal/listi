@@ -32,6 +32,22 @@ void *run(void *){try{
  int serial=0;
  auto clone=[&](const std::string &leaf){std::string folder=root+"/set"+std::to_string(++serial);mkdir(folder.c_str(),0700);for(auto &part:FindArchiveVolumes(base+leaf).files)write(folder+"/"+LocationLeaf(part.path),disk(part.path));return folder+"/"+leaf;};
  check(SevenZipAvailable(),"optional engine available");
+ {
+   const auto first = root + "/Trip.rar", second = root + "/trip.rar";
+   write(first, disk(base + "../sevenzip/rar4-data.rar"));
+   write(second, disk(base + "../sevenzip/rar5-mixed.rar"));
+   for (const auto &path : {first, second}) {
+     const auto volumes = FindArchiveVolumes(path);
+     check(volumes.kind == ArchiveVolumes::Single && volumes.files.size() == 1 &&
+           volumes.files.front().path == path && ParseLocation(OpenArchive(path)).archive == path,
+           "case-distinct standalone RAR opens the selected root");
+   }
+   const auto numbered = root + "/trip.r00";
+   write(numbered, disk(base + "legacy.r00"));
+   for (const auto &path : {first, second, numbered})
+     check(fails([&]{ FindArchiveVolumes(path); }),
+           "numbered RAR parts still reject ambiguous roots");
+ }
  for(const char *leaf:{"plain.7z.001","plain.7z.004","encrypted.7z.002","plain.part3.rar","encrypted.part4.rar"}){
   password();auto parts=FindArchiveVolumes(base+leaf);check(parts.files.size()==4,"four parts discovered from any selected part");auto url=OpenArchive(base+leaf);
   check(ParseLocation(url).archive==parts.files.front().path,"virtual location canonicalizes first part");

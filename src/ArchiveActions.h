@@ -42,7 +42,8 @@ public:
   static Job ReadAdditions(const BMessage &message);
   static ArchivePrompt ConfirmAddition(const Job &job,
                                        const std::string &lease);
-  static ArchivePrompt ConfirmRemoval(const Pane &source);
+  void InspectRemoval(const Pane &source, BMessenger owner);
+  static ArchivePrompt ConfirmRemoval(const Job &target, size_t selectedCount);
 
 private:
   void Inspect(const Pane &, BMessenger owner, Job command, const std::string &archive,

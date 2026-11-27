@@ -97,7 +97,12 @@ class BrowserReplies : public BMessageFilter {
 public:
   BrowserReplies() : BMessageFilter(B_ANY_DELIVERY, B_ANY_SOURCE) {}
   std::map<std::string, int> miller;
+  std::function<void()> tryLocalMove;
   filter_result Filter(BMessage *message, BHandler **recipient) override {
+    if (message->what == 'tMov') {
+      if (tryLocalMove) tryLocalMove();
+      return B_SKIP_MESSAGE;
+    }
     if (message->what == kInlineNotice)
       notice = message->GetString("error", "");
     if (message->what == kScanDone && message->HasString("archiveVersion") &&
@@ -126,6 +131,82 @@ BButton *PromptButton(BWindow *window, const std::string &label) {
   }
   return nullptr;
 }
+void LocalDestinationCases(BWindow *window, WorkspaceSplit &split, BrowserReplies &replies,
+                           const fs::path &root) {
+  for (bool flat : {false, true}) {
+    auto &source = split.Panel(0);
+    auto &destination = split.Panel(1).Files();
+    const auto work = root / (flat ? "local-flat" : "local-panel");
+    const auto inputs = work / "inputs", shown = work / "shown", held = work / "held";
+    fs::create_directories(inputs);
+    fs::create_directory(shown);
+    const auto input = inputs / "incoming.txt";
+    std::ofstream(input) << "original bytes";
+    source.Select(PanelPage::Files);
+    source.Files().Navigate(inputs.c_str());
+    destination.Navigate(shown.c_str());
+    Check(WaitForPane(window, &source.Files(), inputs.string()) &&
+              WaitForPane(window, &destination, shown.string()), "local transfer panels loaded");
+    split.SetSource(0);
+    if (flat) {
+      BMessage open(kFlatView);
+      window->MessageReceived(&open);
+      Check(Until(window, [&] {
+        auto *rows = dynamic_cast<BColumnListView *>(source.FindView("flat results"));
+        return rows && rows->CountRows() == 1;
+      }), "flat local source loaded");
+      auto *rows = static_cast<BColumnListView *>(source.FindView("flat results"));
+      rows->MakeFocus(true);
+      rows->SetFocusRow(rows->RowAt(0), true);
+      Check(FlatSelection(*source.Page(PanelPage::Flat)).sources ==
+                std::vector<std::string>{input.string()}, "flat Move selects the intended local file");
+    } else {
+      Check(source.Files().MatchPattern("incoming.txt", true) == 1, "local source selected");
+    }
+    auto submit = [&](bool replace) {
+      // Run on the window looper: inspect the displayed identity, swap the
+      // folder and dispatch the real command before a refresh can intervene.
+      bool dispatched = false;
+      struct stat expected;
+      Check(stat(shown.c_str(), &expected) == 0, "read intended local target identity");
+      replies.tryLocalMove = [&] {
+        if (dispatched || destination.IsScanning() || !destination.LocationValid()) return;
+        const auto [device, node] = destination.FolderIdentity();
+        if (device != expected.st_dev || node != expected.st_ino) return;
+        dispatched = true;
+        split.SetSource(0);
+        if (replace) {
+          fs::rename(shown, held);
+          fs::create_directory(shown);
+        }
+        BMessage move(kMove);
+        window->MessageReceived(&move);
+      };
+      const bool delivered = Until(window, [&] {
+        if (!dispatched) window->PostMessage('tMov');
+        return dispatched;
+      });
+      replies.tryLocalMove = {};
+      Check(delivered, "dispatch Move from a completed destination listing");
+    };
+    notice.clear();
+    submit(true);
+    const bool refused = Until(window, [&] { return !notice.empty(); });
+    if (!refused || notice.find("destination folder was replaced") == std::string::npos)
+      throw std::runtime_error("Missing stale-target refusal. Notice: " + notice +
+                               "; source panel " + std::to_string(split.Source()) +
+                               "; destination " + destination.Path());
+    Check(Bytes(input) == "original bytes" && fs::is_empty(shown) && fs::is_empty(held),
+          "Move refuses the replacement and leaves original and both destinations untouched");
+    destination.Reload();
+    Check(WaitForPane(window, &destination, shown.string()), "explicitly reload local destination");
+    submit(false);
+    Check(Until(window, [&] { return !fs::exists(input) && fs::exists(shown / "incoming.txt"); }) &&
+              Bytes(shown / "incoming.txt") == "original bytes" && fs::is_empty(held),
+          "Move after reload delivers only to the newly displayed destination");
+    if (flat) source.CloseCurrent();
+  }
+}
 void InboundCases(const fs::path &root) {
   Preferences prefs;
   prefs.workspace = Workspace::tviskipt;
@@ -137,6 +218,7 @@ void InboundCases(const fs::path &root) {
   auto *panel = dynamic_cast<PanelTools *>(window->FindView("first panel tools"));
   auto *split = panel ? dynamic_cast<WorkspaceSplit *>(panel->Parent()) : nullptr;
   Check(split, "dual-pane browser opened");
+  LocalDestinationCases(window, *split, *replies, root);
   enum Route { FlatCopy, FlatMove, Details, Grid, MillerAncestor };
   for (auto route : {FlatCopy, FlatMove, Details, Grid, MillerAncestor}) {
     const auto work = root / ("inbound-" + std::to_string(route)), inputs = work / "inputs";
@@ -296,6 +378,10 @@ int main() {
       source->Navigate(folder.c_str());
       Check(WaitForPane(window, source, folder) && !source->ExportModel().archiveVersion.empty() &&
                 source->MatchPattern("note.txt", true) == 1, "select displayed archive member");
+      // A preceding copy may have triggered a watched-folder reload. Finish
+      // it before swapping a source; these commands test the source, not the
+      // independent rejection of an incomplete local destination.
+      Check(WaitForPane(window, dest, out.string()), "local destination ready for stale source check");
     };
     auto rejectCommands = [&] {
       const auto openWindows = app.CountWindows();
@@ -313,9 +399,10 @@ int main() {
       }
       for (auto cmd : {kCopy, kMove, kRemoveArchive, kMkdir}) {
         notice.clear();
-        Check(operations.Handle(BMessage(cmd), *source, *dest, false) &&
-                  notice.find("Reload") != std::string::npos && !queue.Busy() && !question->Pending(),
-              "stale pane command rejected before confirmation or queueing");
+        const bool handled = operations.Handle(BMessage(cmd), *source, *dest, false);
+        Check(handled && notice.find("Reload") != std::string::npos && !queue.Busy() && !question->Pending(),
+              "stale pane command rejected before confirmation or queueing (" +
+                  std::to_string(cmd) + ": " + notice + ")");
       }
     };
     for (bool nested : {false, true}) {
@@ -365,7 +452,17 @@ int main() {
                 Bytes(out / "note.txt") == (nested ? "new sub/note.txt" : "new note.txt"),
             "refreshed Copy transfers the displayed replacement");
       fs::remove(out / "note.txt");
-      const auto removed = Run(DecodeJob(ArchiveActions::ConfirmRemoval(*source).accepted), {});
+      ArchiveActions actions;
+      actions.InspectRemoval(*source, BMessenger(window));
+      Job command, target;
+      bool prepared = false;
+      Check(Until(window, [&] {
+        if (actions.Inspecting())
+          prepared = actions.PollInspection(*source, command, target);
+        return !actions.Inspecting();
+      }) && prepared, "removal inspection accepts the refreshed selection");
+      const auto prompt = ArchiveActions::ConfirmRemoval(target, command.sources.size());
+      const auto removed = Run(DecodeJob(prompt.accepted), {});
       auto expected = newFiles;
       expected.erase(nested ? "sub/note.txt" : "note.txt");
       Check(removed.errors.empty() && Files(url) == expected &&

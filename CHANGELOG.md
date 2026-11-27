@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Copying selected archive members to disk keeps the displayed archive version for the whole transfer. If the archive is replaced, already delivered files stay in place.
+- Two-pane and Flat View transfers use the local destination folder shown in the other pane. If that folder is replaced, reload it before retrying.
+- If an external archive replacement arrives as the editor finishes saving, Listi keeps the working copy and pauses automatic saving instead of editing the replacement.
+- Removing archive members now checks the format off the window thread before asking for confirmation.
+
 - Flat View transfers, drops into an archive, external edits and new folders now respect the archive version displayed in the pane. Opening the archive file picker or name prompt no longer waits for a full format inspection on the window thread.
 
 - Archive commands use the version shown by the file pane. If another application replaces the archive, reload it and select the entries again. Add to archive rejects incomplete file-picker selections.

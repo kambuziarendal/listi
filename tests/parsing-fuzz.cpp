@@ -13,6 +13,47 @@ void Require(bool ok) {
   if (!ok)
     std::abort();
 }
+template <class Operation> void RequireRejected(Operation operation) {
+  try {
+    operation();
+  } catch (const std::runtime_error &) {
+    return;
+  }
+  std::abort();
+}
+void VerifyLocationRegressions() {
+  using Listi::ChildLocation;
+  using Listi::ParseLocation;
+  using Listi::ResolveVirtualRelativePath;
+
+  const std::string archive = "archive:///fixture%0D%0A%21%25.zip!/";
+  const auto location = ParseLocation(archive);
+  Require(location.archive == "/fixture\r\n!%.zip");
+  Require(location.URL() == archive);
+  RequireRejected([] { ParseLocation("archive:///fixture%00.zip!/"); });
+  for (const auto &invalid : std::vector<std::string>{
+           "\r", "\n", "%0D", "%0A", "%00", std::string(1, '\0')}) {
+    RequireRejected([&] { ParseLocation("sftp://fixture/" + invalid); });
+    RequireRejected([&] { ParseLocation(archive + invalid); });
+  }
+  RequireRejected([] { ParseLocation("sftp://:22/folder"); });
+  Require(ParseLocation("sftp://[::1]:22/folder").host == "[::1]");
+
+  Require(ResolveVirtualRelativePath(archive + "old", "../a/b/./c") ==
+          archive + "a/b/c");
+  Require(ResolveVirtualRelativePath(archive, "../..") == archive);
+  Require(ResolveVirtualRelativePath(archive, "%2e%2e/%2f") ==
+          archive + "%252e%252e/%252f");
+  const std::string remote = "sftp://fixture:22/";
+  Require(ResolveVirtualRelativePath(remote + "old", "../a/b/../c") ==
+          remote + "a/c");
+  Require(ResolveVirtualRelativePath(remote + "old", ".") == remote + "old");
+  Require(ResolveVirtualRelativePath(remote + "old", "../../new") ==
+          remote + "new");
+  RequireRejected([&] { ResolveVirtualRelativePath(remote, "a\r\n/.."); });
+  for (const std::string name : {"a/b", ".", ".."})
+    RequireRejected([&] { ChildLocation(archive, name); });
+}
 void Exercise(const std::string &input) {
   auto path = input;
   for (auto &byte : path)
@@ -43,6 +84,7 @@ void Exercise(const std::string &input) {
 } // namespace
 
 int main() {
+  VerifyLocationRegressions();
   for (const std::string seed : {"", "/", ".", "..", "%00", "a%2fb",
          "ftp://[::1]:65535/../.", "smb://example.invalid/share",
          "archive:///sample.zip!/%E2%82%AC", "sftp://example.invalid:0/"})

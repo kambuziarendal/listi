@@ -156,6 +156,7 @@ Listing(const Location &location, const TransferControl &control,
         std::string *shown = nullptr) {
   control.Check();
   const auto fingerprint = FindArchiveVolumes(location.archive).Fingerprint();
+  control.RequireArchiveVersion(fingerprint);
   if (shown) *shown = fingerprint;
   const auto passwordGeneration = ArchivePasswordGeneration();
   const auto key = location.URL();
@@ -229,6 +230,8 @@ void ReadArchive(const Location &location, const DataSink &sink,
                  const TransferControl &control) {
   RejectSplitArchive(location.archive);
   const auto parts = FindArchiveVolumes(location.archive);
+  if (control.archiveVersion)
+    control.RequireArchiveVersion(parts.Fingerprint());
   if (parts.kind != ArchiveVolumes::Single && !SevenZipAvailable())
     throw std::runtime_error("Install the optional p7zip package from "
                              "HaikuDepot to read split archives inside Listi.");

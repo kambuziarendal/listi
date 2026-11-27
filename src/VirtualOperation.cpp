@@ -275,6 +275,8 @@ struct Runner {
       RecordOutcome({selectedSource, dst, "partial", detail});
   }
   TransferControl Control(const std::string &p, bool bytes = true) {
+    const auto version = job.expectedArchiveSets.empty() ? job.expectedArchiveSets.end()
+        : job.expectedArchiveSets.find(ParseLocation(p).archive);
     return {[this] {
               Guard();
               return !hooks.proceed || hooks.proceed();
@@ -282,7 +284,7 @@ struct Runner {
             [&, p, bytes](uint64_t n) {
               if (hooks.progress)
                 hooks.progress(p, bytes ? n : 0);
-            }};
+            }, nullptr, version == job.expectedArchiveSets.end() ? nullptr : &version->second};
   }
   uint64_t Stage(const std::string &src, const FileEntry &expected, TempFile &temp,
              const TransferControl &control, Sha256 *digest = nullptr) {
@@ -586,6 +588,9 @@ struct Runner {
         }
       };
       Job publish{Action::Copy, {temp.path}, ParentLocation(dst)};
+      // Conflict questions and the final rename happen inside the local publisher.
+      if (control.archiveVersion)
+        publish.expectedArchiveSets.emplace(ParseLocation(src).archive, *control.archiveVersion);
       publish.expectedDestination = directories.at(publish.destination);
       publish.copyForArchiveMove = job.copyForArchiveMove;
       auto done = Run(publish, local);

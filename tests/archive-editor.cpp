@@ -191,6 +191,33 @@ int main() {
             "refreshed edit saves only the selected replacement member");
       EditFromRefreshedPane(displayed, saved, originalBytes);
     }
+    {
+      const auto a = archive("zip"), other = archive("zip");
+      const auto archivePath = physical(a), externalPath = physical(other);
+      const auto externalBytes = bytes(externalPath);
+      auto session = ArchiveEditSession::Open(member(a), sessions);
+      const auto saved = Join(session->Directory(), "saved");
+      const auto journal = Join(session->Directory(), "session");
+      const auto oldJournal = bytes(journal), oldVersion = session->ArchiveVersion();
+      writeFile(session->WorkingFile(), "private draft");
+      bool replaced = false;
+      Hooks replaceAfterPublication;
+      replaceAfterPublication.fileDone = [&](const std::string &, const std::string &destination) {
+        if (destination == archivePath && bytes(member(a)) == "private draft")
+          replaced = rename(externalPath.c_str(), archivePath.c_str()) == 0;
+      };
+      check(rejects([&] { session->Save(replaceAfterPublication); }) && replaced &&
+                bytes(archivePath) == externalBytes && bytes(saved) == "original" &&
+                bytes(journal) == oldJournal && session->ArchiveVersion() == oldVersion &&
+                bytes(session->WorkingFile()) == "private draft",
+            "external replacement before editor receipt keeps the private draft and old journal");
+      writeFile(session->WorkingFile(), "later private draft");
+      check(rejects([&] { session->Observe(); }) &&
+                rejects([&] { ArchiveEditSession::Resume(session->Directory())->Save(); }) &&
+                bytes(session->WorkingFile()) == "later private draft" &&
+                bytes(archivePath) == externalBytes,
+            "automatic observation and resumed writeback refuse the unrelated archive");
+    }
     for (const auto &format : WritableArchiveFormats()) {
       const auto a = archive(format.id);
       const auto m = format.id == "ar" ? ChildLocation(a, "edit.txt") : member(a);

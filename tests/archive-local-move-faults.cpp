@@ -76,7 +76,17 @@ int main(){
   check(injected&&!r.errors.empty()&&!r.completed&&r.completedRoots.empty(),"local move injected fault "+std::to_string(mode)+" cannot report success");
   check(readBytes(root+"/in/item")==payload,"local move injected fault "+std::to_string(mode)+" retains full source bytes");
   if(mode==DestinationRename)check(readBytes(destinationArchive)==before,"archive ENOSPC preserves previous target");
-  if(mode==CorruptDestination){bool mismatch=false;for(auto&e:r.errors)mismatch|=e.find("Destination bytes differ")!=std::string::npos;check(mismatch,"local source retained after damaged archive read-back");}
+  if (mode == CorruptDestination) {
+    bool detected = false;
+    for (const auto &error : r.errors) {
+      // Publication can now reject changed output before the move's byte comparison.
+      if (error.find("verified contents could not be confirmed") != std::string::npos ||
+          error.find("Destination bytes differ") != std::string::npos)
+        detected = true;
+    }
+    check(detected && readBytes(destinationArchive).find("X" + payload.substr(1)) != std::string::npos,
+          "damaged published destination detected before source cleanup");
+  }
   if(mode==LocalDelete)check(readBytes(destinationArchive)!=before,"local unlink failure leaves verified destination copy");
  }
  fault=None;injected=false;

@@ -142,6 +142,58 @@ void ZipCases(const fs::path &root, fs::path &outer, std::string &outerBytes) {
             Read(outer) == outerBytes && Members(outer) == names,
         "Extract retry publishes a new folder and keeps the outer archive intact");
 }
+void SourceVersionCases(const fs::path &root) {
+  const auto inputs = root / "versions-in", output = root / "versions-out";
+  fs::create_directory(inputs);
+  fs::create_directory(output);
+  auto build = [&](const std::string &label) {
+    Write(inputs / "one", label + "-one");
+    Write(inputs / "two", label + "-two");
+    auto create = PrepareArchiveJob(false, {(inputs / "one").string(), (inputs / "two").string()});
+    create.archiveFormat = "ar";
+    SetArchiveDestination(create, root.string(), label + ".ar");
+    const auto built = Run(create, {});
+    Check(built.completed == 1 && built.errors.empty(), "created archive version " + label);
+    return create.destination;
+  };
+  const auto archive = build("A"), replacement = build("B");
+  const auto url = OpenArchive(archive);
+  const std::vector<std::string> members{ChildLocation(url, "one"), ChildLocation(url, "two")};
+  Write(output / "two", "existing");
+  Hooks hooks = Replace();
+  std::vector<std::string> delivered, failed;
+  hooks.fileDone = [&](const std::string &source, const std::string &) {
+    delivered.push_back(source);
+    if (source == members.front())
+      fs::rename(replacement, archive);
+  };
+  hooks.fileFailed = [&](const std::string &source, const std::string &) { failed.push_back(source); };
+  const auto stale = Run(Copy(members, output), hooks);
+  Check(stale.completed == 1 && !stale.errors.empty() &&
+            delivered == std::vector<std::string>{members.front()} &&
+            failed == std::vector<std::string>{members.back()} &&
+            Read(output / "one") == "A-one" && Read(output / "two") == "existing",
+        "archive replacement between deliveries preserves the first receipt and the existing second target");
+  const auto retry = Run(Copy(members, output), Replace());
+  Check(retry.completed == 2 && retry.errors.empty() &&
+            Read(output / "one") == "B-one" && Read(output / "two") == "B-two",
+        "reloading the replacement permits a complete copy of the new version");
+
+  const auto duringPrompt = build("C");
+  Hooks prompt;
+  bool asked = false;
+  prompt.conflict = [&](const std::string &) {
+    fs::rename(duringPrompt, archive);
+    asked = true;
+    return Decision::Replace;
+  };
+  Write(output / "two", "keep after staging");
+  const auto changed = Run(Copy({members.back()}, output), prompt);
+  Check(asked && !changed.errors.empty() && !changed.completed &&
+            Read(output / "two") == "keep after staging",
+        "local publisher refuses a stale member after waiting for replacement confirmation");
+}
+
 void SkipCases(const fs::path &root) {
   namespace Probe = DownloadStageProbe;
   const auto src = root / "skip-input", dst = root / "skip-output";
@@ -258,6 +310,7 @@ int main() {
     fs::path outer;
     std::string bytes;
     ZipCases(root, outer, bytes);
+    SourceVersionCases(fs::canonical(root));
     SkipCases(root);
     fs::create_directory(root / "split");
     SplitCase(root / "split", false);

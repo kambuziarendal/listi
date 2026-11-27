@@ -1190,8 +1190,7 @@ public:
               throw std::runtime_error("Use Copy or Cut, then navigate and Paste.");
             auto job = Listi::FlatSelection(*flat);
             job.action = m->what == kCopy ? Listi::Action::Copy : Listi::Action::Move;
-            job.destination = destination.Path();
-            destination.ExportModel().BindArchiveView(job, job.destination);
+            destination.BindTransferDestination(job);
             fileOperations.SubmitTransfer(std::move(job));
           } catch (const std::exception &e) {
             PostMainWindowNotice(e.what());

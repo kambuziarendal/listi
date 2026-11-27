@@ -53,8 +53,17 @@ int main(){
   check(readBytes(sourceArchive)==original,"fault "+std::to_string(mode)+" retains source archive bytes exactly");
   if(mode==DestinationRename)check(readBytes(destinationArchive)==targetBefore,"destination publication ENOSPC keeps prior archive");
   if(mode==SourceRename)check(readBytes(destinationArchive)!=targetBefore,"source publication failure retains committed destination copy");
-  if(mode==CorruptDestination){bool mismatch=false;for(auto &error:result.errors)mismatch|=error.find("Destination bytes differ")!=std::string::npos;
-   check(mismatch,"read-back byte comparison catches damaged output before source deletion");}
+  if (mode == CorruptDestination) {
+    bool detected = false;
+    for (const auto &error : result.errors) {
+      // Publication can now reject changed output before the move's byte comparison.
+      if (error.find("verified contents could not be confirmed") != std::string::npos ||
+          error.find("Destination bytes differ") != std::string::npos)
+        detected = true;
+    }
+    check(detected && readBytes(destinationArchive).find("X" + payload.substr(1)) != std::string::npos,
+          "damaged published destination detected before source cleanup");
+  }
  }
  clean(root);std::cout<<checks<<" checks, "<<failures<<" failures\n";return failures?1:0;
 }

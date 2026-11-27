@@ -144,6 +144,8 @@ struct Result {
   bool bulkRenameRecoveryNeeded = false;
   // Do not reread this folder automatically after a removable transfer lost it.
   std::string interruptedCopyFolder;
+  // For EditArchive, identifies the verified output under its published name.
+  std::string publishedArchiveVersion;
   int partialDeletions = 0;
   int partialCopies = 0; // Selected folders changed but not fully copied.
 };

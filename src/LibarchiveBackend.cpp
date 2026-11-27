@@ -4,6 +4,7 @@
 #include "ArchiveTextLocale.h"
 #include "ArchiveMetadata.h"
 #include "ArchivePasswords.h"
+#include "ArchiveVolumes.h"
 #include <memory>
 #include <algorithm>
 #include <UTF8.h>
@@ -60,6 +61,7 @@ struct Reader {
       throw std::runtime_error("Could not allocate archive reader");
     }
     try {
+      CheckOpenedArchiveVersion(path, identity, c);
       LIBCALL(lib, archive_read_set_passphrase_callback)
       (handle, this, &Passphrase);
       LIBCALL(lib, archive_read_support_filter_all)(handle);
@@ -407,6 +409,7 @@ void LibarchiveRead(const Location &location, const DataSink &sink,
     if (slot && sequential && slot->path == location.archive &&
         slot->identity == ArchivePasswordIdentity(named) &&
         slot->passwordGeneration == ArchivePasswordGeneration()) {
+      CheckOpenedArchiveVersion(location.archive, slot->identity, c);
       slot->control = c;
       reused = true;
     } else

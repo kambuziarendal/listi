@@ -36,6 +36,12 @@ struct TransferControl {
   std::function<bool()> proceed;
   std::function<void(uint64_t)> progress;
   NetworkCleanupBudget *cleanup = nullptr;
+  // Bound by an archive member transfer; listings and reads must not adopt a new revision.
+  const std::string *archiveVersion = nullptr;
+  void RequireArchiveVersion(const std::string &actual) const {
+    if (archiveVersion && *archiveVersion != actual)
+      throw std::runtime_error("Archive changed after selection. Reload and select again.");
+  }
   void Check() const {
     if (proceed && !proceed())
       throw Cancelled();
@@ -67,6 +73,9 @@ bool IsListiPrivateEntry(const std::string &path);
 std::string EncodePath(const std::string &);
 std::string DecodePath(const std::string &);
 std::string ChildLocation(const std::string &, const std::string &);
+// Navigation treats components as literal names and stays inside the URL root.
+std::string ResolveVirtualRelativePath(const std::string &base,
+                                       const std::string &relative);
 std::string ParentLocation(const std::string &);
 std::string LocationLeaf(const std::string &);
 // Interim single-account mode: a normalized route can be registered only
