@@ -285,6 +285,14 @@ network scans the code to download them in its browser, without a cloud account.
 Serve only the selection through an unguessable, short-lived link, not its
 parent folders. Show when sharing is active, when it expires and how to stop it.
 
+### Keep folders in sync across devices
+
+Explore optional folder synchronisation with Syncthing or syncspirit, a C++
+implementation of the Syncthing protocol. Unlike a one-time file transfer,
+this would keep a chosen folder in sync as files change. Evaluate both engines
+on Haiku before choosing one, including how Listi can show pending changes and
+conflicts without reporting an offline device as up to date.
+
 ### Use Haiku's desktop tools
 
 - Let tool windows such as the Shelf participate in native **Stack & Tile** or
