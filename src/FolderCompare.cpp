@@ -132,6 +132,15 @@ void Validate(const Tree &before, const Tree &after) {
          "An entry changed during comparison: " + p.second.entry.path);
   }
 }
+// READDIR and LSTAT can return different subsets of the SFTP v3 fields.
+bool MatchesListedFields(const FileEntry &listed, const FileEntry &current) {
+  return listed.directory == current.directory && listed.link == current.link &&
+         (!listed.sizeKnown || (current.sizeKnown && listed.size == current.size)) &&
+         (!listed.modifiedKnown || listed.SameModification(current)) &&
+         (!listed.permissionsKnown ||
+          (current.permissionsKnown && listed.permissions == current.permissions)) &&
+         (listed.providerIdentity.empty() || listed.providerIdentity == current.providerIdentity);
+}
 std::string Digest(const Item &i, const TransferControl &control) {
   if (i.local) {
     struct stat now;
@@ -142,16 +151,10 @@ std::string Digest(const Item &i, const TransferControl &control) {
   }
   Item expected = i;
   if (ParseLocation(i.entry.path).scheme == "sftp") {
-    // Directory listings cannot supply an exact SFTP time. Compare two
-    // file stats around the read without weakening the listing's type/size check.
     FileEntry before;
-    Need(StatFile(i.entry.path, before, control),
+    Need(StatFile(i.entry.path, before, control) && MatchesListedFields(i.entry, before),
          "File changed before reading: " + i.entry.path);
-    expected.entry.modified = before.modified;
-    expected.entry.modifiedKnown = before.modifiedKnown;
-    expected.entry.modifiedFraction = before.modifiedFraction;
-    Need(Same(expected, Inspect(before)),
-         "File changed before reading: " + i.entry.path);
+    expected = Inspect(before);
   }
   Sha256 hash;
   uint64_t count = 0;
@@ -163,7 +166,7 @@ std::string Digest(const Item &i, const TransferControl &control) {
         count += n;
       },
       control);
-  Need(!i.entry.sizeKnown || count == uint64_t(i.entry.size),
+  Need(!expected.entry.sizeKnown || count == uint64_t(expected.entry.size),
        "Byte count changed while reading: " + i.entry.path);
   FileEntry after;
   const bool found = i.fromMlsd
@@ -235,7 +238,10 @@ CompareRows SelectCompareRows(const CompareResult &result, bool showMatches,
   return selected;
 }
 CompareResult CompareFolders(const CompareRequest &r,
-                             const TransferControl &control) {
+                             const TransferControl &requestControl) {
+  SftpSessions sessions;
+  auto control = requestControl;
+  control.sftpSessions = &sessions;
   CompareResult result;
   result.checksum = r.checksum;
   try {

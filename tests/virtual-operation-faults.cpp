@@ -10,6 +10,7 @@
 #endif
 #include "JobReportStore.h"
 #include "VirtualFile.h"
+#include "SftpFile.h"
 #include "UnavailableVolume.h"
 #include <algorithm>
 #include <algorithm>
@@ -111,6 +112,8 @@ Result Run(const Job &job, const Hooks &hooks) {
       entry.status = "skipped";
       return result;
     }
+    if (decision == Decision::Replace && hooks.checkReplacementSource)
+      hooks.checkReplacementSource();
     if (decision == Decision::Abort) {
       result.cancelled = true;
       entry.detail = "Cancelled before commit.";
@@ -163,6 +166,8 @@ bool StatNetwork(const Location &l, FileEntry &entry, const TransferControl &c,
     throw std::runtime_error("FTP LIST cannot confirm absence");
   if (l.URL() == unreadableLookup)
     throw std::runtime_error("Fixture lookup unavailable");
+  if (c.requireExactName && StoragePath(l.URL()) != l.URL())
+    throw std::runtime_error("SFTP entry no longer has its selected name");
   auto it = files.find(StoragePath(l.URL()));
   if (it == files.end()) {
     if (l.path != "/out" && l.path != "/")
@@ -179,6 +184,15 @@ bool StatNetwork(const Location &l, FileEntry &entry, const TransferControl &c,
   entry.size = it->second.data.size();
   entry.SetModification(it->second.modified, it->second.nanoseconds);
   return true;
+}
+std::set<std::string> ListSftpNames(const Location &folder, const TransferControl &c) {
+  std::set<std::string> names;
+  for (const auto &[path, file] : files) {
+    c.Check();
+    if (ParentLocation(path) == folder.URL())
+      names.insert(LocationLeaf(path));
+  }
+  return names;
 }
 std::vector<FileEntry> ListNetwork(const Location &l, const TransferControl &c,
                                    ListingMethod *method) {
@@ -435,7 +449,7 @@ int main() {
   const auto localTarget = downloadFolder + "/input";
   const Job downloadJob{Action::Copy, {remote}, downloadFolder};
   auto download = [&](LocalPublish publication, Decision decision, bool report,
-                      bool privateStaging = false) {
+                      bool privateStaging = false, bool changeSource = false) {
     reset();
     localPublish = publication;
     expectPrivatePublication = privateStaging;
@@ -449,6 +463,8 @@ int main() {
     local.conflict = [=](const std::string &target) {
       if (target != localTarget)
         throw std::runtime_error("Wrong conflict target");
+      if (changeSource)
+        files.at(remote).data = "changed while answering";
       return decision;
     };
     local.fileDone = [&](const std::string &from, const std::string &to) {
@@ -485,6 +501,13 @@ int main() {
             skipped.errors.empty() && actualPaths(skipped.outcomes, "skipped") &&
             localContents() == "existing data",
         "download collision is recorded and counted only once when skipped");
+  for (auto answer : {Decision::Replace, Decision::Skip, Decision::ReplaceAll}) {
+    auto changed = download(LocalPublish::Limited, answer, false, false, true).first;
+    check(!changed.completed && !done && localContents() == "existing data" &&
+              (answer == Decision::Skip ? changed.skipped == 1 && changed.errors.empty()
+                                        : errorHas(changed, "Source changed before replacement")),
+          "a changed network source cannot replace a local conflict; Skip still skips");
+  }
   auto aborted = download(LocalPublish::Limited, Decision::Abort, false).first;
   check(aborted.cancelled && !aborted.skipped && !aborted.completed && !done &&
             aborted.errors.empty() && actualPaths(aborted.outcomes, "unprocessed") &&
@@ -802,6 +825,22 @@ int main() {
         "explicit default port cannot bypass self-copy rejection");
   const std::string in = "sftp://fixture/in/selection";
   const std::string out = "sftp://fixture/out/selection";
+  for (bool mergeFolder : {false, true}) {
+    reset();
+    const auto target = std::string("sftp://fixture/out");
+    const auto input = std::string("sftp://fixture/in/input");
+    const auto selected = mergeFolder ? input + "/child" : input;
+    if (mergeFolder)
+      files[input] = files[destination] = {"", 1, 0, true};
+    files[selected] = {"chosen bytes"};
+    unreadableLookup = target + "/unselected-special";
+    files[unreadableLookup] = {"untouched"};
+    r = RunVirtual({Action::Copy, {input}, target}, hooks);
+    check(r.completed == 1 && r.errors.empty() &&
+              files.at(mergeFolder ? destination + "/child" : destination).data == "chosen bytes" &&
+              files.at(unreadableLookup).data == "untouched",
+          "existing SFTP target checks literal names without inspecting unrelated siblings");
+  }
   for (bool fold : {false, true}) {
     reset();
     foldDirectoryNames = fold;

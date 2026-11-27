@@ -659,7 +659,10 @@ unlock the key; it is not sent as the server password or saved to disk.
 a trusted key for the address you entered, or select a known_hosts file obtained
 from the server administrator. An unknown or changed host key stops the connection
 before your login key is checked. Verify the server fingerprint before trusting
-a new key.
+a new key. For a nonstandard port the trusted entry must match that exact
+`[host]:port` (a hashed entry also works). A key trusted for port 22 does not
+authorize a different port. If Listi tries a local SSH agent, you can cancel
+while it waits for the agent; an unresponsive agent times out after 20 seconds.
 
 ## Settings and older versions
 

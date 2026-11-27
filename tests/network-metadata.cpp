@@ -14,6 +14,10 @@
 #include <fcntl.h>
 #include <fstream>
 #include <iostream>
+#include <poll.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <cstring>
 #include <sys/stat.h>
 
 using namespace Listi;
@@ -24,7 +28,7 @@ void Expect(bool condition, const std::string &label) {
   std::cout << "PASS " << label << std::endl;
 }
 // Opt-in so protocol request counts do not lengthen the standard fixture.
-void CheckScaling(const std::string &server, const std::string &local, int n) {
+void CheckCompareScaling(const std::string &server, const std::string &local, int n) {
   const bool ftp = ParseLocation(server).scheme == "ftp";
   const auto reference = local + "/reference-" + std::to_string(n);
   std::filesystem::create_directory(reference);
@@ -35,6 +39,10 @@ void CheckScaling(const std::string &server, const std::string &local, int n) {
   Expect(compare.complete == !ftp && compare.verified == size_t(n) && !compare.different &&
          (ftp ? compare.error.find("Only entries shown") != std::string::npos : compare.error.empty()),
          server + " compared every visible file: " + std::to_string(n));
+}
+void CheckScaling(const std::string &server, const std::string &local, int n) {
+  CheckCompareScaling(server, local, n);
+  const bool ftp = ParseLocation(server).scheme == "ftp";
   const auto target = local + "/" + ParseLocation(server).scheme;
   std::filesystem::create_directory(target);
   const auto name = "scaling-download-" + std::to_string(n);
@@ -75,7 +83,7 @@ void CheckSftpAuthentication(const std::string &server, const std::string &local
                              const std::string &mode, Connection auth) {
   const bool key = mode == "key" || mode == "wrong-passphrase";
   const bool success = mode == "password" || mode == "key" || mode == "change-pin";
-  if (!success && mode != "wrong-password" && mode != "wrong-host" && mode != "wrong-passphrase")
+  if (!success && mode != "port-pins" && mode != "agent" && mode != "wrong-password" && mode != "wrong-host" && mode != "wrong-passphrase")
     throw std::runtime_error("Invalid SFTP authentication test case");
   if (key) {
     auth.username = "key-test";
@@ -85,10 +93,15 @@ void CheckSftpAuthentication(const std::string &server, const std::string &local
     auth.privateKey = path;
     auth.keyPassphrase = mode == "key" ? "fixture-passphrase" : "incorrect";
   }
+  if (mode == "agent") {
+    auth.username = "key-test";
+    auth.password.clear();
+    auth.privateKey = local + "/no-key"; // only the disposable agent can authenticate
+  }
   if (mode == "wrong-password")
     auth.password = "incorrect";
   const std::string validHosts = auth.knownHosts;
-  if (mode == "change-pin") {
+  if (mode == "change-pin" || mode == "port-pins") {
     auth.knownHosts = local + "/known_hosts";
     std::filesystem::copy_file(validHosts, auth.knownHosts);
   }
@@ -107,6 +120,51 @@ void CheckSftpAuthentication(const std::string &server, const std::string &local
       Expect(!copied.completed && !copied.errors.empty() && !std::filesystem::exists(destination),
              "rejected credentials or host key did not publish or report success");
   };
+  if (mode == "port-pins") {
+    const char *other = getenv("LISTI_METADATA_WRONG_HOSTS");
+    Expect(other && *other, "provided a key for the other service");
+    const auto valid = Read(validHosts);
+    const auto wrong = Read(other);
+    const auto asDefault = [](const std::string &row) {
+      return "127.0.0.1" + row.substr(row.find(' '));
+    };
+    std::ofstream(auth.knownHosts) << wrong << asDefault(valid);
+    verify(false); // bare hostname cannot authorize port 2227
+    std::ofstream(auth.knownHosts) << asDefault(wrong) << valid;
+    verify(true);
+    return;
+  }
+  if (mode == "agent") {
+    const char *running = getenv("SSH_AUTH_SOCK");
+    Expect(running && *running, "disposable agent has the fixture key loaded");
+    const std::string original = running;
+    const auto silent = local + "/silent-agent";
+    sockaddr_un address{};
+    address.sun_family = AF_UNIX;
+    Expect(silent.size() < sizeof(address.sun_path), "test socket path fits");
+    strcpy(address.sun_path, silent.c_str());
+    const int listener = socket(AF_UNIX, SOCK_STREAM, 0);
+    Expect(listener >= 0 && !bind(listener, reinterpret_cast<sockaddr *>(&address),
+        sizeof(address)) && !listen(listener, 1), "created a silent agent");
+    setenv("SSH_AUTH_SOCK", silent.c_str(), 1);
+    Hooks hooks;
+    pollfd pending{listener, POLLIN, 0};
+    bool agentContacted = false;
+    hooks.proceed = [&] {
+      agentContacted = poll(&pending, 1, 0) == 1;
+      return !agentContacted;
+    };
+    const auto start = std::chrono::steady_clock::now();
+    const auto stopped = Copy(selected, local, hooks);
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    setenv("SSH_AUTH_SOCK", original.c_str(), 1);
+    close(listener);
+    Expect(agentContacted && stopped.cancelled && !stopped.completed &&
+        elapsed < std::chrono::seconds(5) && !std::filesystem::exists(destination),
+        "cancelled silent agent without publishing");
+    verify(true); // next job, same credentials, responsive real agent
+    return;
+  }
   verify(success);
   if (mode == "change-pin") {
     const char *wrongHosts = getenv("LISTI_METADATA_WRONG_HOSTS");
@@ -213,6 +271,29 @@ void CheckUncertainOperations(const std::string &ftp, const std::string &local) 
       CheckVisibleOnlyWindow(remote, local + "/" + name);
   }
 }
+void CheckDownloadConflict(const std::string &server, const std::string &local) {
+  const auto source = ChildLocation(server, "conflict");
+  const auto destination = local + "/conflict";
+  const auto original = RemoteBytes(source);
+  std::ofstream(destination) << "local";
+  Hooks hooks;
+  hooks.conflict = [&](const auto &) {
+    RemoteBytes(ChildLocation(server, "signal-conflict"));
+    return Decision::Replace;
+  };
+  const auto changed = Copy(source, local, hooks);
+  Expect(!changed.completed && !changed.errors.empty() &&
+             changed.errors.front().find("Source changed before replacement") != std::string::npos &&
+             Read(destination) == "local", "source changed during Replace: kept the local original");
+  hooks.conflict = [](const auto &) { return Decision::Skip; };
+  const auto skipped = Copy(source, local, hooks);
+  Expect(skipped.skipped == 1 && !skipped.completed && skipped.errors.empty() &&
+             Read(destination) == "local", "Skip preserved the local original");
+  hooks.conflict = [](const auto &) { return Decision::Replace; };
+  const auto retried = Copy(source, local, hooks);
+  Expect(retried.completed == 1 && retried.errors.empty() &&
+             Read(destination) == original + "!", "fresh Replace published current source bytes");
+}
 void CheckPrivateDownload(const std::string &sftp, const std::string &local) {
   const auto source = ChildLocation(sftp, "Private");
   Expect(Stat(sftp, "Private").permissions == 0700 && Stat(source, "inner").permissions == 0700 &&
@@ -286,6 +367,29 @@ void CheckRecursiveRevision(const std::string &server, const std::string &local)
     Expect(retry.completed == 1 && retry.errors.empty() && Read(destination) == expected,
            "retry after source revision change delivers the current file bytes");
   }
+}
+void CheckSftpCompare(const std::string &sftp, const std::string &local) {
+  std::filesystem::create_directory(local + "/compare");
+  std::ofstream(local + "/compare/known") << "fixture contents\n";
+  auto compare = CompareFolders(
+      {local + "/compare", ChildLocation(sftp, "compare"), true});
+  Expect(compare.complete && compare.different == 0 && compare.verified == 1,
+         "SFTP folder comparison uses a size first reported by LSTAT");
+  for (const std::string folder : {"compare-stale", "compare-changing"}) {
+    auto compared = CompareFolders({local + "/compare", ChildLocation(sftp, folder), true});
+    const char *reason = folder == "compare-stale" ? "before reading" : "while reading";
+    Expect(!compared.complete && !compared.verified && compared.unverified == 1 &&
+               compared.entries.size() == 1 &&
+               compared.entries.front().detail.find(reason) != std::string::npos,
+           "SFTP comparison detects changed revision " + std::string(reason));
+  }
+  const auto shortRead = CompareFolders({local + "/compare", ChildLocation(sftp, "compare-short"), true});
+  Expect(!shortRead.complete && shortRead.unverified == 1 && !shortRead.verified &&
+             shortRead.entries.at(0).detail.find("Byte count changed") != std::string::npos,
+         "comparison checks byte count against size first supplied by LSTAT");
+  auto retry = CompareFolders({local + "/compare", ChildLocation(sftp, "compare-changing"), true});
+  Expect(retry.complete && retry.different == 1 && !retry.verified,
+         "fresh comparison sees the changed remote bytes");
 }
 void CheckSftpAlias(const std::string &sftp) {
   const auto folder = ChildLocation(sftp, "aliases");
@@ -462,11 +566,24 @@ int main() {
     }
     SetConnection(ftp, auth);
     SetConnection(sftp, auth);
+    if (std::getenv("LISTI_SFTP_CONFLICT_ONLY")) {
+      CheckDownloadConflict(sftp, local);
+      std::filesystem::remove_all(local);
+      return 0;
+    }
     if (std::getenv("LISTI_SFTP_TRANSFER_ONLY")) {
       CheckSftpAlias(sftp);
+      CheckSftpCompare(sftp, local);
       CheckPrivateDownload(sftp, local);
       CheckRecursiveRevision(sftp, local);
       Expect(!Stat(sftp, "unknown").modifiedKnown, "absent SFTP mtime is not an epoch");
+      std::filesystem::remove_all(local);
+      return 0;
+    }
+    if (const auto size = std::getenv("LISTI_SFTP_COMPARE_SIZE")) {
+      const int n = std::stoi(size);
+      Expect(n == 8 || n == 64, "known SFTP comparison size");
+      CheckCompareScaling(sftp, local, n);
       std::filesystem::remove_all(local);
       return 0;
     }
@@ -481,6 +598,7 @@ int main() {
     }
     CheckFtpCompare(ftp, local);
     CheckUncertainOperations(ftp, local);
+    CheckDownloadConflict(sftp, local);
     CheckSftpAlias(sftp);
     CheckPrivateDownload(sftp, local);
     const auto unknownFolder = ChildLocation(ftp, "missing-mode");
@@ -609,12 +727,7 @@ int main() {
                !stat((local + "/known").c_str(), &info) &&
                info.st_mtime == modified,
            "SFTP download preserves reliable STAT mtime");
-    std::filesystem::create_directory(local + "/compare");
-    std::ofstream(local + "/compare/known") << "fixture contents\n";
-    auto compare = CompareFolders(
-        {local + "/compare", ChildLocation(sftp, "compare"), true});
-    Expect(compare.complete && compare.different == 0 && compare.verified == 1,
-           "SFTP folder comparison verifies content with before/after STAT");
+    CheckSftpCompare(sftp, local);
 
     for (const auto &server : {ftp, sftp})
       CheckRecursiveRevision(server, local);

@@ -2,6 +2,7 @@
 #include "SftpSession.h"
 #include "CurlLibrary.h"
 #include "SshPaths.h"
+#include "SftpAgent.h"
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
@@ -49,6 +50,10 @@ void SftpSession::Handshake(const Location &location, const Connection &account,
   if (hostname.size() > 2 && hostname.front() == '[' && hostname.back() == ']')
     hostname = hostname.substr(1, hostname.size() - 2);
   const int port = location.port ? location.port : 22;
+  // checkp(host, port) also searches a bare host pin. That pin belongs to
+  // port 22, not to other services on the same machine. Match the literal
+  // OpenSSH route (or its hash) for both negotiation and final verification.
+  const auto route = port == 22 ? hostname : "[" + hostname + "]:" + std::to_string(port);
   const char *untrusted = "SSH host key is unknown or changed. Verify the server and its known_hosts file.";
   if (!hosts || !ReadableSshFile(path) ||
       libssh2_knownhost_readfile(hosts.get(), path.c_str(), LIBSSH2_KNOWNHOST_FILE_OPENSSH) <= 0)
@@ -68,7 +73,7 @@ void SftpSession::Handshake(const Location &location, const Connection &account,
   };
   std::string methods;
   for (const auto &key : keys) {
-    if (libssh2_knownhost_checkp(hosts.get(), hostname.c_str(), port, "", 0,
+    if (libssh2_knownhost_checkp(hosts.get(), route.c_str(), port == 22 ? 22 : -1, "", 0,
         LIBSSH2_KNOWNHOST_TYPE_PLAIN | LIBSSH2_KNOWNHOST_KEYENC_BASE64 | key.type,
         nullptr) == LIBSSH2_KNOWNHOST_CHECK_MISMATCH) {
       if (!methods.empty())
@@ -86,7 +91,7 @@ void SftpSession::Handshake(const Location &location, const Connection &account,
   const auto *key = libssh2_session_hostkey(ssh, &length, &type);
   // The raw SSH key blob contains its type. Only a full key match authorizes login.
   if (!key || !length || type == LIBSSH2_HOSTKEY_TYPE_UNKNOWN ||
-      libssh2_knownhost_checkp(hosts.get(), hostname.c_str(), port, key, length,
+      libssh2_knownhost_checkp(hosts.get(), route.c_str(), port == 22 ? 22 : -1, key, length,
           LIBSSH2_KNOWNHOST_TYPE_PLAIN | LIBSSH2_KNOWNHOST_KEYENC_RAW, nullptr)
           != LIBSSH2_KNOWNHOST_CHECK_MATCH)
     throw std::runtime_error(untrusted);
@@ -211,18 +216,8 @@ void SftpSession::Authenticate(Connection &account, const TransferControl &contr
                                                  account.keyPassphrase.c_str());
     }) == 0)
       return;
-    // libssh2 performs local ssh-agent I/O synchronously. Never let an
-    // unresponsive agent defeat the bounded cleanup/recovery budget.
-    if (!control.cleanup && getenv("SSH_AUTH_SOCK")) {
-      std::unique_ptr<LIBSSH2_AGENT, decltype(&libssh2_agent_free)> agent(libssh2_agent_init(ssh),
-                                                                        libssh2_agent_free);
-      if (agent && !libssh2_agent_connect(agent.get()) && !libssh2_agent_list_identities(agent.get())) {
-        libssh2_agent_publickey *identity = nullptr;
-        while (!libssh2_agent_get_identity(agent.get(), &identity, identity))
-          if (!Request(control, [&] { return libssh2_agent_userauth(agent.get(), user, identity); }))
-            return;
-      }
-    }
+    if (!control.cleanup && AuthenticateWithAgent(*this, ssh, user, control))
+      return;
   }
   if (offered.find(",password,") != std::string::npos && !Request(control, [&] {
     return libssh2_userauth_password(ssh, user, account.password.c_str());

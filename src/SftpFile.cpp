@@ -132,6 +132,19 @@ std::vector<FileEntry> ListSftp(const Location &l, const TransferControl &c) {
   });
 }
 
+// Claims need the literal names, including names of entries that cannot be
+// transferred. Do not fetch or interpret unrelated siblings' attributes.
+std::set<std::string> ListSftpNames(const Location &l, const TransferControl &c) {
+  return WithSession(l, c, [&](SftpSession &session) {
+    std::set<std::string> names;
+    VisitNames(session, l.path, c, [&](const std::string &name, const LIBSSH2_SFTP_ATTRIBUTES &) {
+      names.insert(name);
+      return true;
+    });
+    return names;
+  });
+}
+
 bool StatSftp(const Location &l, FileEntry &entry, const TransferControl &c) {
   return WithSession(l, c, [&](SftpSession &session) {
     LIBSSH2_SFTP_ATTRIBUTES attributes{};

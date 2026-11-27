@@ -143,6 +143,16 @@ test changes one fixture file while sending it. This optional case checks
 ordinary FTP transfers and SFTP file STAT, not a transactional snapshot
 guarantee or a full protocol qualification.
 
+For focused SFTP checks, use the same fixture with these environment variables:
+
+- `LISTI_SFTP_CONFLICT_ONLY=1` checks the downloaded source at local replacement.
+- `LISTI_SFTP_COMPARE_SIZE=8` or `64` compares a local tree to SFTP by SHA-256.
+  Count `SFTP-CONNECT` lines on the fixture server during each separate run.
+- `LISTI_SFTP_AUTH_CASE=port-pins` also needs `LISTI_METADATA_WRONG_HOSTS`
+  pointing at the fixture’s `wrong_known_hosts`.
+- `LISTI_SFTP_AUTH_CASE=agent` needs a disposable SSH agent with the fixture's
+  client key loaded. It checks cancellation followed by a successful transfer.
+
 ## Enabling public CI without paid services
 
 1. Use a **public** GitHub repository with free standard Linux-hosted runners

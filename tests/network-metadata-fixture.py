@@ -55,7 +55,7 @@ def count_probe(operation, path):
 
 
 def make_scaling_trees(root):
-    for n in (4, 8, 16, 32):
+    for n in (4, 8, 16, 32, 64):
         for action in ("compare", "download"):
             folder = root / f"scaling-{action}-{n}"
             folder.mkdir()
@@ -227,7 +227,12 @@ class MetadataSFTP(paramiko.SFTPServerInterface):
         try:
             entries = []
             for child in self.resolve(path).iterdir():
-                entries.append(ListAttributes.from_stat(child.lstat(), child.name))
+                entry = ListAttributes.from_stat(child.lstat(), child.name)
+                if path in {"/compare", "/compare-changing", "/compare-short"}:
+                    entry.st_size = None
+                if path == "/compare-stale":
+                    entry.st_mtime -= 1
+                entries.append(entry)
             return entries
         except OSError as error:
             return paramiko.SFTPServer.convert_errno(error.errno)
@@ -243,6 +248,8 @@ class MetadataSFTP(paramiko.SFTPServerInterface):
         try:
             local = self.resolve(path, follow=follow)
             item = paramiko.SFTPAttributes.from_stat(local.stat(follow_symlinks=follow))
+            if path == "/compare-short/known":
+                item.st_size += 1
             if local.name == "unknown":
                 item.st_mtime = None
                 item.st_atime = None
@@ -271,6 +278,9 @@ class MetadataSFTP(paramiko.SFTPServerInterface):
         if flags != os.O_RDONLY:
             return paramiko.SFTP_PERMISSION_DENIED
         try:
+            if path == "/signal-conflict":
+                with self.resolve("/conflict").open("ab") as conflict:
+                    conflict.write(b"!")
             if path in {"/signal-access-existing", "/signal-access-new"}:
                 self.resolve(path.removeprefix("/signal-")).chmod(0o700)
             handle = paramiko.SFTPHandle(flags)
@@ -285,7 +295,7 @@ class MetadataSFTP(paramiko.SFTPServerInterface):
                         self.resolve(path).chmod(0o600)
                     return data
                 handle.read = read_private
-            if path == "/recursive/changed":
+            if path in {"/recursive/changed", "/compare-changing/known"}:
                 def read(offset, length):
                     handle.readfile.seek(offset)
                     data = handle.readfile.read(length)
@@ -348,6 +358,8 @@ def main():
 
     sftp_root = staging / "sftp"
     (sftp_root / "signals").mkdir(parents=True)
+    (sftp_root / "conflict").write_bytes(b"staged")
+    (sftp_root / "signal-conflict").touch()
     scope = sftp_root / "scope"
     selected = scope / "top"
     selected.mkdir(parents=True)
@@ -369,8 +381,10 @@ def main():
     (sftp_root / "aliases").mkdir()
     (sftp_root / "aliases" / "Report").write_bytes(b"original")
     (sftp_root / "aliases" / "third").write_bytes(b"third")
-    (sftp_root / "compare").mkdir()
-    for name in ("known", "unknown", "compare/known"):
+    for name in ("compare", "compare-changing", "compare-stale", "compare-short"):
+        (sftp_root / name).mkdir()
+    for name in ("known", "unknown", "compare/known", "compare-changing/known",
+                 "compare-stale/known", "compare-short/known"):
         file = sftp_root / name
         file.write_bytes(b"fixture contents\n")
         os.utime(file, (MODIFIED, MODIFIED))
@@ -403,6 +417,7 @@ def main():
 
     class SFTPConnection(socketserver.BaseRequestHandler):
         def handle(self):
+            print("SFTP-CONNECT", flush=True)
             with paramiko.Transport(self.request) as transport:
                 transport.add_server_key(key)
                 transport.set_subsystem_handler("sftp", paramiko.SFTPServer,

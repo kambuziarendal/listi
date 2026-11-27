@@ -5,6 +5,7 @@
 #include "RemovableCopy.h"
 #include "StagingSpace.h"
 #include "Sha256.h"
+#include "SftpFile.h"
 #include "RecoveryInventory.h"
 #include "UnavailableVolume.h"
 #include "VirtualFile.h"
@@ -245,7 +246,10 @@ struct Runner {
       // was absent at lookup; it must never become replaceable later this job.
       if (!claims.replaceable) {
         std::set<std::string> names;
-        if (IsVirtual(parent)) {
+        const auto location = ParseLocation(parent);
+        if (location.scheme == "sftp") {
+          names = ListSftpNames(location, control);
+        } else if (!location.Local()) {
           for (const auto &entry : ListFiles(parent, control))
             names.insert(entry.name);
         } else {
@@ -451,8 +455,15 @@ struct Runner {
             directories.count(dst) != 0};
     auto control = Control(src);
     control.Check();
-    if (IsVirtual(parent)) {
-      BindRemoteParent(parent, control);
+    // During recursion the destination parent is already bound. Recheck at
+    // the conflict or mutation, rather than listing its ancestors twice with
+    // only read-only preparation in between.
+    const auto parentLocation = ParseLocation(parent);
+    const bool boundSftpParent = depth > 0 && parentLocation.scheme == "sftp" &&
+                                 remoteDirectories.at(parent).revision.providerIdentity.empty();
+    if (!parentLocation.Local()) {
+      if (!boundSftpParent)
+        BindRemoteParent(parent, control);
     } else {
       RememberDirectory(parent);
     }
@@ -563,7 +574,11 @@ struct Runner {
         // A provider can resolve an alias to the existing folder yet return
         // the requested spelling from stat. Even a stable ID cannot prove
         // that the user intended this spelling on a subsequent job.
-        if (exists && !ExactRemoteFolder(parent, LocationLeaf(dst), target, control))
+        // SFTP verifies the literal spelling of every bound folder below;
+        // it supplies no provider IDs to cache from a full directory listing.
+        const bool sftpSpellingGuard = ParseLocation(dst).scheme == "sftp" &&
+                                       target.providerIdentity.empty();
+        if (exists && !sftpSpellingGuard && !ExactRemoteFolder(parent, LocationLeaf(dst), target, control))
           throw std::runtime_error("Cannot establish destination folder identity: " + dst);
         remoteDirectories.emplace(dst, RemoteDirectory{target, {}});
         VerifyRemoteDirectories(control);
@@ -675,6 +690,13 @@ struct Runner {
           return Decision::Abort;
         }
       };
+      if (IsVirtual(src) && !ParseLocation(src).Archive()) {
+        local.checkReplacementSource = [&] {
+          FileEntry current;
+          if (!StatFile(src, current, control) || !source.SameRevision(current))
+            throw std::runtime_error("Source changed before replacement; destination was not replaced: " + src);
+        };
+      }
       Job publish{Action::Copy, {temp.path}, ParentLocation(dst)};
       // Conflict questions and the final rename happen inside the local publisher.
       if (control.archiveVersion)
@@ -722,8 +744,12 @@ struct Runner {
       throw std::runtime_error(
           "This direct transfer cannot update an archive. Copy entries to a "
           "regular folder to edit them.");
-    if (exists && !Replace(dst))
-      return;
+    if (exists) {
+      if (boundSftpParent)
+        VerifyRemoteDirectories(control);
+      if (!Replace(dst))
+        return;
+    }
     TempFile temp(LocationLeaf(dst), src, dst);
     Sha256 expected;
     const auto stagedBytes = Stage(src, source, temp, Control(src, false), &expected);

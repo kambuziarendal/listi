@@ -1373,6 +1373,8 @@ struct Runner {
           namedParent.st_ino != parentIdentity.st_ino)
         throw std::runtime_error(parentPath + ": destination folder changed");
       recovery.PrepareCopyPublication();
+      if (existed && !publishNewFile && h.checkReplacementSource)
+        h.checkReplacementSource();
       Guard();
       struct stat currentTarget;
       if (fstatat(parent, leaf.c_str(), &currentTarget, AT_SYMLINK_NOFOLLOW) ||

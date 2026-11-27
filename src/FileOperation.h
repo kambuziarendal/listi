@@ -117,6 +117,8 @@ struct Hooks {
   std::function<bool(const std::string &, const std::string &)> confirmFatCopy;
   // Outlives private staging, whose temporary file is NOT the only input.
   std::function<void(const std::string &, const struct stat &)> checkOverwrite;
+  // A staged download still depends on the remote original at replacement.
+  std::function<void()> checkReplacementSource;
 };
 enum class Publication { NotAttempted, Unknown, Published };
 struct UploadVerification {
