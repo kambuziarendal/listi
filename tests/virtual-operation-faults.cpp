@@ -69,7 +69,9 @@ bool corruptUpload = false, denyReadback = false, cancelReadback = false;
 bool cancelAtReadyCheck = false, cancelAfterStore = false, hideStoredPart = false;
 bool uncertainRollback = false, replaceStageOnRead = false;
 std::string changeIdentityOnRead, tightenOnRead, downgradeListing;
-std::string lostRemoval, unreadableLookup;
+std::string lostRemoval, unreadableLookup, lostMove, swapDuringMove;
+bool moveBeforeLoss = false, loseMoveLookup = false;
+unsigned lostMoveRequests = 0;
 bool loseLookupAfterRemoval = false, giveCreatedFoldersIds = false;
 std::map<std::string, unsigned> listingCounts, listingRows;
 unsigned folderReads = 0;
@@ -277,8 +279,20 @@ void ChangeNetwork(const Location &l, const char *action,
     throw std::runtime_error("injected rename failure");
   if (!files.count(source) || files.count(StoragePath(target)))
     throw std::runtime_error("rename precondition");
+  if (source == lostMove) {
+    ++lostMoveRequests;
+    if (loseMoveLookup)
+      unreadableLookup = target;
+    if (!moveBeforeLoss)
+      throw std::runtime_error("Lost rename reply");
+  }
   files[StoragePath(target)] = files.at(source); files.erase(source);
-  if ((loseBackupReply && suffix(target, ".previous")) ||
+  if (source == swapDuringMove) {
+    files["smb://fixture/aside/" + LocationLeaf(target)] = files.at(target);
+    files.erase(target);
+    files.at(ParentLocation(target)).identity = "replacement";
+  }
+  if (source == lostMove || (loseBackupReply && suffix(target, ".previous")) ||
       (loseCommitReply && suffix(source, ".part")))
     throw std::runtime_error("reply lost after server rename");
   if (cancelAfterBackup && suffix(target, ".previous")) cancelled = true;
@@ -306,6 +320,10 @@ int main() {
     tightenOnRead.clear();
     unreadableLookup.clear();
     lostRemoval.clear();
+    lostMove.clear();
+    swapDuringMove.clear();
+    lostMoveRequests = 0;
+    moveBeforeLoss = loseMoveLookup = false;
     giveCreatedFoldersIds = loseLookupAfterRemoval = false;
     listingCounts.clear();
     listingRows.clear();
@@ -574,23 +592,48 @@ int main() {
   unlink((copiedFolder + "/nested/visible").c_str());
   rmdir((copiedFolder + "/nested").c_str());
   rmdir(copiedFolder.c_str());
-  reset();
-  files[sourceFolder] = {"", 1, 0, true, "folder-id", 0755};
-  files[healthy] = {"readable memo", 1};
-  localPublish = LocalPublish::Limited;
-  Hooks tightened = hooks;
-  tightened.fileDone = [&](const auto &path, const auto &) {
-    if (path == healthy)
-      files[sourceFolder].permissions = 0700;
+  auto readBytes = [](const std::string &path) {
+    std::ifstream input(path, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(input), {});
   };
-  r = RunVirtual({Action::Copy, {sourceFolder}, downloadFolder}, tightened);
-  struct stat privateDirectory;
-  check(!r.completed && r.partialCopies == 1 && errorHas(r, "changed before setting") &&
-            !lstat(copiedFolder.c_str(), &privateDirectory) && (privateDirectory.st_mode & 0777) == 0700 &&
-            !access((copiedFolder + "/a-readable").c_str(), F_OK),
-        "source permission tightening during download keeps the partially delivered directory private");
-  unlink((copiedFolder + "/a-readable").c_str());
-  rmdir(copiedFolder.c_str());
+  for (bool existing : {false, true}) {
+    for (bool lastChild : {false, true}) {
+      reset();
+      files[sourceFolder] = {"", 1, 0, true, "folder-id", 0755};
+      files[healthy] = {"readable memo", 1};
+      if (!lastChild)
+        files[denied] = {"other readable memo", 1};
+      const auto keep = copiedFolder + "/unrelated";
+      if (existing) {
+        mkdir(copiedFolder.c_str(), 0755);
+        chmod(copiedFolder.c_str(), 0755);
+        std::ofstream(keep) << "untouched";
+      }
+      localPublish = LocalPublish::Limited;
+      Hooks tightened = hooks;
+      tightened.fileDone = [&](const auto &path, const auto &) {
+        if (path == healthy)
+          files[sourceFolder].permissions = 0700;
+      };
+      r = RunVirtual({Action::Copy, {sourceFolder}, downloadFolder}, tightened);
+      const auto published = copiedFolder + "/a-readable";
+      struct stat finalDirectory;
+      check(!r.completed && r.partialCopies == 1 && errorHas(r, "Source folder changed") &&
+                !lstat(copiedFolder.c_str(), &finalDirectory) &&
+                (finalDirectory.st_mode & 0777) == (existing ? 0755 : 0700) &&
+                readBytes(published) == "readable memo" &&
+                access((copiedFolder + "/z-unreadable").c_str(), F_OK) &&
+                (!existing || readBytes(keep) == "untouched") &&
+                std::any_of(r.outcomes.begin(), r.outcomes.end(), [&](const auto &row) {
+                  return row.source == healthy && row.destination == published && row.status == "copied";
+                }),
+            "source access tightening stops further download or final completion with correct child receipt");
+      unlink(published.c_str());
+      if (existing)
+        unlink(keep.c_str());
+      rmdir(copiedFolder.c_str());
+    }
+  }
   localPublish = LocalPublish::Unexpected;
   rmdir(downloadFolder.c_str());
   const timespec referenceTime[] = {{0, UTIME_OMIT}, {1, 654000000}};
@@ -966,6 +1009,154 @@ int main() {
       if (nestedSwap) {
         unlink(firstLocal.c_str());
         rmdir(nested.c_str());
+      }
+    }
+  }
+  // Select the folder, both children, or a single child on the same share.
+  const std::string serverOut = "smb://fixture/out";
+  const auto secondLocal = folder + "/another";
+  const auto uploadFolder = serverOut + "/upload-folder";
+  std::ofstream(secondLocal) << "another";
+  for (bool stable : {false, true}) {
+    for (bool swap : {false, true}) {
+      for (unsigned selection : {0u, 1u, 2u}) {
+        reset();
+        giveCreatedFoldersIds = stable;
+        const auto parent = selection == 0 ? uploadFolder : serverOut;
+        files[serverOut] = {"", 1, 0, true, stable ? "share" : ""};
+        const auto aside = serverOut + "/aside";
+        Job upload{Action::Copy, {sibling}, serverOut};
+        if (!selection)
+          upload.sources = {folder};
+        else if (selection == 2)
+          upload.sources.push_back(secondLocal);
+        auto observe = hooks;
+        std::string firstName;
+        observe.fileDone = [&](const auto &path, const auto &target) {
+          if (path == folder || !firstName.empty())
+            return;
+          firstName = LocationLeaf(target);
+          if (swap) {
+            files[aside] = files.at(parent);
+            files[aside + "/" + firstName] = files.at(target);
+            files.erase(target);
+            files[parent] = {"", 1, 0, true, stable ? "replacement" : ""};
+          }
+        };
+        r = RunVirtual(upload, observe);
+        const auto remaining = firstName == "sibling" ? "another" : "sibling";
+        const bool stopped = stable && swap && selection != 1;
+        size_t receipts = 0;
+        bool qualified = true;
+        for (const auto &entry : r.outcomes)
+          if (entry.upload && entry.upload->publication == Publication::Published) {
+            ++receipts;
+            qualified &= entry.upload->contentVerified &&
+                (entry.detail.find("no stable identity") != std::string::npos) == !stable;
+          }
+        check(!firstName.empty() && qualified && r.copyLimitations == !stable &&
+                  receipts == (selection == 1 || stopped ? 1u : 2u) &&
+                  r.completed == (stopped ? int(selection == 2) : int(upload.sources.size())) &&
+                  r.errors.empty() == !stopped &&
+                  files.at((swap ? aside : parent) + "/" + firstName).data ==
+                      (firstName == "sibling" ? "healthy sibling" : "another") &&
+                  (bool(files.count(parent + "/" + remaining)) == (!stopped && selection != 1)) &&
+                  readBytes(sibling) == "healthy sibling" && readBytes(secondLocal) == "another",
+              "upload receipt distinguishes verified bytes from weak folder binding for each selection shape");
+      }
+    }
+  }
+  unlink(secondLocal.c_str());
+
+  const std::string firstMove = "smb://fixture/in/one", nextMove = "smb://fixture/in/two";
+  auto moveSelection = [&] {
+    files[firstMove] = {"one", 1, 0, false, "one-id"};
+    files[nextMove] = {"two", 1, 0, false, "two-id"};
+    files[serverOut] = {"", 1, 0, true, "original-folder"};
+    Job move{Action::Move, {firstMove, nextMove}, serverOut};
+    for (const auto &path : move.sources)
+      StatFile(path, move.expectedRemoteSources[path]);
+    return move;
+  };
+  for (bool swap : {false, true}) {
+    reset();
+    auto move = moveSelection();
+    const auto movedAside = "smb://fixture/aside/one";
+    auto moveHooks = hooks;
+    moveHooks.fileDone = [&](const auto &path, const auto &dst) {
+      if (swap && path == firstMove) {
+        files[movedAside] = files.at(dst);
+        files.erase(dst);
+        files[serverOut].identity = "replacement";
+      }
+    };
+    r = RunVirtual(move, moveHooks);
+    check(r.completed == (swap ? 1 : 2) && r.completedRoots.size() == size_t(r.completed) &&
+              !files.count(firstMove) && bool(files.count(nextMove)) == swap &&
+              files.at(swap ? movedAside : serverOut + "/one").data == "one" &&
+              (swap ? (!files.count(serverOut + "/one") && !files.count(serverOut + "/two") &&
+                       errorHas(r, "Remote destination folder changed")) :
+                      (files.at(serverOut + "/two").data == "two" && r.errors.empty())),
+          "network move binds all selected entries to one target folder and reports only confirmed moves");
+    if (swap) {
+      move.sources = {nextMove};
+      r = RunVirtual(move, hooks);
+      check(r.completed == 1 && !files.count(nextMove) && !files.count(firstMove) &&
+                files.at(movedAside).data == "one" && files.at(serverOut + "/two").data == "two" &&
+                !files.count(serverOut + "/one"),
+            "explicit retry of just the retained selection binds the refreshed target");
+    }
+  }
+  reset();
+  auto finalMove = moveSelection();
+  finalMove.sources = {firstMove};
+  swapDuringMove = firstMove;
+  r = RunVirtual(finalMove, hooks);
+  check(!r.completed && r.completedRoots.empty() && !r.errors.empty() && r.outcomes.size() == 1 &&
+            r.outcomes[0].status == "move destination unconfirmed" &&
+            !files.count(firstMove) && !files.count(serverOut + "/one") &&
+            files.at("smb://fixture/aside/one").data == "one",
+        "even the final acknowledged move cannot confirm publication in a replaced target folder");
+  reset();
+  auto weakMove = moveSelection();
+  files[firstMove].identity.clear();
+  StatFile(firstMove, weakMove.expectedRemoteSources[firstMove]);
+  weakMove.sources = {firstMove, firstMove};
+  lostMove = firstMove;
+  r = RunVirtual(weakMove, hooks);
+  check(!r.completed && r.errors.size() == 2 && r.outcomes.front().status == "move unconfirmed" &&
+            lostMoveRequests == 1 && files.at(firstMove).data == "one" && !files.count(serverOut + "/one"),
+        "lost reply without stable source identity never retries an ambiguous destructive request");
+  for (auto action : {Action::Move, Action::Rename}) {
+    for (bool applied : {false, true}) {
+      for (bool canCheck : {false, true}) {
+        reset();
+        auto move = moveSelection();
+        move.action = action;
+        const auto dst = serverOut + (action == Action::Rename ? "/renamed" : "/one");
+        if (action == Action::Rename) {
+          move.sources = {firstMove};
+          move.destination = dst;
+        }
+        lostMove = firstMove;
+        moveBeforeLoss = applied;
+        loseMoveLookup = !canCheck;
+        r = RunVirtual(move, hooks);
+        const auto &row = r.outcomes.front();
+        check(lostMoveRequests == 1 && row.source == firstMove && row.destination == dst &&
+                  row.status == (!canCheck ? "move unconfirmed" : applied ? "moved" : "not moved") &&
+                  r.completed == int(action == Action::Move) + int(canCheck && applied) &&
+                  r.completedRoots.size() == size_t(r.completed) &&
+                  r.errors.empty() == (canCheck && applied) && bool(files.count(dst)) == applied &&
+                  bool(files.count(firstMove)) != applied &&
+                  (action != Action::Move || (!files.count(nextMove) && files.at(serverOut + "/two").data == "two")),
+              "lost rename/move reply reconciles both paths or records an unknown outcome without replay");
+        unreadableLookup.clear();
+        lostMove.clear();
+        move.sources = {firstMove};
+        r = RunVirtual(move, hooks);
+        check(r.completed == int(!applied) && !files.count(firstMove) && files.at(dst).data == "one",
+              "explicit retry only moves a still-present selection to an unused name");
       }
     }
   }

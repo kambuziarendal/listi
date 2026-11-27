@@ -210,7 +210,10 @@ int main(int argc, char **argv) {
     Check(r.completed==1 && r.skipped==1 && !Exists(a+"/one") && Exists(a+"/two") && ReadFileClipboard(Data(clip)).size()==1,"partial move keeps only skipped cut entry");
     PutFileClipboard({a+"/two"},false,&clip);auto saved=Data(clip);
     Check(Rejected([&]{PutFileClipboard({"/boot"},true,&clip);}) && ReadFileClipboard(Data(clip))[0].path==a+"/two","volume root rejection preserves previous clipboard");
-    Check(Rejected([&]{PutFileClipboard({"smb://host/share/file"},false,&clip);}),"virtual paths cannot leak into native clipboard");
+    for (bool cut : {false, true})
+      Check(Rejected([&]{PutFileClipboard({"smb://host/share/file"},cut,&clip);}) &&
+                ReadFileClipboard(Data(clip))[0].path == a+"/two",
+            "network Copy and Cut are rejected without changing the native clipboard");
     Check(Rejected([&]{PrepareFilePaste("sftp://host/folder",&clip);}),"virtual destination rejected without changing clipboard");
     Check(Rejected([&]{PutFileClipboard({},false,&clip);}),"empty selection leaves clipboard untouched");
     Check(Rejected([&]{PutFileClipboard({a+"/two",a+"/two"},false,&clip);}),"duplicate nodes rejected");

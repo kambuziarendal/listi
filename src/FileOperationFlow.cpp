@@ -159,8 +159,11 @@ void FileOperationFlow::AskNamedEntry(Action action, const Pane &source,
                                       const Pane &target) {
   if (!CanBegin())
     return;
-  auto job = PrepareNamedEntry(action, source.Selected(), target.Path(),
-                               source.SelectedLocalIdentities());
+  Job destination;
+  if (action == Action::Link)
+    target.BindTransferDestination(destination);
+  auto job = PrepareNamedEntry(action, source.Selected(), destination.destination,
+                               source.SelectedLocalIdentities(), destination.expectedDestination);
   const bool duplicate = action == Action::Duplicate;
   std::string text = std::string(duplicate ? "Duplicate: " : "Link to: ") +
                      job.sources[0] + "\nIn: " + job.destination;
@@ -286,6 +289,8 @@ void FileOperationFlow::BeginOperation(Action action, const Pane &source,
       PostMainWindowNotice("Open a folder first.");
       return;
     }
+    if (create && !IsVirtual(job.destination))
+      source.BindTransferDestination(job);
     FreezeLocalJob(job, job.destination);
     if (ParseLocation(job.destination).Archive()) {
       archiveActions.InspectNamedChange(source, owner, std::move(job));

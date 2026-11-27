@@ -59,6 +59,17 @@ smb=smbserver.SimpleSMBServer(listenAddress='127.0.0.1',listenPort=1445,smbserve
 smb.addShare('files',str(root));smb.setSMB2Support(True);smb.addCredential(user,0,compute_lmhash(password),compute_nthash(password));smb.setLogFile(str(base/'smb.log'))
 def disconnect_smb():
  cut(sockets[threading.current_thread().name]);raise ConnectionError('task-owned injected transport break')
+# Model a replacement identity without ever moving or exposing any real data.
+# This applies only to the disposable installed multi-file move case.
+real_query_info = smbserver.queryFileInformation
+def fixture_query_info(path, filename, level):
+ record, status = real_query_info(path, filename, level)
+ if (level == smb2.SMB2_FILE_ALL_INFO and record is not None and
+     filename == "destination" and (pathlib.Path(path) / filename / "revision-signal").is_dir()):
+  fields = record['InternalInformation']
+  fields['IndexNumber'] = fields['IndexNumber'] ^ 0x40000000
+ return record, status
+smbserver.queryFileInformation = fixture_query_info
 server=smb.getServer()
 def hook(command,fn):
  old=server.hookSmb2Command(command,lambda cid,srv,packet:fn(old,cid,srv,packet))

@@ -251,6 +251,8 @@ class MetadataSFTP(paramiko.SFTPServerInterface):
         if flags != os.O_RDONLY:
             return paramiko.SFTP_PERMISSION_DENIED
         try:
+            if path in {"/signal-access-existing", "/signal-access-new"}:
+                self.resolve(path.removeprefix("/signal-")).chmod(0o700)
             handle = paramiko.SFTPHandle(flags)
             handle.readfile = self.resolve(path).open("rb")
             # curl may use FSTAT for size on the open handle.
@@ -344,6 +346,14 @@ def main():
         file = sftp_root / name
         file.write_bytes(b"fixture contents\n")
         os.utime(file, (MODIFIED, MODIFIED))
+    for name in ("access-existing", "access-new"):
+        folder = sftp_root / name
+        folder.mkdir()
+        folder.chmod(0o755)
+        for leaf in ("a", "b"):
+            (folder / leaf).write_text(leaf)
+            (folder / leaf).chmod(0o644)
+        (sftp_root / ("signal-" + name)).write_text("advance")
     for name in ("tightens", "tightens-installed"):
         tightens = sftp_root / name
         tightens.write_bytes(b"private")

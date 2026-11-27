@@ -176,6 +176,31 @@ struct Runner {
         unverifiedDirectory = path;
     }
   }
+  void BindRemoteParent(const std::string &parent, const TransferControl &control) {
+    if (!remoteDirectories.count(parent)) {
+      FileEntry folder;
+      if (!StatFile(parent, folder, control) || !folder.directory || folder.link)
+        throw std::runtime_error("Remote destination folder unavailable: " + parent);
+      remoteDirectories.emplace(parent, RemoteDirectory{folder, {}});
+    }
+    VerifyRemoteDirectories(control);
+  }
+  std::string DirectoryLimitation(const std::string &path) const {
+    return "The server provides no stable identity for " + path +
+           "; folder replacement cannot be excluded.";
+  }
+  // Keep all source ancestors in scope until their local subtree is complete.
+  std::map<std::string, FileEntry> downloadFolders;
+  void VerifyDownloadAccess(const TransferControl &control) {
+    for (const auto &[path, expected] : downloadFolders) {
+      FileEntry now;
+      if (!StatFile(path, now, control) || !now.directory || now.link ||
+          now.providerIdentity != expected.providerIdentity ||
+          (expected.permissionsKnown && !now.permissionsKnown) ||
+          (expected.permissions & ~now.permissions & 0777))
+        throw std::runtime_error("Source folder changed before setting destination permissions or publishing more entries: " + path);
+    }
+  }
   bool ExactRemoteFolder(const std::string &parent, const std::string &leaf, const FileEntry &target,
                          const TransferControl &control) {
     auto &guard = remoteDirectories.at(parent);
@@ -425,13 +450,7 @@ struct Runner {
     auto control = Control(src);
     control.Check();
     if (IsVirtual(parent)) {
-      if (!remoteDirectories.count(parent)) {
-        FileEntry folder;
-        if (!StatFile(parent, folder, control) || !folder.directory || folder.link)
-          throw std::runtime_error("Remote destination folder unavailable: " + parent);
-        remoteDirectories.emplace(parent, RemoteDirectory{folder, {}});
-      }
-      VerifyRemoteDirectories(control);
+      BindRemoteParent(parent, control);
     } else {
       RememberDirectory(parent);
     }
@@ -486,6 +505,15 @@ struct Runner {
       if (!IsVirtual(dst)) {
         const auto &identity = directories.at(parent);
         localParent.emplace(parent, identity.device, identity.inode, true);
+      }
+      struct SourceScope {
+        decltype(downloadFolders) &folders;
+        const std::string &path;
+        ~SourceScope() { folders.erase(path); }
+      } sourceScope{downloadFolders, src};
+      if (localParent && IsVirtual(src) && !ParseLocation(src).Archive()) {
+        downloadFolders.emplace(src, source);
+        VerifyDownloadAccess(control);
       }
       if (localParent) {
         localParent->Verify();
@@ -557,6 +585,7 @@ struct Runner {
       const bool ordinaryCopy = job.action == Action::Copy &&
           !job.copyForArchiveMove && !hooks.privateStaging;
       std::string limitations;
+      VerifyDownloadAccess(control);
       if (!exists && !IsVirtual(dst)) {
         if (source.permissions & 0077) {
           // A private staging folder must not be opened using stale access
@@ -590,8 +619,7 @@ struct Runner {
         if (IsVirtual(dst) && !unverifiedDirectory.empty() && depth == 0) {
           result.copyLimitations = true;
           RecordOutcome({src, dst, "filesystem limitations",
-                         "Entries were delivered by path. The server provides no stable identity for " +
-                         unverifiedDirectory + "; folder replacement cannot be excluded."});
+                         "Entries were delivered by path. " + DirectoryLimitation(unverifiedDirectory)});
         }
         if (hooks.fileDone)
           hooks.fileDone(src, dst);
@@ -651,6 +679,10 @@ struct Runner {
         publish.expectedArchiveSets.emplace(ParseLocation(src).archive, *control.archiveVersion);
       publish.expectedDestination = directories.at(publish.destination);
       publish.copyForArchiveMove = job.copyForArchiveMove;
+      if (!downloadFolders.empty()) {
+        publish.checkDestinationWindow = [&] { VerifyDownloadAccess(control); };
+        VerifyDownloadAccess(control);
+      }
       auto done = Run(publish, local);
       result.copyLimitations |= done.copyLimitations;
       for (const auto &entry : done.outcomes)
@@ -780,6 +812,12 @@ struct Runner {
       recovery.Advance(RecoveryPhase::Published);
       entry.status = "completed";
       entry.detail = "Upload content verified.";
+      for (const auto &[path, folder] : remoteDirectories)
+        if (folder.revision.providerIdentity.empty()) {
+          result.copyLimitations = true;
+          entry.detail += " Delivered by path. " + DirectoryLimitation(path);
+          break;
+        }
       if (backupExists) {
         if (RemoteDigest(backup, control) != originalDigest)
           throw std::runtime_error("Original backup changed; retained for manual inspection.");
@@ -883,6 +921,101 @@ struct Runner {
       recovery.Retire();
       std::rethrow_exception(failure);
     }
+  }
+  FileEntry PrepareMove(const std::string &source, const std::string &dst,
+                        const TransferControl &control) {
+    auto from = ParseLocation(source), to = ParseLocation(dst);
+    if (from.Archive() || from.Local() ||
+        from.CanonicalAuthority() != to.CanonicalAuthority())
+      throw std::runtime_error(
+          "Use Copy for transfers between local, archive and network "
+          "locations. The source is retained.");
+    BindRemoteParent(ParentLocation(dst), control);
+    FileEntry target;
+    if (StatFile(dst, target, control))
+      throw std::runtime_error(
+          "Rename/move target already exists; it was not replaced");
+    const auto canonicalSource = TransferIdentity(source);
+    const auto canonicalDestination = TransferIdentity(dst);
+    if (canonicalDestination == canonicalSource ||
+        canonicalDestination.compare(0, canonicalSource.size() + 1,
+                                     canonicalSource + "/") == 0)
+      throw std::runtime_error("Cannot move a folder into itself");
+    if (from.scheme == "ftp" || from.scheme == "ftps")
+      throw std::runtime_error(
+          "FTP cannot rename without risking replacement of a concurrently created target. "
+          "The source was retained.");
+    const auto selected = job.expectedRemoteSources.find(source);
+    if (selected == job.expectedRemoteSources.end())
+      throw std::runtime_error("No confirmed network entry. Refresh and select it again.");
+    FileEntry current;
+    if (!StatFile(source, current, control) || !MatchesRemoteSelection(selected->second, current))
+      throw std::runtime_error("Selected network entry changed or disappeared: " + source);
+    return current;
+  }
+  std::set<std::string> unconfirmedMoves;
+  void MoveNetworkEntry(const std::string &source, const std::string &dst,
+                        const FileEntry &selected, TransferControl control) {
+    const auto key = TransferIdentity(source);
+    if (unconfirmedMoves.count(key))
+      throw std::runtime_error("Previous move unconfirmed; no further move requested for " + source);
+    bool submitted = false;
+    control.mutationSubmitted = &submitted;
+    VerifyRemoteDirectories(control);
+    std::string detail;
+    try {
+      RenameFile(source, dst, control);
+    } catch (const std::exception &error) {
+      if (!submitted)
+        throw;
+      control.mutationSubmitted = nullptr;
+      FileEntry original, target;
+      bool moved = false, retained = false;
+      try {
+        VerifyRemoteDirectories(control);
+        const bool sourcePresent = StatFile(source, original, control);
+        const bool targetPresent = StatFile(dst, target, control);
+        VerifyRemoteDirectories(control);
+        if (!selected.providerIdentity.empty()) {
+          moved = !sourcePresent && targetPresent && selected.SameRevision(target);
+          retained = sourcePresent && !targetPresent && selected.SameRevision(original);
+        }
+      } catch (const Cancelled &) {
+        result.cancelled = true;
+      } catch (const std::exception &) {
+        // An incomplete pair of observations cannot establish either outcome.
+      }
+      if (!moved) {
+        std::string reason = retained ? "The same entry remains at the source." :
+            "Move unconfirmed. Inspect both paths before selecting again.";
+        if (!retained)
+          unconfirmedMoves.insert(key);
+        RecordOutcome({source, dst, retained ? "not moved" : "move unconfirmed", reason});
+        if (result.cancelled)
+          throw Cancelled();
+        throw std::runtime_error(reason + " " + error.what());
+      }
+      detail = "Reply lost; fresh lookups confirmed the selected entry at the destination only.";
+    }
+    try {
+      VerifyRemoteDirectories(control);
+    } catch (const std::exception &error) {
+      unconfirmedMoves.insert(key);
+      const std::string reason =
+          "Server reported the rename, but the destination folder could not be verified. Inspect both paths.";
+      RecordOutcome({source, dst, "move destination unconfirmed", reason});
+      if (dynamic_cast<const Cancelled *>(&error))
+        throw;
+      throw std::runtime_error(reason + " " + error.what());
+    }
+    if (!unverifiedDirectory.empty()) {
+      result.copyLimitations = true;
+      detail += (detail.empty() ? "" : " ") + DirectoryLimitation(unverifiedDirectory);
+    }
+    RecordOutcome({source, dst, "moved", detail});
+    result.completedRoots.emplace_back(source, dst);
+    if (hooks.fileDone)
+      hooks.fileDone(source, dst);
   }
   void DeleteTree(const std::string &p, const FileEntry &expected, int depth = 0) {
     if (depth > 128 || ++visited > 200000)
@@ -991,8 +1124,6 @@ Result RunVirtual(const Job &job, const Hooks &hooks) {
         dst = (job.action == Action::Rename)
                        ? job.destination
                        : ChildLocation(job.destination, LocationLeaf(source));
-        const auto canonicalSource = TransferIdentity(source);
-        const auto canonicalDestination = TransferIdentity(dst);
         if (job.action == Action::Delete) {
           if (ParseLocation(source).Archive())
             throw std::runtime_error(
@@ -1012,34 +1143,17 @@ Result RunVirtual(const Job &job, const Hooks &hooks) {
             throw;
           }
         } else if (job.action == Action::Move || job.action == Action::Rename) {
-          auto from = ParseLocation(source), to = ParseLocation(dst);
-          if (from.Archive() || from.Local() ||
-              from.CanonicalAuthority() != to.CanonicalAuthority())
-            throw std::runtime_error(
-                "Use Copy for transfers between local, archive and network "
-                "locations. The source is retained.");
-          FileEntry target;
-          if (StatFile(dst, target, control))
-            throw std::runtime_error(
-                "Rename/move target already exists; it was not replaced");
-          if (canonicalDestination == canonicalSource ||
-              canonicalDestination.compare(0, canonicalSource.size() + 1,
-                                           canonicalSource + "/") == 0)
-            throw std::runtime_error("Cannot move a folder into itself");
-          if (from.scheme == "ftp" || from.scheme == "ftps")
-            throw std::runtime_error(
-                "FTP cannot rename without risking replacement of a concurrently created target. "
-                "The source was retained.");
-          const auto selected = job.expectedRemoteSources.find(source);
-          if (selected == job.expectedRemoteSources.end())
-            throw std::runtime_error("No confirmed network entry. Refresh and select it again.");
           FileEntry current;
-          if (!StatFile(source, current, control) || !MatchesRemoteSelection(selected->second, current))
-            throw std::runtime_error("Selected network entry changed or disappeared: " + source);
-          RenameFile(source, dst, control);
-          if (hooks.fileDone)
-            hooks.fileDone(source, dst);
+          try {
+            current = runner.PrepareMove(source, dst, control);
+          } catch (const std::exception &error) {
+            runner.RecordOutcome({source, dst, "unprocessed", error.what()});
+            throw;
+          }
+          runner.MoveNetworkEntry(source, dst, current, control);
         } else {
+          const auto canonicalSource = TransferIdentity(source);
+          const auto canonicalDestination = TransferIdentity(dst);
           if (canonicalDestination == canonicalSource ||
               canonicalDestination.compare(0, canonicalSource.size() + 1,
                                            canonicalSource + "/") == 0)

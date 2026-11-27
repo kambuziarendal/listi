@@ -318,6 +318,15 @@ over, **Failed** includes the problem, and **Not processed** is not a success.
 Other providers can give a job-level error or a recovery path rather than
 confirm the state of every file. Concurrent external edits are not prevented.
 
+For a same-server move or rename, Details lists both paths. If the reply is
+lost, Listi checks both names and the available identity. **Move unconfirmed**
+means it could not prove where that entry ended up; inspect both paths before
+selecting it again. If the server supplies no stable destination folder ID,
+verified upload bytes do not prove the folder stayed the same throughout the job.
+On download, an observed tightening of source folder permissions stops further
+publication. Earlier deliveries stay where they were written; an existing
+destination folder keeps its own permissions.
+
 FTP and FTPS servers choose which entries to list, even with MLSD. Folder
 downloads and comparisons can verify individual visible files, not that the
 server showed every file. A missing name does not by itself mean the name is
@@ -759,7 +768,8 @@ its path and never removes or overwrites an existing destination. Inspect an
 interrupted folder's BFS attributes (for example, with
 `catattr Listi:RestoreIncomplete /path/to/copy`). Listi writes this marker
 before restoring any contents and clears it only after the copy has been
-flushed. If the point already has that attribute, Listi uses the first unused
+flushed and the restored names still match their recorded objects. A moved
+or replaced subtree leaves the copy marked incomplete. If the point already has that attribute, Listi uses the first unused
 numeric suffix instead. After a failure, restore to another new path; do not
 use a marked copy. If there is no room to write the marker or the process
 stops before it is written, only the empty destination may remain.

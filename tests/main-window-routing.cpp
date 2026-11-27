@@ -27,6 +27,7 @@
 #include <Layout.h>
 #include <LayoutItem.h>
 #include <MenuBar.h>
+#include <MessageFilter.h>
 #include <MenuField.h>
 #include <MenuItem.h>
 #include <NodeMonitor.h>
@@ -46,6 +47,24 @@
 #include <stdexcept>
 #include <sys/stat.h>
 #include <unistd.h>
+
+// Inject a different fixture identity at a UI message boundary, never by
+// replacing a live directory. Both fixture directories stay in place.
+class FixtureFolderIdentity : public BMessageFilter {
+public:
+  FixtureFolderIdentity(uint32 what, const char *field, int64 before, int64 after)
+      : BMessageFilter(what), field(field), before(before), after(after) {}
+  filter_result Filter(BMessage *message, BHandler **) override {
+    assert(message->GetInt64(field, -1) == before);
+    assert(message->ReplaceInt64(field, after) == B_OK);
+    seen = true;
+    return B_DISPATCH_MESSAGE;
+  }
+  bool seen = false;
+private:
+  const char *field;
+  int64 before, after;
+};
 
 static void CheckFunctionButtons() {
   MainWindowMenu menu;
@@ -959,6 +978,53 @@ int main(int argc, char **argv) {
   waitFor([&] { return !pane->IsScanning(); });
   firstPlace = go->Menu()->FindItem("Original");
   assert(firstPlace && firstPlace->IsMarked());
+
+  struct stat displayedFolder, alternateFolder;
+  assert(stat(sourcePath.c_str(), &displayedFolder) == 0);
+  assert(stat(elsewhere.c_str(), &alternateFolder) == 0);
+  assert(displayedFolder.st_dev == alternateFolder.st_dev &&
+         displayedFolder.st_ino != alternateFolder.st_ino);
+  auto *jobHistory = dynamic_cast<BTextView *>(window->FindView("history"));
+  assert(jobHistory);
+  struct GuardCase { uint32 command, acceptance; const char *button, *name; };
+  for (const auto &test : {GuardCase{kNewFile, kNameAccepted, "Create file", "New file"},
+                           GuardCase{kMkdir, kNameAccepted, "Create folder", "New folder"},
+                           GuardCase{kCreateLink, 'nacc', "Relative link", "visible.txt link"}}) {
+    auto assertAbsent = [&] {
+      for (const auto &folder : {sourcePath, elsewhere}) {
+        struct stat entry;
+        assert(lstat((folder + "/" + test.name).c_str(), &entry) < 0 && errno == ENOENT);
+      }
+    };
+    FixtureFolderIdentity scan(kScanDone, "folderNode", displayedFolder.st_ino, alternateFolder.st_ino);
+    pane->AddFilter(&scan);
+    pane->Reload();
+    waitFor([&] { return scan.seen && !pane->IsScanning(); });
+    assert(pane->RemoveFilter(&scan));
+    assert(pane->MatchPattern("visible.txt", true) == 1);
+    send(test.command);
+    assert(!window->FindView("question"));
+    assertAbsent();
+    pane->Reload();
+    waitFor([&] { return !pane->IsScanning(); });
+    assert(pane->MatchPattern("visible.txt", true) == 1);
+    send(test.command);
+    auto *accept = promptButton(test.button);
+    assert(accept);
+    const std::string previousJobs = jobHistory->Text();
+    FixtureFolderIdentity accepted(test.acceptance, "destinationNode",
+                                   displayedFolder.st_ino, alternateFolder.st_ino);
+    window->AddFilter(&accepted);
+    assert(accept->Invoke() == B_OK);
+    waitFor([&] {
+      std::string current = jobHistory->Text();
+      return accepted.seen && current.find("destination changed", previousJobs.size()) != std::string::npos;
+    });
+    assert(window->RemoveFilter(&accepted));
+    waitFor([&] { return !pane->IsScanning(); });
+    assertAbsent();
+    fprintf(stderr, "PASS simulated stale identity at request and acceptance: %s\n", test.button);
+  }
 
   send(kMkdir);
   auto *confirm = promptButton("Create folder");

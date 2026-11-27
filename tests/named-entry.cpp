@@ -72,7 +72,27 @@ int main() {
     Check(Reject([&] { PrepareNamedEntry(Action::Duplicate,{"sftp://example.invalid/file"}); }), "remote duplicate refused without connecting");
     Check(Reject([&] { PrepareNamedEntry(Action::Link,{file},"@disks"); }), "volume listing is not a link destination");
     Check(Reject([&] { PrepareNamedEntry(Action::Duplicate,{"/boot"}); }), "volume-root duplicate refused");
-    auto relative = PrepareNamedEntry(Action::Link,{file},b);
+    struct stat destinationStat;
+    Check(stat(b.c_str(), &destinationStat) == 0, "read displayed folder identity");
+    NodeIdentity displayed{int32_t(destinationStat.st_dev), int64_t(destinationStat.st_ino)};
+    NodeIdentity other{displayed.device, displayed.inode ^ 1};
+    Check(Reject([&] { PrepareNamedEntry(Action::Link, {file}, b, {}, other); }),
+          "link preparation rejects a mismatched displayed folder identity");
+    for (auto action : {Action::MakeDirectory, Action::MakeFile}) {
+      Job nameJob;
+      nameJob.action = action;
+      nameJob.destination = b;
+      nameJob.expectedDestination = other;
+      Check(Reject([&] { FreezeLocalJob(nameJob, b); }),
+            "name preparation rejects a mismatched displayed folder identity");
+      nameJob.expectedDestination = displayed;
+      FreezeLocalJob(nameJob, b);
+      auto accepted = DecodeJob(EncodeJob(nameJob, 0));
+      Check(accepted.expectedDestination.device == displayed.device &&
+            accepted.expectedDestination.inode == displayed.inode,
+            "name dialog retains displayed folder identity");
+    }
+    auto relative = PrepareNamedEntry(Action::Link, {file}, b, {}, displayed);
     relative.entryName = "relative"; relative.relativeLink = true;
     result = Run(relative,{});
     Check(result.completed == 1 && Link(b+"/relative") == "../a/æ $' report.txt" && Read(b+"/relative") == "original", "relative symbolic link resolves target with shell-like filename");

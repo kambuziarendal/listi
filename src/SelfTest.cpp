@@ -122,6 +122,45 @@ bool TestLoopbackSftpMode(const std::string &root, const char *knownHosts) {
   return retry.completed == 1 && retry.errors.empty() && contents == "private" &&
          !stat(destination.c_str(), &st) && (st.st_mode & 0777) == 0600;
 }
+// The read-only fixture advances its published folder mode when the client
+// reads the signal after the first confirmed delivery, independent of ordering.
+bool TestSftpFolderAccess(const std::string &root, bool existing) {
+  const std::string endpoint = "sftp://127.0.0.1:2227/";
+  const std::string leaf = existing ? "access-existing" : "access-new";
+  const auto source = ChildLocation(endpoint, leaf);
+  const auto destination = Join(root, leaf);
+  if (existing) {
+    MakeFolder(destination);
+    if (chmod(destination.c_str(), 0755))
+      return false;
+    std::ofstream(Join(destination, "keep")) << "unrelated";
+  }
+  Hooks hooks;
+  std::string first;
+  hooks.fileDone = [&](const std::string &from, const std::string &) {
+    if (first.empty()) {
+      first = LocationLeaf(from);
+      ReadFile(ChildLocation(endpoint, "signal-" + leaf), [](const char *, size_t) {});
+    }
+  };
+  const auto result = Run({Action::Copy, {source}, root}, hooks);
+  if (first != "a" && first != "b")
+    return false;
+  const auto delivered = Join(destination, first);
+  const auto missing = Join(destination, first == "a" ? "b" : "a");
+  struct stat folder{}, file{};
+  std::string bytes, prior;
+  std::ifstream(delivered) >> bytes;
+  if (existing)
+    std::ifstream(Join(destination, "keep")) >> prior;
+  const bool receipt = std::any_of(result.outcomes.begin(), result.outcomes.end(), [&](const auto &row) {
+    return row.destination == delivered && row.status == "copied";
+  });
+  return !result.completed && result.partialCopies == 1 && !result.errors.empty() && receipt &&
+         !stat(destination.c_str(), &folder) && (folder.st_mode & 0777) == (existing ? 0755 : 0700) &&
+         !stat(delivered.c_str(), &file) && (file.st_mode & 0777) == 0644 && bytes == first &&
+         access(missing.c_str(), F_OK) != 0 && (!existing || prior == "unrelated");
+}
 } // namespace
 int SelfTest() {
   char pattern[] = "/boot/home/Listi-test-XXXXXX";
@@ -139,6 +178,8 @@ int SelfTest() {
   if (const auto *hosts = getenv("LISTI_TEST_SFTP_AUDIT_HOSTS")) {
     try {
       check(TestLoopbackSftpMode(root, hosts), "loopback SFTP chmod during download and private retry");
+      check(TestSftpFolderAccess(root, true), "SFTP access change stops existing-folder merge after first receipt");
+      check(TestSftpFolderAccess(root, false), "SFTP access change leaves a new partial folder private");
     } catch (const std::exception &e) {
       std::cerr << e.what() << std::endl;
       check(false, "loopback SFTP chmod during download and private retry");

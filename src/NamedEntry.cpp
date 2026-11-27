@@ -84,7 +84,8 @@ void ValidateNewEntryName(const std::string &folder, const std::string &name) {
 }
 Job PrepareNamedEntry(Action action, const std::vector<std::string> &selection,
                       const std::string &linkDestination,
-                      const std::map<std::string, NodeIdentity> &expected) {
+                      const std::map<std::string, NodeIdentity> &expected,
+                      NodeIdentity expectedDestination) {
   if (action != Action::Duplicate && action != Action::Link)
     throw std::runtime_error("Unsupported named entry action.");
   if (selection.size() != 1 || IsVirtual(selection[0]))
@@ -104,6 +105,10 @@ Job PrepareNamedEntry(Action action, const std::vector<std::string> &selection,
   struct stat destination;
   if (stat(job.destination.c_str(), &destination))
     throw std::runtime_error("The destination folder is unavailable.");
+  if (expectedDestination.device >= 0 &&
+      (expectedDestination.device != destination.st_dev ||
+       expectedDestination.inode != destination.st_ino))
+    throw std::runtime_error("The selected destination folder was replaced: " + job.destination);
   job.expectedDestination = {int32_t(destination.st_dev),
                              int64_t(destination.st_ino)};
   struct stat st;

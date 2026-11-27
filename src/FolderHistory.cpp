@@ -478,8 +478,40 @@ BMessage FindRegularFile(BMessage folder, const fs::path &relative) {
   return folder;
 }
 
+struct RestoredEntry {
+  std::string name;
+  dev_t device;
+  ino_t inode;
+  std::vector<RestoredEntry> children;
+};
+
+RestoredEntry RestoredIdentity(int fd, const std::string &name) {
+  const auto info = Stat(fd);
+  return {name, info.st_dev, info.st_ino, {}};
+}
+
+// Revisit completed siblings from the still-open root before clearing its marker.
+// Only the active ancestry needs an open descriptor, even for wide trees.
+void VerifyRestoredEntries(int parent, const std::vector<RestoredEntry> &entries,
+                           const std::atomic_bool &cancel) {
+  for (const auto &entry : entries) {
+    CheckCancel(cancel);
+    struct stat info{};
+    const auto changed = "Restored entry changed: " + entry.name;
+    Require(fstatat(parent, entry.name.c_str(), &info, AT_SYMLINK_NOFOLLOW) == 0 &&
+            info.st_dev == entry.device && info.st_ino == entry.inode, changed);
+    if (!entry.children.empty()) {
+      FD dir(openat(parent, entry.name.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC),
+             changed);
+      const auto opened = Stat(dir.fd);
+      Require(opened.st_dev == entry.device && opened.st_ino == entry.inode, changed);
+      VerifyRestoredEntries(dir.fd, entry.children, cancel);
+    }
+  }
+}
+
 void RestoreNode(int fd, int store, const BMessage &entry, const std::atomic_bool &cancel,
-                 unsigned depth) {
+                 unsigned depth, std::vector<RestoredEntry> &entries) {
   CheckCancel(cancel);
   Require(depth <= 128, "History folder nesting exceeds 128 levels.");
   const auto count = StoredCount(entry, "child");
@@ -492,14 +524,17 @@ void RestoreNode(int fd, int store, const BMessage &entry, const std::atomic_boo
     if (S_ISDIR(mode)) {
       Check(mkdirat(fd, name.c_str(), 0700) == 0, "Create " + name);
       FD opened(openat(fd, name.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC), name);
-      RestoreNode(opened.fd, store, child, cancel, depth + 1);
+      entries.push_back(RestoredIdentity(opened.fd, name));
+      RestoreNode(opened.fd, store, child, cancel, depth + 1, entries.back().children);
     } else if (S_ISREG(mode)) {
       FD output(openat(fd, name.c_str(), O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, 0600), name);
       RestoreBytes(output.fd, store, child, cancel);
-      RestoreNode(output.fd, store, child, cancel, depth + 1);
+      entries.push_back(RestoredIdentity(output.fd, name));
+      RestoreNode(output.fd, store, child, cancel, depth + 1, entries.back().children);
     } else if (S_ISLNK(mode)) {
       Check(symlinkat(child.GetString("target", ""), fd, name.c_str()) == 0, "Create link " + name);
       FD link(openat(fd, name.c_str(), O_RDONLY | O_NOTRAVERSE | O_CLOEXEC), name);
+      entries.push_back(RestoredIdentity(link.fd, name));
       ApplyAttributes(link.fd, child, cancel);
       timespec times[] = {{0, UTIME_OMIT}, {child.GetInt64("sec", 0), child.GetInt32("ns", 0)}};
       Check(utimensat(fd, name.c_str(), times, AT_SYMLINK_NOFOLLOW) == 0, "Restore link modification time");
@@ -780,11 +815,14 @@ void HistoryStore::Restore(const std::string &point, const std::string &destinat
     parent->Flush();
 
     if (single) RestoreBytes(output.fd, state->store->Descriptor(), root, cancel);
-    RestoreNode(output.fd, state->store->Descriptor(), root, cancel, 0);
+    std::vector<RestoredEntry> entries;
+    RestoreNode(output.fd, state->store->Descriptor(), root, cancel, 0, entries);
     CheckCancel(cancel);
     state->store->Verify();
-    verifyCopy();
     parent->Flush();
+    VerifyRestoredEntries(output.fd, entries, cancel);
+    verifyCopy();
+    CheckCancel(cancel);
     // Do not check cancellation after this commit point. The restored bytes,
     // metadata and parent directory were already flushed with the marker.
     Check(fs_remove_attr(output.fd, marker.c_str()) == 0, "Finish restored copy");

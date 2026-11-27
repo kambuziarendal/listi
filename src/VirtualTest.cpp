@@ -269,7 +269,50 @@ int VirtualTest(const std::string &fixtures, const std::string &hosts) {
       auto trash = Run({Action::Trash, {renamed}, root}, hooks);
       check(!trash.errors.empty() && StatFile(renamed, stat),
             std::string(protocol) + " no permanent delete fallback");
-      RemoveFile(renamed, false);
+      if (protocol == "smb") {
+        const auto second = ChildLocation(folder, "second.txt");
+        UploadFile(local, second, {});
+        const auto target = ChildLocation(folder, "destination");
+        MakeFolder(target);
+        Job move{Action::Move, {renamed, second}, target};
+        for (const auto &source : move.sources)
+          if (!StatFile(source, move.expectedRemoteSources[source]))
+            throw std::runtime_error("Could not capture the selected SMB file");
+        if (getenv("LISTI_TEST_SMB_REVISION")) {
+          // The fixture returns a different folder ID after this signal.
+          // No real folder is replaced and neither input holds user data.
+          Hooks changed = hooks;
+          const auto signal = ChildLocation(target, "revision-signal");
+          changed.fileDone = [&](const auto &from, const auto &) {
+            if (from == renamed)
+              MakeFolder(signal);
+          };
+          const auto partial = Run(move, changed);
+          const auto firstDelivered = ChildLocation(target, LocationLeaf(renamed));
+          check(partial.completed == 1 && !partial.errors.empty() &&
+                    partial.completedRoots.size() == 1 && !StatFile(renamed, stat) &&
+                    contents(firstDelivered) == "replacement\n" && contents(second) == "replacement\n" &&
+                    !StatFile(ChildLocation(target, LocationLeaf(second)), stat),
+                "SMB destination identity change stops before moving the second file");
+          RemoveFile(signal, true);
+          // Put only our first fixture file back before the ordinary control.
+          RenameFile(firstDelivered, renamed);
+          if (!StatFile(renamed, move.expectedRemoteSources[renamed]))
+            throw std::runtime_error("Could not reselect the restored fixture file");
+        }
+        const auto result = Run(move, hooks);
+        check(result.completed == 2 && result.errors.empty() && result.completedRoots.size() == 2,
+              "SMB multi-file move confirms both selected roots");
+        for (const auto &source : move.sources) {
+          const auto delivered = ChildLocation(target, LocationLeaf(source));
+          check(!StatFile(source, stat) && contents(delivered) == "replacement\n",
+                "SMB move delivers selected bytes and removes only the source name");
+          RemoveFile(delivered, false);
+        }
+        RemoveFile(target, true);
+      } else {
+        RemoveFile(renamed, false);
+      }
       RemoveFile(folder, true);
       check(!StatFile(folder, stat),
             std::string(protocol) + " remove file and folder");

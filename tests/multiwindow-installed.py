@@ -3,6 +3,7 @@
 from collections import Counter
 from contextlib import ExitStack
 from pathlib import Path
+import argparse
 import subprocess
 import tempfile
 import time
@@ -59,7 +60,67 @@ def stop(process):
             process.wait(timeout=5)
 
 
-def run(root, cleanup):
+def prompt_button(browser, label):
+    # Inline buttons have labels but no Haiku scripting names. Follow only
+    # branches containing the named question, then inspect its button row.
+    parent = ["Window", browser]
+    while True:
+        count = int(hey("count", "View", "of", *parent))
+        for i in range(count):
+            child = ["View", i, "of", *parent]
+            if hey("get", "InternalName", "of", *child) == "question":
+                row = ["View", count - 1, "of", *parent]
+                for j in range(int(hey("count", "View", "of", *row))):
+                    button = ["View", j, "of", *row]
+                    if hey("get", "Label", "of", *button) == label:
+                        return button
+                raise ValueError("Missing prompt button: " + label)
+            try:
+                hey("get", "Messenger", "of", "View", "question", "of", *child)
+            except subprocess.CalledProcessError:
+                continue
+            parent = child
+            break
+        else:
+            raise ValueError("Missing question")
+
+
+def named_entries(root, browser):
+    folder = root / "entry commands"
+    folder.mkdir()
+    source = folder / "input.txt"
+    source.write_text("link fixture")
+    for panel in ("SourcePath", "DestinationPath"):
+        hey("set", panel, "of", "Window", browser, "to", folder)
+    for command, label, output in (("link", "Relative link", "input.txt link"),
+                                   ("nefl", "Create file", "New file"),
+                                   ("mkdr", "Create folder", "New folder")):
+        menu(browser, "Refresh", "Listi")
+        wait_for(lambda: hey("get", "PathReady", "of", "Window", browser) == "true",
+                 command + " refreshed panel")
+        if command == "link":
+            menu(browser, "All", "Select")
+            menu(browser, "Create symbolic link...", "More file actions", "Files")
+        elif command == "mkdr":
+            menu(browser, "New folder")
+        else:
+            # New file is a context-menu-only command.
+            hey("let", "Window", browser, "do", command)
+        wait_for(lambda: hey("get", "InternalName", "of", "View", "question", "of", "Window", browser) == "question",
+                 command + " name prompt")
+        hey("let", *prompt_button(browser, label), "do", "_KYD", "with", "bytes= ")
+        entry = folder / output
+        wait_for(entry.exists, command + " created in refreshed panel")
+        if command == "link":
+            assert entry.is_symlink() and entry.resolve() == source
+        elif command == "nefl":
+            assert entry.is_file() and entry.read_bytes() == b""
+        else:
+            assert entry.is_dir() and not any(entry.iterdir())
+    assert source.read_text() == "link fixture"
+
+
+def run(root, cleanup, entries_only=False):
     def launch(*args, cwd=None):
         process = subprocess.Popen([APP, *map(str, args)], cwd=cwd, stdin=subprocess.DEVNULL,
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -78,6 +139,14 @@ def run(root, cleanup):
     def index(path):
         return next(i for i, value in windows().items() if value == path)
 
+    paths(first)
+    named_entries(root, index(first))
+    browser = index(str(root / "entry commands"))
+    if entries_only:
+        menu(browser, "Quit Listi")
+        assert app.wait(timeout=10) == 0
+        return
+    hey("set", "SourcePath", "of", "Window", browser, "to", first)
     paths(first)
     helper = Path(__file__).resolve().parents[1] / "build/native-audit-tests/file-clipboard"
     for route in ("Cut", "mixed Tracker", "archive"):
@@ -193,8 +262,11 @@ def run(root, cleanup):
 
 
 if __name__ == "__main__":
+    args = argparse.ArgumentParser()
+    args.add_argument("--named-entries-only", action="store_true")
+    options = args.parse_args()
     print("TEST installed multiwindow", flush=True)
     with tempfile.TemporaryDirectory(prefix="listi-multi-", dir="/boot/home") as folder:
         with ExitStack() as cleanup:
-            run(Path(folder), cleanup)
+            run(Path(folder), cleanup, options.named_entries_only)
     print("PASS installed multiwindow", flush=True)

@@ -20,6 +20,7 @@ namespace fs=std::filesystem;
 using Listi::HistoryStore;
 namespace {
 std::atomic_bool *cancelAfterWrite = nullptr;
+fs::path subtreeToMove, movedSubtree;
 const struct stat *oversizedFixture = nullptr;
 bigtime_t historyClock = 0;
 const char *failItem = nullptr;
@@ -52,6 +53,12 @@ extern "C" int __wrap_fstat(int fd, struct stat *info) {
 extern "C" ssize_t __real_write(int, const void *, size_t);
 extern "C" ssize_t __wrap_write(int fd, const void *bytes, size_t count) {
   auto written = __real_write(fd, bytes, count);
+  if (!subtreeToMove.empty() && written > 0 && fs::exists(subtreeToMove/"note") &&
+      fs::exists(subtreeToMove.parent_path()/"same")) {
+    fs::rename(subtreeToMove, movedSubtree);
+    fs::create_directory(subtreeToMove);
+    subtreeToMove.clear();
+  }
   if (cancelAfterWrite && written > 0) {
     *cancelAfterWrite = true;
     cancelAfterWrite = nullptr;
@@ -277,6 +284,30 @@ int main() {
   reject([&]{ history.Restore(first,base/"partial",cancel); }, "canceled after a payload write");
   assert(cancel && !cancelAfterWrite && count() == 5);
   constexpr char incomplete[] = "Incomplete Listi restore. Do not use as a finished copy.";
+  cancel = false;
+  const auto swapped = base/"swapped";
+  subtreeToMove = swapped/"dir";
+  movedSubtree = base/"moved-dir";
+  reject([&]{ history.Restore(first, swapped, cancel); }, "completed subtree replaced on BFS",
+         "Restored entry changed: dir");
+  assert(subtreeToMove.empty() && fs::is_empty(swapped/"dir"));
+  std::string movedBytes;
+  std::ifstream(movedSubtree/"note") >> movedBytes;
+  assert(movedBytes == "original" && fs::exists(swapped/"same"));
+  checkAttr(swapped, "Listi:RestoreIncomplete-1", B_STRING_TYPE, incomplete, sizeof(incomplete));
+  history.Restore(first, base/"swap-recovery", cancel);
+  std::string recoveredBytes;
+  std::ifstream(base/"swap-recovery/dir/note") >> recoveredBytes;
+  assert(recoveredBytes == "original" && count() == 5);
+  recoveredBytes.clear();
+  std::ifstream(base/"swap-recovery/same") >> recoveredBytes;
+  assert(recoveredBytes == "original");
+  const int recoveryFd = open((base/"swap-recovery").c_str(), O_RDONLY | O_DIRECTORY);
+  attr_info recoveryMarker{};
+  assert(recoveryFd >= 0 && fs_stat_attr(recoveryFd, "Listi:RestoreIncomplete-1",
+                                         &recoveryMarker) != 0 && errno == ENOENT);
+  close(recoveryFd);
+  cancel = true;
   checkAttr(base/"partial", "Listi:RestoreIncomplete-1", B_STRING_TYPE,
             incomplete, sizeof(incomplete));
   checkAttr(base/"one", "Listi:RestoreIncomplete", B_STRING_TYPE, "user data", 10);
