@@ -1017,7 +1017,22 @@ struct Runner {
     if (hooks.fileDone)
       hooks.fileDone(source, dst);
   }
-  void DeleteTree(const std::string &p, const FileEntry &expected, int depth = 0) {
+  struct DeleteFolder {
+    const std::string &path;
+    const FileEntry &entry;
+    const DeleteFolder *parent;
+  };
+  void VerifyDeleteFolders(const DeleteFolder *folder, const TransferControl &control) {
+    for (; folder; folder = folder->parent) {
+      FileEntry current;
+      if (!StatFile(folder->path, current, control) || !current.directory || current.link ||
+          current.providerIdentity != folder->entry.providerIdentity)
+        throw std::runtime_error("Folder changed during deletion: " + folder->path);
+      // Child removals can legitimately change directory size and timestamps.
+    }
+  }
+  void DeleteTree(const std::string &p, const FileEntry &expected, int depth = 0,
+                  const DeleteFolder *parent = nullptr) {
     if (depth > 128 || ++visited > 200000)
       throw std::runtime_error("Folder tree exceeds deletion limit");
     auto c = Control(p);
@@ -1028,11 +1043,14 @@ struct Runner {
     if (!MatchesRemoteSelection(expected, e))
       throw std::runtime_error("Entry changed before deletion: " + p);
     const bool directory = expected.directory && !expected.link;
+    const DeleteFolder folder{p, e, parent};
+    const DeleteFolder *chain = directory ? &folder : parent;
     if (directory) {
       const auto children = ListFiles(p, c);
+      VerifyDeleteFolders(chain, c);
       for (size_t i = 0; i < children.size(); ++i) {
         try {
-          DeleteTree(children[i].path, children[i], depth + 1);
+          DeleteTree(children[i].path, children[i], depth + 1, chain);
         } catch (...) {
           for (++i; i < children.size(); ++i)
             RecordOutcome({children[i].path, "", "unprocessed", "No removal requested."});
@@ -1040,6 +1058,7 @@ struct Runner {
         }
       }
     }
+    VerifyDeleteFolders(chain, c);
     bool submitted = false;
     c.mutationSubmitted = &submitted;
     try {
@@ -1055,11 +1074,12 @@ struct Runner {
       bool consulted = false, present = true;
       try {
         present = StatFile(p, now, c);
+        VerifyDeleteFolders(parent, c);
         consulted = true;
       } catch (...) {}
       if (consulted && !present) {
         ++deletedEntries;
-        RecordOutcome({p, "", "deleted", "Removal was not acknowledged; a fresh lookup confirmed absence."});
+        RecordOutcome({p, "", "deleted", "Removal was not acknowledged; a fresh lookup confirmed absence at this path."});
       } else if (consulted && !e.providerIdentity.empty() &&
                  e.SameRevision(now)) {
         RecordOutcome({p, "", "not deleted", "The same entry is still present."});
@@ -1071,7 +1091,8 @@ struct Runner {
       std::rethrow_exception(failure);
     }
     ++deletedEntries;
-    RecordOutcome({p, "", "deleted", ""});
+    RecordOutcome({p, "", "deleted",
+                   "Server acknowledged removal by path; replacement after the last lookup cannot be excluded."});
   }
 };
 } // namespace
@@ -1086,6 +1107,15 @@ Result RunVirtual(const Job &job, const Hooks &hooks) {
         runner.directories[folder] = job.expectedDestination;
     }
     runner.Guard();
+    if (job.displayedRemoteDestination) {
+      const bool named = job.action == Action::Rename || job.action == Action::MakeDirectory;
+      const auto parent = named ? ParentLocation(job.destination)
+                                : ParseLocation(job.destination).URL();
+      FileEntry shown;
+      shown.providerIdentity = *job.displayedRemoteDestination;
+      runner.remoteDirectories.emplace(parent, Runner::RemoteDirectory{shown, {}});
+      runner.VerifyRemoteDirectories(runner.Control(parent));
+    }
     if (job.action == Action::Trash || job.action == Action::Restore)
       throw std::runtime_error("Trash and Restore are available only on local "
                                "supported volumes. Nothing was deleted.");

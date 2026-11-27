@@ -97,6 +97,21 @@ int main() {
           "transparent PNG pixels appear white in the converted JPEG");
 
 
+    for (mode_t sourceMode : {0600, 0644}) {
+      for (mode_t mask : {0022, 0077}) {
+        Check(chmod(source.c_str(), sourceMode) == 0 && unlink(target.c_str()) == 0,
+              "prepare fresh image conversion");
+        const mode_t previousMask = umask(mask);
+        const auto conversion = Run(job, {});
+        umask(previousMask);
+        struct stat output;
+        Check(conversion.completed == 1 && stat(target.c_str(), &output) == 0 &&
+                  (output.st_mode & 0777) == (sourceMode & ~mask) &&
+                  Read(target).compare(0, 2, "\xff\xd8") == 0 && Read(source) == png,
+              "JPEG access respects both source permissions and process mask");
+      }
+    }
+
     // The source fits the filesystem, but appending ".jpg" would split Ø
     // at the byte limit. Keep the entire suffix and only whole characters.
     const std::string prefix(B_FILE_NAME_LENGTH - 6, 'a');

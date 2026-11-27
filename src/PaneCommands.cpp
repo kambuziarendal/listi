@@ -28,6 +28,7 @@ void Pane::BindTransferDestination(Listi::Job &job) const {
     job.expectedDestination = {int32_t(device), node};
   } else {
     entries.BindArchiveView(job, job.destination);
+    entries.BindRemoteView(job, job.destination);
   }
 }
 

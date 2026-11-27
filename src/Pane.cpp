@@ -1440,6 +1440,10 @@ void Pane::MessageReceived(BMessage *m) {
       if (entries.archiveVersion.empty())
         error = "Missing archive version. Reload and select again.";
     }
+    if (!error && m->HasString("remoteFolderId")) {
+      entries.remoteFolderPath = path.String();
+      entries.remoteFolderId = m->GetString("remoteFolderId", "");
+    }
     if (!entries.archiveVersion.empty() && restoring && restoring->archiveVersion != entries.archiveVersion) {
       entries.SetSelection({}, "");
       restoring->focused.clear();

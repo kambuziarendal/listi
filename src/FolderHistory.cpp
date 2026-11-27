@@ -480,14 +480,19 @@ BMessage FindRegularFile(BMessage folder, const fs::path &relative) {
 
 struct RestoredEntry {
   std::string name;
-  dev_t device;
-  ino_t inode;
+  struct stat revision;
+  std::string verifyDigest;
   std::vector<RestoredEntry> children;
 };
 
-RestoredEntry RestoredIdentity(int fd, const std::string &name) {
-  const auto info = Stat(fd);
-  return {name, info.st_dev, info.st_ino, {}};
+RestoredEntry RestoredIdentity(int fd, const std::string &name, const BMessage *file = nullptr) {
+  const auto revision = Stat(fd);
+  // BFS normally exposes a subsecond change time. Whole-second readings and
+  // coincident data/change stamps cannot distinguish writes within that tick.
+  const bool coarse = revision.st_ctim.tv_sec <= 0 || revision.st_ctim.tv_nsec == 0;
+  const bool sameTick = revision.st_ctim.tv_sec == revision.st_mtim.tv_sec &&
+                        revision.st_ctim.tv_nsec == revision.st_mtim.tv_nsec;
+  return {name, revision, file && (coarse || sameTick) ? file->GetString("digest", "") : "", {}};
 }
 
 // Revisit completed siblings from the still-open root before clearing its marker.
@@ -499,15 +504,38 @@ void VerifyRestoredEntries(int parent, const std::vector<RestoredEntry> &entries
     struct stat info{};
     const auto changed = "Restored entry changed: " + entry.name;
     Require(fstatat(parent, entry.name.c_str(), &info, AT_SYMLINK_NOFOLLOW) == 0 &&
-            info.st_dev == entry.device && info.st_ino == entry.inode, changed);
+            info.st_dev == entry.revision.st_dev && info.st_ino == entry.revision.st_ino, changed);
+    if (S_ISREG(entry.revision.st_mode))
+      Require(info.st_mode == entry.revision.st_mode && Unchanged(entry.revision, info), changed);
+    if (!entry.verifyDigest.empty()) {
+      FD input(openat(parent, entry.name.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC),
+               "Verify restored file: " + entry.name);
+      const auto opened = Stat(input.fd);
+      Require(S_ISREG(opened.st_mode) && opened.st_dev == info.st_dev &&
+              opened.st_ino == info.st_ino && Unchanged(info, opened) &&
+              Digest(input.fd, -1, cancel, opened.st_size) == entry.verifyDigest &&
+              Unchanged(opened, Stat(input.fd)), changed);
+      struct stat named{};
+      Require(!fstatat(parent, entry.name.c_str(), &named, AT_SYMLINK_NOFOLLOW) &&
+              named.st_dev == opened.st_dev && named.st_ino == opened.st_ino &&
+              Unchanged(opened, named), changed);
+    }
     if (!entry.children.empty()) {
       FD dir(openat(parent, entry.name.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC),
              changed);
       const auto opened = Stat(dir.fd);
-      Require(opened.st_dev == entry.device && opened.st_ino == entry.inode, changed);
+      Require(opened.st_dev == entry.revision.st_dev && opened.st_ino == entry.revision.st_ino, changed);
       VerifyRestoredEntries(dir.fd, entry.children, cancel);
     }
   }
+}
+
+void FinishRestoredNode(int fd, const BMessage &entry, const std::atomic_bool &cancel) {
+  ApplyAttributes(fd, entry, cancel);
+  timespec times[] = {{0, UTIME_OMIT}, {entry.GetInt64("sec", 0), entry.GetInt32("ns", 0)}};
+  Check(futimens(fd, times) == 0, "Restore modification time");
+  Check(fchmod(fd, entry.GetInt32("mode", 0) & 0777) == 0, "Restore permissions");
+  Check(fsync(fd) == 0, "Flush restored file or folder");
 }
 
 void RestoreNode(int fd, int store, const BMessage &entry, const std::atomic_bool &cancel,
@@ -529,8 +557,10 @@ void RestoreNode(int fd, int store, const BMessage &entry, const std::atomic_boo
     } else if (S_ISREG(mode)) {
       FD output(openat(fd, name.c_str(), O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, 0600), name);
       RestoreBytes(output.fd, store, child, cancel);
-      entries.push_back(RestoredIdentity(output.fd, name));
-      RestoreNode(output.fd, store, child, cancel, depth + 1, entries.back().children);
+      Require(StoredCount(child, "child") == 0, "Invalid children on restored file.");
+      FinishRestoredNode(output.fd, child, cancel);
+      // Our own attribute, mode and timestamp writes are complete.
+      entries.push_back(RestoredIdentity(output.fd, name, &child));
     } else if (S_ISLNK(mode)) {
       Check(symlinkat(child.GetString("target", ""), fd, name.c_str()) == 0, "Create link " + name);
       FD link(openat(fd, name.c_str(), O_RDONLY | O_NOTRAVERSE | O_CLOEXEC), name);
@@ -542,11 +572,7 @@ void RestoreNode(int fd, int store, const BMessage &entry, const std::atomic_boo
       throw std::runtime_error("Unknown history entry type.");
     }
   }
-  ApplyAttributes(fd, entry, cancel);
-  timespec times[] = {{0, UTIME_OMIT}, {entry.GetInt64("sec", 0), entry.GetInt32("ns", 0)}};
-  Check(futimens(fd, times) == 0, "Restore modification time");
-  Check(fchmod(fd, entry.GetInt32("mode", 0) & 0777) == 0, "Restore permissions");
-  Check(fsync(fd) == 0, "Flush restored file or folder");
+  FinishRestoredNode(fd, entry, cancel);
 }
 }
 
@@ -817,10 +843,11 @@ void HistoryStore::Restore(const std::string &point, const std::string &destinat
     if (single) RestoreBytes(output.fd, state->store->Descriptor(), root, cancel);
     std::vector<RestoredEntry> entries;
     RestoreNode(output.fd, state->store->Descriptor(), root, cancel, 0, entries);
+    if (single) entries.push_back(RestoredIdentity(output.fd, leaf, &root));
     CheckCancel(cancel);
     state->store->Verify();
     parent->Flush();
-    VerifyRestoredEntries(output.fd, entries, cancel);
+    VerifyRestoredEntries(single ? parent->Descriptor() : output.fd, entries, cancel);
     verifyCopy();
     CheckCancel(cancel);
     // Do not check cancellation after this commit point. The restored bytes,

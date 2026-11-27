@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 OUTPUT = ROOT / "build/native-audit-tests"
 REQUIRED = """
-file-operation-faults directory-finalization copy-crash-recovery worker-lifecycle virtual-operation-faults archive-read-scope
+file-operation-faults trash-metadata directory-finalization copy-crash-recovery worker-lifecycle virtual-operation-faults archive-read-scope
 operation-queue removable-copy disk-actions archive-move-scaling directory-delivery terminal-delivery search-filters
 archive-local-move-faults archive-local-move archive-copy-inputs archive-panel-version tar-edit-ownership tar-move-ownership same-file-type folder-compare
 archive-editor-faults archive-editor archive-move-faults archive-move
@@ -56,6 +56,8 @@ WRAPS = {
     "archive-editor-faults": ['rename', 'renameat', 'fsync', 'fs_stat_dev'],
     "archive-local-move-faults": ['renameat', 'unlink', 'openat'],
     "file-operation-faults": ['lstat', 'fs_stat_dev', 'openat', 'write', 'unlinkat', 'stat', 'close', 'fsync', '_ZN5BNode10RemoveAttrEPKc'],
+    "trash-metadata": ["_ZNK5BNode8ReadAttrEPKcjlPvm", "_ZN5BNode9WriteAttrEPKcjlPKvm",
+                       "_ZN6BEntry6MoveToEP10BDirectoryPKcb"],
     "recovery-inventory": ["lstat", "access"],
     "copy-crash-recovery": ["openat", "renameat", "unlinkat", "fsync"],
     "message-store-faults": ["mkstemp", "write", "close", "fsync", "renameat"],

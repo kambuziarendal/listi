@@ -431,7 +431,8 @@ Archive and network drops remain copy-only.
 choose **Convert here**, select a format and confirm **Convert**. The choices
 depend on the image and the installed Haiku translators. Listi creates a new
 file in the receiving folder and won't replace the original or an existing
-output file.
+output file. The new file grants no broader permissions than the source image
+and the process creation mask allow.
 
 **Bulk rename:** Select two or more entries in one local
 folder and choose **Files > Bulk rename...**. Enter a prefix, suffix, case-sensitive replacement or sequence number, then
@@ -635,7 +636,11 @@ For a panel Copy, Rename, Move or Delete of a network entry, Listi rechecks the 
 the size, timestamp and provider identity that the selected row actually
 supplied. With no stable server ID, a replacement with matching metadata
 may be indistinguishable. This check does not lock out changes between the
-last lookup and the server operation. Direct FTP/FTPS Rename and Move are
+last lookup and the server operation. Panel transfers retain the destination
+identity from the displayed listing through queuing. Recursive Delete rechecks
+the enclosing directories after listing and before removal. The server removes
+by path, not by identity: a receipt confirms the request, not that a concurrent
+replacement was impossible. Direct FTP/FTPS Rename and Move are
 refused because those protocols cannot safely preserve a competing target.
 
 For SFTP, open **Connect** and enter the address and username. Under **Advanced**,
@@ -768,8 +773,13 @@ its path and never removes or overwrites an existing destination. Inspect an
 interrupted folder's BFS attributes (for example, with
 `catattr Listi:RestoreIncomplete /path/to/copy`). Listi writes this marker
 before restoring any contents and clears it only after the copy has been
-flushed and the restored names still match their recorded objects. A moved
-or replaced subtree leaves the copy marked incomplete. If the point already has that attribute, Listi uses the first unused
+flushed and the restored names still match their recorded objects. On local
+BFS, Listi also compares each regular file's final size, mode, modification
+time and status-change time with the revision recorded after writing it.
+When those timestamps are coarse or coincide, it rereads that file and
+checks its saved SHA-256 digest. A moved subtree, an observed revision
+change, or a file that cannot be verified leaves the copy marked incomplete.
+These checks are not an atomic snapshot and cannot prevent a later edit. If the point already has that attribute, Listi uses the first unused
 numeric suffix instead. After a failure, restore to another new path; do not
 use a marked copy. If there is no room to write the marker or the process
 stops before it is written, only the empty destination may remain.

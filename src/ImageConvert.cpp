@@ -412,7 +412,8 @@ Result RunImageConversion(const Job &job, const Hooks &hooks) {
     auto destination = Join(job.destination, leaf);
     // BFS cannot publish a staged file with hard links or atomic no-replace
     // rename. Reserve the final leaf exclusively, then copy the staged bytes.
-    SaveExclusiveFile(folder.value, leaf, 0666, [&](int fd) {
+    const mode_t outputMode = source.snapshot.st_mode & 0666;
+    SaveExclusiveFile(folder.value, leaf, outputMode, [&](int fd) {
       std::array<char, 64 * 1024> buffer;
       for (off_t offset = 0; offset < encoded.Length();) {
         Check(hooks);

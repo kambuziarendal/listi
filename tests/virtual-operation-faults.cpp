@@ -69,6 +69,7 @@ bool corruptUpload = false, denyReadback = false, cancelReadback = false;
 bool cancelAtReadyCheck = false, cancelAfterStore = false, hideStoredPart = false;
 bool uncertainRollback = false, replaceStageOnRead = false;
 std::string changeIdentityOnRead, tightenOnRead, downgradeListing;
+std::string changedAfterList, changedAfterRemove;
 std::string lostRemoval, unreadableLookup, lostMove, swapDuringMove;
 bool moveBeforeLoss = false, loseMoveLookup = false;
 unsigned lostMoveRequests = 0;
@@ -193,6 +194,8 @@ std::vector<FileEntry> ListNetwork(const Location &l, const TransferControl &c,
       out.push_back(entry);
     }
   }
+  if (l.URL() == changedAfterList)
+    files.at(changedAfterList).identity = "new-folder";
   listingRows[l.URL()] += out.size();
   return out;
 }
@@ -262,6 +265,8 @@ void ChangeNetwork(const Location &l, const char *action,
         (suffix(source, ".previous") && failBackupCleanup))
       throw std::runtime_error("injected cleanup failure");
     files.erase(source);
+    if (ParentLocation(source) == changedAfterRemove)
+      files.at(changedAfterRemove).identity = "new-folder";
     if (source == lostRemoval) {
       if (loseLookupAfterRemoval)
         unreadableLookup = source;
@@ -319,6 +324,8 @@ int main() {
     changeIdentityOnRead.clear();
     tightenOnRead.clear();
     unreadableLookup.clear();
+    changedAfterList.clear();
+    changedAfterRemove.clear();
     lostRemoval.clear();
     lostMove.clear();
     swapDuringMove.clear();
@@ -1078,6 +1085,23 @@ int main() {
       StatFile(path, move.expectedRemoteSources[path]);
     return move;
   };
+  for (auto action : {Action::Move, Action::Copy}) {
+    reset();
+    auto pending = moveSelection();
+    pending.action = action;
+    pending.sources = {action == Action::Move ? firstMove : source};
+    pending.displayedRemoteDestination = "previous-view";
+    const auto output = ChildLocation(serverOut, LocationLeaf(pending.sources.front()));
+    r = RunVirtual(pending, hooks);
+    check(r.completed == 0 && errorHas(r, "destination folder changed") &&
+              files.at(firstMove).data == "one" && !files.count(output),
+          "stale queued destination is refused before the first transfer");
+    pending.displayedRemoteDestination = files.at(serverOut).identity;
+    r = RunVirtual(pending, hooks);
+    check(r.completed == 1 && r.errors.empty() &&
+              files.at(output).data == (action == Action::Move ? "one" : "new contents"),
+          "new selection of the refreshed target can be transferred normally");
+  }
   for (bool swap : {false, true}) {
     reset();
     auto move = moveSelection();
@@ -1309,6 +1333,33 @@ int main() {
             !files.count(tree) && r.outcomes.size() == 2 &&
             r.outcomes.back().source == tree && r.outcomes.back().status == "deleted",
         "completed network deletion reports each acknowledged removal");
+  for (bool nested : {false, true}) {
+    for (bool afterChild : {false, true}) {
+      reset();
+      const std::string selectedTree = "smb://fixture/in/tree";
+      const auto folder = nested ? selectedTree + "/branch" : selectedTree;
+      const auto child = folder + "/item";
+      files[selectedTree] = {"", 1, 0, true, "tree"};
+      files[folder] = {"", 1, 0, true, "folder"};
+      files[child] = {"bytes"};
+      Job remove{Action::Delete, {selectedTree}, ""};
+      StatFile(selectedTree, remove.expectedRemoteSources[selectedTree]);
+      (afterChild ? changedAfterRemove : changedAfterList) = folder;
+      r = RunVirtual(remove, hooks);
+      check(!r.completed && errorHas(r, "Folder changed during deletion") &&
+                files.count(selectedTree) && files.at(folder).identity == "new-folder" &&
+                (afterChild ? !files.count(child) && r.partialDeletions == 1 &&
+                              r.outcomes.front().source == child && r.outcomes.front().status == "deleted"
+                            : files.at(child).data == "bytes" && r.outcomes.empty()),
+            "recursive delete refuses an identity mismatch at listing or final removal");
+      changedAfterList.clear();
+      changedAfterRemove.clear();
+      StatFile(selectedTree, remove.expectedRemoteSources[selectedTree]);
+      r = RunVirtual(remove, hooks);
+      check(r.completed == 1 && r.errors.empty() && !files.count(selectedTree) && !files.count(child),
+            "newly selected network folder can be removed after reloading");
+    }
+  }
   for (bool firstLost : {false, true}) {
     for (bool unknown : {false, true}) {
       reset();

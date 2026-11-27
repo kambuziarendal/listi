@@ -263,7 +263,12 @@ struct Runner {
       Outcome(parent).status = "partial";
     }
   }
-  using DirectoryStack = std::vector<std::pair<std::string, struct stat>>;
+  struct CopyDirectory {
+    std::string source, destination;
+    struct stat original, target;
+    int expandedDirectory = -1;
+  };
+  using DirectoryStack = std::vector<CopyDirectory>;
   DirectoryStack copyDirectories;
   // The active stack protects ancestors; claims also survive returning from
   // a sibling or starting the next selected root.
@@ -311,15 +316,36 @@ struct Runner {
     return {};
   }
   void GuardDirectories() const {
-    for (const auto &[path, expected] : copyDirectories) {
+    for (const auto &directory : copyDirectories) {
       struct stat now;
-      if (lstat(path.c_str(), &now) || !S_ISDIR(now.st_mode) ||
-          now.st_dev != expected.st_dev || now.st_ino != expected.st_ino)
-        throw std::runtime_error(path + ": destination folder changed during copy");
+      if (lstat(directory.destination.c_str(), &now) || !S_ISDIR(now.st_mode) ||
+          Key(now) != Key(directory.target))
+        throw std::runtime_error(directory.destination + ": destination folder changed during copy");
+    }
+  }
+  void GuardSourceDirectories() {
+    for (const auto &directory : copyDirectories) {
+      struct stat now;
+      if (lstat(directory.source.c_str(), &now) == 0 && SameEntry(directory.original, now))
+        continue;
+      const auto reason = directory.source + ": source folder changed during copy";
+      // Only the innermost new folder can have received its final mode.
+      // Restrict that same open inode, never a replacement or a merge target.
+      const auto &current = copyDirectories.back();
+      if (current.expandedDirectory >= 0) {
+        struct stat mode;
+        if (fstat(current.expandedDirectory, &mode) ||
+            fchmod(current.expandedDirectory, mode.st_mode & 0700) ||
+            fstat(current.expandedDirectory, &mode) || (mode.st_mode & 0077))
+          throw std::runtime_error(reason + "; could not confirm private access on " +
+                                   current.destination + ". Check its permissions.");
+      }
+      throw std::runtime_error(reason);
     }
   }
   void Guard() {
     GuardDirectories();
+    GuardSourceDirectories();
     if (!guardedJob)
       return;
     ArchiveJobChecks::VerifyArchiveSets(*guardedJob);
@@ -913,6 +939,7 @@ struct Runner {
     if (!StagingSpaceAvailable(parent, staged.st_size))
       Fail(dst);
     parentDirectory.Verify();
+    GuardSourceDirectories();
     FD final(openat(parent, Leaf(dst).c_str(), O_RDWR | O_CREAT | O_EXCL |
                     O_NOFOLLOW | O_CLOEXEC, 0600));
     if (final.n < 0) {
@@ -953,6 +980,7 @@ struct Runner {
       }
     } else {
       CopyBytes(input.n, final.n, tmp, dst, false);
+      GuardSourceDirectories();
       SetCopyMode(final.n, staged.st_mode, staged.st_dev, dst);
       SyncCopiedFile(final.n, staged, dst, ntfsTarget);
       if (close(std::exchange(final.n, -1)))
@@ -1071,7 +1099,7 @@ struct Runner {
       const bool ntfsDirectory = NtfsCopy(before.st_dev);
       const bool ntfsParent = NtfsCopy(parentIdentity.st_dev);
       directoryClaims.emplace(Key(before), src);
-      copyDirectories.emplace_back(dst, before);
+      copyDirectories.push_back({src, dst, st, before});
       struct DirectoryScope {
         DirectoryStack &stack;
         ~DirectoryScope() { stack.pop_back(); }
@@ -1096,14 +1124,20 @@ struct Runner {
         if (!Copy(Join(src, e->d_name), childDestination, depth + 1))
           complete = false;
       }
+      Tick(src);
       Guard();
       if (!existed) {
         SetMoveOwner(directory.Descriptor(), st, dst);
         const bool useSourceMode =
             OrdinaryAttributes(src, dst, dirfd(dir.get()), directory.Descriptor(),
                                st.st_dev, before.st_dev);
-        if (useSourceMode && !SetCopyMode(directory.Descriptor(), st.st_mode, before.st_dev, dst))
-          PermissionNotice(src);
+        GuardSourceDirectories();
+        if (useSourceMode) {
+          if (!SetCopyMode(directory.Descriptor(), st.st_mode, before.st_dev, dst))
+            PermissionNotice(src);
+          else if (st.st_mode & 0077)
+            copyDirectories.back().expandedDirectory = directory.Descriptor();
+        }
         struct timespec times[2] = {st.st_atim, st.st_mtim};
         if (futimens(directory.Descriptor(), times))
           Fail(dst);
@@ -1112,7 +1146,6 @@ struct Runner {
       if (lstat(dst.c_str(), &expected))
         Fail(dst);
       VerifyMoveMetadata(st, expected, dst);
-      Tick(src);
       Guard();
       parent.Verify();
       try {
@@ -1122,7 +1155,6 @@ struct Runner {
         if (!flushed || !parentFlushed)
           DurabilityNotice(src);
         directory.Verify();
-        Guard();
       } catch (const Cancelled &) {
         auto &row = Outcome(src, dst);
         row.status = "published-flush-failed";
@@ -1132,12 +1164,9 @@ struct Runner {
         Outcome(src, dst).status = "published-flush-failed";
         throw;
       }
-      if (complete) {
-        struct stat current;
-        if (lstat(src.c_str(), &current) || !SameEntry(st, current))
-          throw std::runtime_error(src + ": source folder changed during copy");
+      Guard();
+      if (complete)
         Done(src, dst, expected);
-      }
       return complete;
     }
     if (!S_ISREG(st.st_mode) && !S_ISLNK(st.st_mode))
@@ -1315,7 +1344,9 @@ struct Runner {
           if (fstat(in.n, &after) || !SameEntry(after, st))
             throw std::runtime_error(src + ": source changed while copying");
           SetMoveOwner(out.n, st, tmp);
-          if (copyAttributes() && !SetCopyMode(out.n, st.st_mode, stagingIdentity.st_dev, tmp))
+          const bool useSourceMode = copyAttributes();
+          GuardSourceDirectories();
+          if (useSourceMode && !SetCopyMode(out.n, st.st_mode, stagingIdentity.st_dev, tmp))
             PermissionNotice(src);
           CheckDestinationDevice(stagingIdentity.st_dev);
           SyncCopiedFile(out.n, st, tmp, ntfsTarget);
@@ -1361,6 +1392,7 @@ struct Runner {
           throw std::runtime_error(dst + ": destination changed during operation; left untouched");
         if (h.checkOverwrite)
           h.checkOverwrite(dst, currentTarget);
+        GuardSourceDirectories();
         if (renameat(parent, leaf.c_str(), parent, target.c_str()))
           Fail(dst);
       } else {

@@ -111,6 +111,15 @@ try{
  symlink("missing-target",(a+"/link").c_str());job=PrepareFileDrop(MakeFileDrag({a+"/link"}),b);result=Run(job,{});struct stat st;Check(result.completed==1 && lstat((b+"/link").c_str(),&st)==0 && S_ISLNK(st.st_mode),"broken symlink copied without following it");
  auto remote=MakeFileDrag({"sftp://example.invalid/file"});job=PrepareFileDrop(remote,b);Check(job.sources.size()==1 && job.expectedSources.empty() && job.action==Action::Copy,"virtual provider drop remains copy-only without network access");
  PaneModel networkPanel;
+ const std::string displayed = "smb://example.invalid/share";
+ networkPanel.remoteFolderPath = displayed;
+ networkPanel.remoteFolderId = "displayed-id";
+ Job pending{Action::Copy, {f}, displayed};
+ networkPanel.BindRemoteView(pending, displayed);
+ networkPanel.Clear();
+ Check(pending.displayedRemoteDestination == "displayed-id" &&
+       Reject([&]{networkPanel.BindRemoteView(pending, displayed);}),
+       "prepared network destination survives a panel refresh, incomplete new view cannot enqueue");
  auto row = std::make_unique<PaneEntry>();
  row->path = "sftp://example.invalid/selected";
  row->name = "selected";

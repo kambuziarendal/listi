@@ -736,6 +736,10 @@ void MillerColumns::MessageReceived(BMessage *message) {
   }
   const bool deliveryFailed = state->delivery->failedSerial.load() == serial;
   if (message->what == kScanDone || deliveryFailed) {
+    if (message->HasString("remoteFolderId")) {
+      state->incoming.remoteFolderPath = rows->location;
+      state->incoming.remoteFolderId = message->GetString("remoteFolderId", "");
+    }
     state->incoming.archiveVersion = message->GetString("archiveVersion", "");
     const bool missingVersion = Listi::ParseLocation(rows->location).Archive() &&
                                 state->incoming.archiveVersion.empty();

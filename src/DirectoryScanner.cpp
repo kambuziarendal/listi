@@ -303,9 +303,31 @@ public:
         }
         if (Listi::InterruptedVolumes().ContainsResolved(path.String()))
           throw std::runtime_error(Listi::kUnavailableVolumeText);
+        // A path-only listing must not be attributed to a different directory
+        // at completion. Keep browsing possible when the parent cannot be probed,
+        // but don't offer that unverified view as a transfer destination.
+        Listi::FileEntry before;
+        bool identified = false;
+        if (!location.Archive()) {
+          try {
+            identified = Listi::StatFile(path.String(), before, control) && before.directory && !before.link;
+          } catch (const Listi::Cancelled &) {
+            throw;
+          } catch (const std::exception &) {}
+        }
         std::string fingerprint;
         auto entries = location.Archive() ? Listi::ListArchiveView(location, control, fingerprint)
                                           : Listi::ListFiles(path.String(), control);
+        if (identified) {
+          if (!before.providerIdentity.empty()) {
+            Listi::FileEntry after;
+            if (!Listi::StatFile(path.String(), after, control) || !after.directory || after.link ||
+                before.providerIdentity != after.providerIdentity)
+              throw std::runtime_error("Network folder changed during listing. Reload it.");
+          }
+          if (done.AddString("remoteFolderId", before.providerIdentity.c_str()) != B_OK)
+            throw std::runtime_error("Cannot retain the displayed network folder identity.");
+        }
         if (location.Archive() && (fingerprint.empty() ||
             done.AddString("archiveVersion", fingerprint.c_str()) != B_OK))
           throw std::runtime_error("Cannot identify the listed archive. Reload and select again.");

@@ -100,6 +100,8 @@ BMessage EncodeJob(const Job &job, uint32 what) {
   }
   RequireJobField(m.AddString("entryName", job.entryName.c_str()));
   RequireJobField(m.AddString("destination", job.destination.c_str()));
+  if (job.displayedRemoteDestination)
+    RequireJobField(m.AddString("remoteDestinationId", job.displayedRemoteDestination->c_str()));
   RequireJobField(m.AddString("destinationFolder", job.destinationFolder.c_str()));
   RequireJobField(m.AddInt32("destinationDevice", job.expectedDestination.device));
   RequireJobField(m.AddInt64("destinationNode", job.expectedDestination.inode));
@@ -163,6 +165,11 @@ Job DecodeJob(const BMessage &m) {
   job.archivePath = m.GetString("archivePath", "");
   job.entryName = m.GetString("entryName", "");
   job.destination = m.GetString("destination", "");
+  if (FieldCount(m, "remoteDestinationId", B_STRING_TYPE)) {
+    const char *id;
+    RequireSnapshot(m.FindString("remoteDestinationId", &id) == B_OK);
+    job.displayedRemoteDestination = id;
+  }
   job.destinationFolder = m.GetString("destinationFolder", "");
   job.expectedDestination = {m.GetInt32("destinationDevice", -1),
                              m.GetInt64("destinationNode", -1)};

@@ -45,6 +45,8 @@ class PaneModel {
 public:
   void Clear();
   std::string archiveVersion; // Set only on complete directory scan, never per member.
+  std::string remoteFolderPath, remoteFolderId;
+  void BindRemoteView(Listi::Job &, const std::string &destination) const;
   void BindArchiveView(Listi::Job &, const std::string &location) const;
   bool MatchesSnapshot(const std::vector<std::unique_ptr<PaneEntry>> &) const;
   void Add(std::unique_ptr<PaneEntry> entry);

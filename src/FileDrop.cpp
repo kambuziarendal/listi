@@ -101,11 +101,15 @@ void PostPaneFileDrop(Pane &pane, const PaneModel &receiver, const BMessage &dra
   try {
     Job view;
     receiver.BindArchiveView(view, destination);
+    receiver.BindRemoteView(view, destination);
     BMessage drop(drag);
     drop.what = kDrop;
     // Destination fields belong to the receiver, never the drag source.
     drop.RemoveName("destination");
     drop.RemoveName(kDestinationVersion);
+    drop.RemoveName("listi:remote-destination-id");
+    if (view.displayedRemoteDestination)
+      Require(drop.AddString("listi:remote-destination-id", view.displayedRemoteDestination->c_str()));
     Require(drop.AddString("destination", destination.c_str()));
     if (!view.expectedArchiveSets.empty())
       Require(drop.AddString(kDestinationVersion, receiver.archiveVersion.c_str()));
@@ -166,6 +170,11 @@ Job PrepareFileDrop(const BMessage &message, const std::string &destination,
     }
   }
   const auto target = ParseLocation(destination);
+  if (!target.Local() && !target.Archive() && message.what == kDrop) {
+    const char *id;
+    Require(message.FindString("listi:remote-destination-id", &id));
+    job.displayedRemoteDestination = id;
+  }
   if (target.Archive() && message.what == kDrop) {
     const auto shown = message.GetString(kDestinationVersion, "");
     if (!shown[0] ||

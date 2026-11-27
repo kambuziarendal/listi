@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 #include "FileOperation.h"
 #include "VirtualFile.h"
+#include "JobSnapshot.h"
+#include "TransferCommand.h"
 #include <algorithm>
 #include <cstdlib>
 #include <fstream>
@@ -278,11 +280,28 @@ int VirtualTest(const std::string &fixtures, const std::string &hosts) {
         for (const auto &source : move.sources)
           if (!StatFile(source, move.expectedRemoteSources[source]))
             throw std::runtime_error("Could not capture the selected SMB file");
+        FileEntry shown;
+        if (!StatFile(target, shown) || !shown.directory)
+          throw std::runtime_error("Could not capture the displayed SMB target");
+        move.displayedRemoteDestination = shown.providerIdentity;
         if (getenv("LISTI_TEST_SMB_REVISION")) {
           // The fixture returns a different folder ID after this signal.
           // No real folder is replaced and neither input holds user data.
           Hooks changed = hooks;
           const auto signal = ChildLocation(target, "revision-signal");
+          auto copy = Job{Action::Copy, {local}, target};
+          copy.displayedRemoteDestination = shown.providerIdentity;
+          const auto queuedCopy = EncodeJob(PrepareTransfer(copy), 'test');
+          const auto queuedMove = EncodeJob(PrepareTransfer(move), 'test');
+          MakeFolder(signal);
+          const auto refusedCopy = Run(DecodeJob(queuedCopy), hooks);
+          const auto refusedMove = Run(DecodeJob(queuedMove), hooks);
+          check(!refusedCopy.completed && !refusedCopy.errors.empty() &&
+                    !refusedMove.completed && !refusedMove.errors.empty() &&
+                    contents(renamed) == "replacement\n" && contents(second) == "replacement\n" &&
+                    ListFiles(target).size() == 1 && !StatFile(ChildLocation(target, LocationLeaf(local)), stat),
+                "SMB copy and move retain queued folder identity before first transfer");
+          RemoveFile(signal, true);
           changed.fileDone = [&](const auto &from, const auto &) {
             if (from == renamed)
               MakeFolder(signal);

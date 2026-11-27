@@ -20,7 +20,7 @@ namespace fs=std::filesystem;
 using Listi::HistoryStore;
 namespace {
 std::atomic_bool *cancelAfterWrite = nullptr;
-fs::path subtreeToMove, movedSubtree;
+fs::path subtreeToMove, movedSubtree, fileToEdit;
 const struct stat *oversizedFixture = nullptr;
 bigtime_t historyClock = 0;
 const char *failItem = nullptr;
@@ -58,6 +58,12 @@ extern "C" ssize_t __wrap_write(int fd, const void *bytes, size_t count) {
     fs::rename(subtreeToMove, movedSubtree);
     fs::create_directory(subtreeToMove);
     subtreeToMove.clear();
+  }
+  if (!fileToEdit.empty() && written > 0 && fs::exists(fileToEdit) &&
+      fs::exists(fileToEdit.parent_path().parent_path()/"same")) {
+    const int prior = open(fileToEdit.c_str(), O_WRONLY);
+    assert(prior >= 0 && __real_write(prior, "modified", 8) == 8 && close(prior) == 0);
+    fileToEdit.clear();
   }
   if (cancelAfterWrite && written > 0) {
     *cancelAfterWrite = true;
@@ -295,6 +301,14 @@ int main() {
   std::ifstream(movedSubtree/"note") >> movedBytes;
   assert(movedBytes == "original" && fs::exists(swapped/"same"));
   checkAttr(swapped, "Listi:RestoreIncomplete-1", B_STRING_TYPE, incomplete, sizeof(incomplete));
+  const auto changedCopy = base/"edited-copy";
+  fileToEdit = changedCopy/"dir/note";
+  reject([&]{ history.Restore(first, changedCopy, cancel); },
+         "completed file revision changed on BFS", "Restored entry changed: note");
+  std::string changedBytes;
+  std::ifstream(changedCopy/"dir/note") >> changedBytes;
+  assert(fileToEdit.empty() && changedBytes == "modified" && fs::exists(changedCopy/"same"));
+  checkAttr(changedCopy, "Listi:RestoreIncomplete-1", B_STRING_TYPE, incomplete, sizeof(incomplete));
   history.Restore(first, base/"swap-recovery", cancel);
   std::string recoveredBytes;
   std::ifstream(base/"swap-recovery/dir/note") >> recoveredBytes;

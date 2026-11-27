@@ -505,6 +505,75 @@ void TestDirectoryClaims(const fs::path &root, const fs::path &out) {
   }
   fs::remove_all(source);
 }
+void TestFolderCopyAccess(const fs::path &root, const fs::path &out) {
+  for (const bool merge : {false, true}) {
+    const auto source = root / "copy-access", target = out / "copy-access";
+    fs::create_directory(source);
+    if (chmod(source.c_str(), 0755))
+      throw std::runtime_error("Cannot set source mode");
+    for (const auto name : {"one", "two"})
+      std::ofstream(source / name) << name;
+    if (merge) {
+      fs::create_directory(target);
+      if (chmod(target.c_str(), 0755))
+        throw std::runtime_error("Cannot set target mode");
+      std::ofstream(target / "keep") << "untouched";
+    }
+    std::string delivered;
+    Hooks hooks;
+    hooks.fileDone = [&](const std::string &from, const std::string &) {
+      if (delivered.empty() && fs::path(from).parent_path() == source) {
+        delivered = fs::path(from).filename().string();
+        if (chmod(source.c_str(), 0700))
+          throw std::runtime_error("Cannot update source mode");
+      }
+    };
+    const Job copy{Action::Copy, {source.string()}, out.string()};
+    const auto partial = Run(copy, hooks);
+    const auto other = delivered == "one" ? "two" : "one";
+    struct stat mode{};
+    Check(!delivered.empty() && !partial.completed && !partial.errors.empty() &&
+          Has(partial, source, target, "partial", "source folder changed") &&
+          Has(partial, source / delivered, target / delivered, "copied") &&
+          Read(target / delivered) == delivered && !fs::exists(target / other) &&
+          !stat(target.c_str(), &mode) && (mode.st_mode & 0777) == (merge ? 0755 : 0700),
+          "local folder copy stops after a source access change; prior delivery and mode agree");
+    Hooks retry;
+    retry.conflict = [](const auto &) { return Decision::Replace; };
+    const auto again = Run(copy, retry);
+    Check(merge ? (!again.completed && !again.errors.empty() && !fs::exists(target / other) &&
+                   Read(target / "keep") == "untouched")
+                : (again.completed == 1 && again.errors.empty() && Read(target / other) == other),
+          "retry merges only into a compatible destination folder");
+    Check(Read(source / "one") == "one" && Read(source / "two") == "two" &&
+          !stat(target.c_str(), &mode) && (mode.st_mode & 0777) == (merge ? 0755 : 0700),
+          "source files and unrelated target access are untouched");
+    fs::remove_all(source);
+    fs::remove_all(target);
+  }
+  const auto source = root / "final-access", target = out / "final-access";
+  fs::create_directory(source);
+  if (chmod(source.c_str(), 0755))
+    throw std::runtime_error("Cannot set final access fixture");
+  bool restricted = false;
+  Hooks finishing;
+  finishing.proceed = [&] {
+    struct stat mode{};
+    if (!restricted && !stat(target.c_str(), &mode) && (mode.st_mode & 0777) == 0755) {
+      if (chmod(source.c_str(), 0700))
+        throw std::runtime_error("Cannot change source at finalization");
+      restricted = true;
+    }
+    return true;
+  };
+  const auto partial = Run({Action::Copy, {source.string()}, out.string()}, finishing);
+  struct stat mode{};
+  Check(restricted && !partial.completed && Has(partial, source, target, "partial", "source folder changed") &&
+        !stat(target.c_str(), &mode) && (mode.st_mode & 0777) == 0700,
+        "new folder is private again after a late source change during its final flush");
+  fs::remove_all(source);
+  fs::remove_all(target);
+}
 void TestMovePermissions(const fs::path &root, const fs::path &out) {
   const auto source = root / "permissions", destination = out / "permissions";
   for (bool nested : {false, true}) {
@@ -614,6 +683,7 @@ int main() {
   TestClaimedKeepBoth(root);
   TestDirectoryClaims(root, out);
   TestMovePermissions(root, out);
+  TestFolderCopyAccess(root, out);
   TestNameFlush(root, out);
   {
     const auto inputs = root / "skip-inputs", outputs = root / "skip-outputs";

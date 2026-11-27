@@ -92,6 +92,9 @@ struct Job {
   std::map<std::string, RestoreTarget> restoreTargets;
   // Metadata from the selected pane row, not a later lookup at the same URL.
   std::map<std::string, FileEntry> expectedRemoteSources;
+  // Identity of the displayed network destination. An empty identity denotes
+  // a provider without stable IDs; older or non-panel jobs have no snapshot.
+  std::optional<std::string> displayedRemoteDestination;
   // Other half of a mixed Tracker paste. Both jobs are queued in-process.
   std::map<std::string, NodeIdentity> siblingPasteSources;
 };

@@ -9,9 +9,11 @@
 #include <Path.h>
 #include <String.h>
 #include <Volume.h>
+#include <fs_attr.h>
 #include <fs_info.h>
 #include <cerrno>
 #include <cstring>
+#include <optional>
 #include <stdexcept>
 #include <sys/stat.h>
 
@@ -93,6 +95,37 @@ void CheckIdentity(BEntry &entry, const NodeIdentity &expected) {
   if (actual.device != expected.device || actual.node != expected.inode)
     throw std::runtime_error("Selected entry changed; operation stopped.");
 }
+
+struct RestoreAttribute {
+  type_code type;
+  std::string bytes;
+};
+
+// Preserve the actual bytes, not a BString interpretation of a possibly
+// noncanonical Tracker attribute. Only a confirmed missing key means absence.
+std::optional<RestoreAttribute> ReadRestoreAttribute(BNode &node,
+                                                     const std::string &path) {
+  attr_info info;
+  status_t status = node.GetAttrInfo(kOriginalPath, &info);
+  if (status == B_ENTRY_NOT_FOUND)
+    return std::nullopt;
+  Require(status, path + " (reading previous Trash restore path)");
+  if (info.size <= 0 || info.size > B_PATH_NAME_LENGTH)
+    throw std::runtime_error(path + ": unexpected Trash restore path size; left unchanged.");
+  RestoreAttribute attribute{info.type, std::string(info.size, '\0')};
+  if (node.ReadAttr(kOriginalPath, info.type, 0, attribute.bytes.data(),
+                    attribute.bytes.size()) != info.size)
+    throw std::runtime_error(path + ": could not read the entire previous Trash restore path; left unchanged.");
+  return attribute;
+}
+
+status_t WriteRestoreAttribute(BNode &node, type_code type,
+                               const char *bytes, size_t size) {
+  const auto written = node.WriteAttr(kOriginalPath, type, 0, bytes, size);
+  if (written < 0)
+    return written;
+  return size_t(written) == size ? B_OK : B_IO_ERROR;
+}
 }
 void CheckTrashSource(const std::string &path, const NodeIdentity *expected,
                       bool create) {
@@ -129,39 +162,33 @@ std::string MoveToTrash(const std::string &path, const NodeIdentity *expected) {
   if (expected && (identity.device != expected->device ||
                    identity.node != expected->inode))
     throw std::runtime_error(original + ": source changed; not moved to Trash.");
-  BString previous;
-  bool hadPrevious = node.ReadAttrString(kOriginalPath, &previous) == B_OK;
-  BString saved(original.c_str());
+  const auto previous = ReadRestoreAttribute(node, original);
   CheckTrashLinks(node, original);
-  Require(node.WriteAttrString(kOriginalPath, &saved), original);
-  // MoveTo(false) checks for a conflict before renaming. Haiku does not
-  // provide an atomic no-replace or identity-conditional rename.
-  auto restoreMetadata = [&] {
-    if (hadPrevious)
-      node.WriteAttrString(kOriginalPath, &previous);
-    else
-      node.RemoveAttr(kOriginalPath);
-  };
   std::string name;
-  status_t status = B_FILE_EXISTS;
-  for (unsigned n = 0; n < 10000 && status == B_FILE_EXISTS; n++) {
-    name = n == 0 ? Leaf(original)
-                              : Leaf(original) + " (" + std::to_string(n) + ")";
-    if (name.size() >= B_FILE_NAME_LENGTH)
-      name =
-          "trashed-" + std::to_string(identity.node) + "-" + std::to_string(n);
-    try {
+  try {
+    Require(WriteRestoreAttribute(node, B_STRING_TYPE, original.c_str(),
+                                  original.size() + 1), original + " (saving Trash restore path)");
+    // MoveTo(false) checks for a conflict before renaming. Haiku does not
+    // provide an atomic no-replace or identity-conditional rename.
+    status_t status = B_FILE_EXISTS;
+    for (unsigned n = 0; n < 10000 && status == B_FILE_EXISTS; n++) {
+      name = n == 0 ? Leaf(original) : Leaf(original) + " (" + std::to_string(n) + ")";
+      if (name.size() >= B_FILE_NAME_LENGTH)
+        name = "trashed-" + std::to_string(identity.node) + "-" + std::to_string(n);
       if (expected)
         CheckIdentity(entry, *expected);
-    } catch (...) {
-      restoreMetadata();
-      throw;
+      status = entry.MoveTo(&directory, name.c_str(), false);
     }
-    status = entry.MoveTo(&directory, name.c_str(), false);
-  }
-  if (status != B_OK) {
-    restoreMetadata();
     Require(status, original);
+  } catch (const std::exception &failure) {
+    const status_t restored = previous
+        ? WriteRestoreAttribute(node, previous->type, previous->bytes.data(), previous->bytes.size())
+        : node.RemoveAttr(kOriginalPath);
+    if (restored != B_OK && (previous || restored != B_ENTRY_NOT_FOUND))
+      throw std::runtime_error(std::string(failure.what()) +
+          "; could not restore the previous Tracker restore path: " + strerror(restored) +
+          ". Trash metadata may have changed.");
+    throw;
   }
   if (expected)
     CheckIdentity(entry, *expected);

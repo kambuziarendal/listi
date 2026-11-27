@@ -43,6 +43,15 @@ int main() {
     check(accepted && accepted->sources.front() == src && accepted->destination == dst,
           "a valid confirmation carries its original paths");
 
+    Listi::Job network{Listi::Action::Copy, {src}, "smb://fixture/share"};
+    Listi::FreezeLocalJob(network);
+    for (const char *id : {"first-view", ""}) {
+      network.displayedRemoteDestination = id;
+      const auto queued = Listi::DecodeSubmittedJob(Listi::EncodeJob(network, 'test'), {Listi::Action::Copy});
+      check(queued && queued->displayedRemoteDestination == network.displayedRemoteDestination,
+            "confirmed network transfer retains the displayed destination identity");
+    }
+
     const auto second = base + "/second";
     std::ofstream(second) << "second";
     std::ofstream(dst + "/keep") << "untouched";

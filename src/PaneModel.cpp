@@ -80,7 +80,17 @@ void PaneModel::BindArchiveView(Listi::Job &job, const std::string &location) co
       job.expectedArchiveSets.emplace(from.archive, archiveVersion).first->second != archiveVersion)
     throw std::runtime_error("Archive view is incomplete or changed. Reload and select again.");
 }
+void PaneModel::BindRemoteView(Listi::Job &job, const std::string &destination) const {
+  const auto location = Listi::ParseLocation(destination);
+  if (location.Local() || location.Archive())
+    return;
+  if (destination != remoteFolderPath)
+    throw std::runtime_error("Network destination not verified. Open the folder and reload it.");
+  job.displayedRemoteDestination = remoteFolderId;
+}
 void PaneModel::Clear() {
+  remoteFolderPath.clear();
+  remoteFolderId.clear();
   archiveVersion.clear();
   visible.clear();
   entries.clear();

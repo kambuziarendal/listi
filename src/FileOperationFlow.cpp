@@ -289,7 +289,8 @@ void FileOperationFlow::BeginOperation(Action action, const Pane &source,
       PostMainWindowNotice("Open a folder first.");
       return;
     }
-    if (create && !IsVirtual(job.destination))
+    if ((create && !IsVirtual(job.destination)) ||
+        (IsVirtual(job.destination) && !ParseLocation(job.destination).Archive()))
       source.BindTransferDestination(job);
     FreezeLocalJob(job, job.destination);
     if (ParseLocation(job.destination).Archive()) {
