@@ -378,6 +378,10 @@ int main() {
       source->Navigate(folder.c_str());
       Check(WaitForPane(window, source, folder) && !source->ExportModel().archiveVersion.empty() &&
                 source->MatchPattern("note.txt", true) == 1, "select displayed archive member");
+      // A preceding copy may have triggered a watched-folder reload. Finish
+      // it before swapping a source; these commands test the source, not the
+      // independent rejection of an incomplete local destination.
+      Check(WaitForPane(window, dest, out.string()), "local destination ready for stale source check");
     };
     auto rejectCommands = [&] {
       const auto openWindows = app.CountWindows();
@@ -416,9 +420,6 @@ int main() {
       source->ExportModel().BindArchiveView(shown, source->Path());
       PutFileClipboard(source->Selected(), false, &privateClip, {}, shown.expectedArchiveSets);
       const auto drag = MakePaneFileDrag(source->ExportModel());
-      // The preceding iteration wrote to this pane. Let its watched-folder
-      // reload finish before testing rejection of a stale *source*.
-      Check(WaitForPane(window, dest, out.string()), "local destination ready for stale source check");
       fs::rename(archive, held);
       fs::rename(fresh, archive);
       rejectCommands();
