@@ -36,6 +36,7 @@ public:
 
 private:
   void Wait(const TransferControl &, std::chrono::steady_clock::time_point);
+  void Handshake(const Location &, const Connection &, const TransferControl &);
   void Authenticate(Connection &, const TransferControl &);
   CURL *transport = nullptr;
   curl_socket_t socket = CURL_SOCKET_BAD;

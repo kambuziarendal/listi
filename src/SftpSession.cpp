@@ -28,26 +28,6 @@ struct DialControl {
   }
 };
 
-void VerifyHost(LIBSSH2_SESSION *ssh, const Location &location, const Connection &account) {
-  const auto path = account.knownHosts.empty() ? DefaultSshPath(SshFile::KnownHosts) : account.knownHosts;
-  std::unique_ptr<LIBSSH2_KNOWNHOSTS, decltype(&libssh2_knownhost_free)> hosts(
-      libssh2_knownhost_init(ssh), libssh2_knownhost_free);
-  size_t length = 0;
-  int type = LIBSSH2_HOSTKEY_TYPE_UNKNOWN;
-  const auto *key = libssh2_session_hostkey(ssh, &length, &type);
-  auto hostname = location.host;
-  if (hostname.size() > 2 && hostname.front() == '[' && hostname.back() == ']')
-    hostname = hostname.substr(1, hostname.size() - 2);
-  // The raw SSH key blob includes its algorithm. Check the actual key bytes,
-  // not just a hostname or a fingerprint printed for an operator.
-  if (!hosts || !key || !length || !ReadableSshFile(path) ||
-      libssh2_knownhost_readfile(hosts.get(), path.c_str(), LIBSSH2_KNOWNHOST_FILE_OPENSSH) <= 0 ||
-      libssh2_knownhost_checkp(hosts.get(), hostname.c_str(), location.port ? location.port : 22,
-          key, length, LIBSSH2_KNOWNHOST_TYPE_PLAIN | LIBSSH2_KNOWNHOST_KEYENC_RAW,
-          nullptr) != LIBSSH2_KNOWNHOST_CHECK_MATCH)
-    throw std::runtime_error("SSH host key is unknown or changed. Verify the server and its known_hosts file.");
-}
-
 void KeyboardPassword(const char *, int, const char *, int, int count,
                       const LIBSSH2_USERAUTH_KBDINT_PROMPT *prompts,
                       LIBSSH2_USERAUTH_KBDINT_RESPONSE *responses, void **abstract) {
@@ -58,6 +38,58 @@ void KeyboardPassword(const char *, int, const char *, int, int count,
   if (responses[0].text)
     responses[0].length = password.size();
 }
+}
+
+void SftpSession::Handshake(const Location &location, const Connection &account,
+                            const TransferControl &control) {
+  const auto path = account.knownHosts.empty() ? DefaultSshPath(SshFile::KnownHosts) : account.knownHosts;
+  std::unique_ptr<LIBSSH2_KNOWNHOSTS, decltype(&libssh2_knownhost_free)> hosts(
+      libssh2_knownhost_init(ssh), libssh2_knownhost_free);
+  auto hostname = location.host;
+  if (hostname.size() > 2 && hostname.front() == '[' && hostname.back() == ']')
+    hostname = hostname.substr(1, hostname.size() - 2);
+  const int port = location.port ? location.port : 22;
+  const char *untrusted = "SSH host key is unknown or changed. Verify the server and its known_hosts file.";
+  if (!hosts || !ReadableSshFile(path) ||
+      libssh2_knownhost_readfile(hosts.get(), path.c_str(), LIBSSH2_KNOWNHOST_FILE_OPENSSH) <= 0)
+    throw std::runtime_error(untrusted);
+
+  // A server may offer several keys while this route pins only one. Use the
+  // library's hostname/port (including hashed hostname) matching to find
+  // compatible key types before negotiation. A deliberately empty candidate
+  // produces MISMATCH only when the route has a key of that type.
+  const struct { int type; const char *methods; } keys[] = {
+    {LIBSSH2_KNOWNHOST_KEY_ED25519, "ssh-ed25519"},
+    {LIBSSH2_KNOWNHOST_KEY_ECDSA_256, "ecdsa-sha2-nistp256"},
+    {LIBSSH2_KNOWNHOST_KEY_ECDSA_384, "ecdsa-sha2-nistp384"},
+    {LIBSSH2_KNOWNHOST_KEY_ECDSA_521, "ecdsa-sha2-nistp521"},
+    {LIBSSH2_KNOWNHOST_KEY_SSHRSA, "rsa-sha2-512,rsa-sha2-256,ssh-rsa"},
+    {LIBSSH2_KNOWNHOST_KEY_SSHDSS, "ssh-dss"}
+  };
+  std::string methods;
+  for (const auto &key : keys) {
+    if (libssh2_knownhost_checkp(hosts.get(), hostname.c_str(), port, "", 0,
+        LIBSSH2_KNOWNHOST_TYPE_PLAIN | LIBSSH2_KNOWNHOST_KEYENC_BASE64 | key.type,
+        nullptr) == LIBSSH2_KNOWNHOST_CHECK_MISMATCH) {
+      if (!methods.empty())
+        methods += ',';
+      methods += key.methods;
+    }
+  }
+  if (methods.empty())
+    throw std::runtime_error(untrusted);
+  Require(libssh2_session_method_pref(ssh, LIBSSH2_METHOD_HOSTKEY, methods.c_str()),
+          "Select pinned SSH host key type");
+  Require(Request(control, [&] { return libssh2_session_handshake(ssh, socket); }), "SSH handshake");
+  size_t length = 0;
+  int type = LIBSSH2_HOSTKEY_TYPE_UNKNOWN;
+  const auto *key = libssh2_session_hostkey(ssh, &length, &type);
+  // The raw SSH key blob contains its type. Only a full key match authorizes login.
+  if (!key || !length || type == LIBSSH2_HOSTKEY_TYPE_UNKNOWN ||
+      libssh2_knownhost_checkp(hosts.get(), hostname.c_str(), port, key, length,
+          LIBSSH2_KNOWNHOST_TYPE_PLAIN | LIBSSH2_KNOWNHOST_KEYENC_RAW, nullptr)
+          != LIBSSH2_KNOWNHOST_CHECK_MATCH)
+    throw std::runtime_error(untrusted);
 }
 
 SftpSession::~SftpSession() {
@@ -125,8 +157,7 @@ void SftpSession::Connect(const Location &location, const TransferControl &contr
   if (!ssh)
     throw std::runtime_error("Cannot allocate SSH session.");
   libssh2_session_set_blocking(ssh, 0);
-  Require(Request(control, [&] { return libssh2_session_handshake(ssh, socket); }), "SSH handshake");
-  VerifyHost(ssh, location, account);
+  Handshake(location, account, control);
   Authenticate(account, control);
   Require(Request(control, [&] {
     sftp = libssh2_sftp_init(ssh);
