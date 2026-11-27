@@ -23,6 +23,31 @@ void Expect(bool condition, const std::string &label) {
     throw std::runtime_error(label);
   std::cout << "PASS " << label << std::endl;
 }
+// Opt-in so protocol request counts do not lengthen the standard fixture.
+void CheckScaling(const std::string &server, const std::string &local, int n) {
+  const bool ftp = ParseLocation(server).scheme == "ftp";
+  const auto reference = local + "/reference-" + std::to_string(n);
+  std::filesystem::create_directory(reference);
+  for (int i = 0; i < n; ++i)
+    std::ofstream(reference + "/" + std::to_string(i)) << i;
+  const auto compare = CompareFolders({reference, ChildLocation(server, "scaling-compare-" +
+                                      std::to_string(n)), true});
+  Expect(compare.complete == !ftp && compare.verified == size_t(n) && !compare.different &&
+         (ftp ? compare.error.find("Only entries shown") != std::string::npos : compare.error.empty()),
+         server + " compared every visible file: " + std::to_string(n));
+  const auto target = local + "/" + ParseLocation(server).scheme;
+  std::filesystem::create_directory(target);
+  const auto name = "scaling-download-" + std::to_string(n);
+  auto result = Run({Action::Copy, {ChildLocation(server, name)}, target}, {});
+  Expect(ftp ? result.partialCopies == 1 && !result.completed : result.completed == 1 && result.errors.empty(),
+         server + " reports the download scope");
+  for (int i = 0; i < n; ++i) {
+    std::ifstream file(target + "/" + name + "/" + std::to_string(i));
+    std::string contents;
+    if (!(file >> contents) || contents != std::to_string(i))
+      throw std::runtime_error("Incorrect benchmark download: " + name);
+  }
+}
 FileEntry Stat(const std::string &base, const std::string &name) {
   FileEntry entry;
   if (!StatFile(ChildLocation(base, name), entry))
@@ -136,6 +161,53 @@ void CheckUncertainOperations(const std::string &ftp, const std::string &local) 
     if (name == "mlsd-outer")
       CheckVisibleOnlyWindow(remote, local + "/" + name);
   }
+}
+void CheckPrivateDownload(const std::string &sftp, const std::string &local) {
+  const auto source = ChildLocation(sftp, "Private");
+  Expect(Stat(sftp, "Private").permissions == 0700 && Stat(source, "inner").permissions == 0700 &&
+             Stat(ChildLocation(source, "inner"), "memo").permissions == 0644,
+         "private SFTP fixture exposes nested 0700 folders and a readable memo");
+  const auto mode = [](const std::string &path) -> int {
+    struct stat st;
+    return lstat(path.c_str(), &st) == 0 ? st.st_mode & 0777 : -1;
+  };
+  const auto reports = [](const Result &r, const std::string &path, const std::string &status) {
+    return std::any_of(r.outcomes.begin(), r.outcomes.end(), [&](const EntryOutcome &entry) {
+      return entry.destination == path && entry.status == status;
+    });
+  };
+  for (const std::string stage : {"root", "nested", "file"}) {
+    const auto base = local + "/cancel-" + stage;
+    std::filesystem::create_directory(base);
+    const auto root = base + "/Private", nested = root + "/inner", memo = nested + "/memo";
+    bool exposed = false;
+    Hooks stop;
+    stop.proceed = [&] {
+      const auto outer = mode(root), inner = mode(nested);
+      exposed |= (outer >= 0 && outer != 0700) || (inner >= 0 && inner != 0700);
+      return stage == "root" ? outer < 0 : stage == "nested" ? inner < 0 : mode(memo) < 0;
+    };
+    const auto interrupted = Copy(source, base, stop);
+    Expect(interrupted.cancelled && !interrupted.completed && interrupted.partialCopies == 1 &&
+               !exposed && mode(root) == 0700 && reports(interrupted, root, "folder created") &&
+               (stage == "root" || (mode(nested) == 0700 && reports(interrupted, nested, "folder created"))),
+           "download stays private during and after cancellation at " + stage);
+    Hooks replace;
+    replace.conflict = [](const auto &) { return Decision::Replace; };
+    const auto retry = Copy(source, base, replace);
+    Expect(retry.completed == 1 && retry.errors.empty() && reports(retry, root, "existing folder") &&
+               mode(root) == 0700 && mode(nested) == 0700 && Read(memo) == "private payload",
+           "retry identifies existing folder and preserves nested privacy: " + stage);
+  }
+  const auto base = local + "/existing";
+  const auto root = base + "/Private";
+  std::filesystem::create_directories(root);
+  chmod(root.c_str(), 0755);
+  std::ofstream(root + "/original") << "unrelated";
+  const auto blocked = Copy(source, base);
+  Expect(!blocked.completed && !blocked.errors.empty() && mode(root) == 0755 &&
+             Read(root + "/original") == "unrelated" && mode(root + "/inner") < 0,
+         "a pre-existing more accessible target is neither populated nor chmodded");
 }
 void CheckSftpAlias(const std::string &sftp) {
   const auto folder = ChildLocation(sftp, "aliases");
@@ -307,9 +379,19 @@ int main() {
   const std::string local = pattern;
   int status = 0;
   try {
+    if (const auto size = std::getenv("LISTI_NETWORK_SCALING")) {
+      const int n = std::stoi(size);
+      Expect(n == 4 || n == 8 || n == 16 || n == 32, "known scaling fixture size");
+      CheckScaling(ftp, local, n);
+      if (n <= 8)
+        CheckScaling(sftp, local, n);
+      std::filesystem::remove_all(local);
+      return 0;
+    }
     CheckFtpCompare(ftp, local);
     CheckUncertainOperations(ftp, local);
     CheckSftpAlias(sftp);
+    CheckPrivateDownload(sftp, local);
     CheckIdentity(ftp, local);
     CheckStagedRecovery(ftp, sftp, local);
     // An explicit epoch is not the same as an omitted or malformed fact.

@@ -112,6 +112,7 @@ std::vector<FileEntry> ListNetwork(const Location &, const TransferControl &,
                                    ListingMethod *method = nullptr);
 bool StatNetwork(const Location &, FileEntry &, const TransferControl &,
                  const FileEntry *discovered = nullptr);
+bool RecheckFtpListingEntry(const Location &, FileEntry &, const TransferControl &);
 void ReadNetwork(const Location &, const DataSink &, const TransferControl &);
 void UploadNetwork(const std::string &, const Location &,
                    const TransferControl &);

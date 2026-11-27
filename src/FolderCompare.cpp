@@ -20,6 +20,7 @@ struct Item {
   FileEntry entry;
   struct stat native {};
   bool local = false;
+  bool fromMlsd = false;
   ListingMethod listing = ListingMethod::Provider;
   std::string link;
 };
@@ -96,7 +97,9 @@ Tree Scan(std::string root, size_t limit,
       e.path = ChildLocation(p.path, e.name);
       Need(out.size() - 1 < limit, // The root is only a validation sentinel.
            "Entry limit reached. Comparison is incomplete.");
-      Need(out.emplace(relative, Inspect(e)).second,
+      auto item = Inspect(e);
+      item.fromMlsd = directory.listing == ListingMethod::FtpMlsd;
+      Need(out.emplace(relative, std::move(item)).second,
            "Duplicate name in folder listing: " + relative);
       if (e.directory && !e.link)
         pending.push_back({e.path, relative, p.depth + 1});
@@ -163,7 +166,10 @@ std::string Digest(const Item &i, const TransferControl &control) {
   Need(!i.entry.sizeKnown || count == uint64_t(i.entry.size),
        "Byte count changed while reading: " + i.entry.path);
   FileEntry after;
-  Need(StatFile(i.entry.path, after, control) && Same(expected, Inspect(after)),
+  const bool found = i.fromMlsd
+      ? RecheckFtpListingEntry(ParseLocation(i.entry.path), after, control)
+      : StatFile(i.entry.path, after, control);
+  Need(found && Same(expected, Inspect(after)),
        "File changed while reading: " + i.entry.path);
   return hash.Finish();
 }
