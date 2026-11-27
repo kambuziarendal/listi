@@ -289,9 +289,13 @@ parent folders. Show when sharing is active, when it expires and how to stop it.
 
 Explore optional folder synchronisation with Syncthing or syncspirit, a C++
 implementation of the Syncthing protocol. Unlike a one-time file transfer,
-this would keep a chosen folder in sync as files change. Evaluate both engines
-on Haiku before choosing one, including how Listi can show pending changes and
-conflicts without reporting an offline device as up to date.
+this would keep a chosen folder in sync as files change.
+
+Also evaluate libtorrent as a BitTorrent transfer library. Unlike Syncthing
+and syncspirit, it does not implement the Syncthing protocol: Listi would
+need its own way to track changes and deletions and resolve conflicting edits.
+Compare that work with integrating an existing sync engine on Haiku, including
+how each option would show pending changes when a device is offline.
 
 ### Use Haiku's desktop tools
 
