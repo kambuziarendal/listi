@@ -143,11 +143,13 @@ def run(root, cleanup):
         menu(browser, "Paste into active folder")
 
         def delivered():
-            if not (shown / source.name).exists():
+            output = shown / source.name
+            if not output.exists() or output.read_bytes() != b"installed Paste fixture":
                 return False
             if route != "archive" and source.exists():
                 return False
-            return route != "mixed Tracker" or (shown / extra.name).exists()
+            copied = shown / extra.name
+            return route != "mixed Tracker" or (copied.exists() and copied.read_bytes() == extra.read_bytes())
 
         wait_for(delivered, "installed " + route + " Paste retries into refreshed folder")
         assert (shown / source.name).read_bytes() == b"installed Paste fixture" and not any(held.iterdir())
