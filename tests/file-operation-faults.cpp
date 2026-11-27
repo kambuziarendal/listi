@@ -524,7 +524,11 @@ void TestMovePermissions(const fs::path &root, const fs::path &out) {
       if (modes.first == 0700 && modes.second == 0755) {
         const Job copy{Action::Copy, {source.string()}, out.string()};
         for (int attempt = 0; attempt < 2; ++attempt) {
-          const auto blocked = Run(copy, {});
+          // A previous attempt may have copied the public sibling first.
+          // Accept that conflict so retry actually reaches the private folder.
+          Hooks retry;
+          retry.conflict = [](const auto &) { return Decision::Replace; };
+          const auto blocked = Run(copy, retry);
           Check(!blocked.completed && !blocked.errors.empty() && !fs::exists(to / "memo") &&
                     Read(from / "memo") == "private" && Read(to / "keep") == "unrelated",
                 "ordinary directory copy and retry do not expose private children in a public merge");
