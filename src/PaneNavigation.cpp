@@ -161,19 +161,19 @@ bool Pane::HandleQueryReply(BMessage &message) {
   if (!IsSearchList() || message.GetInt64("serial", -1) != serial || !queryWorker)
     return true;
   if (message.what == kSearchBegin) {
+    receivedRows = {};
     queryRows.clear();
     return true;
   }
   if (message.what == kSearchRows) {
-    BMessage hit;
-    for (int i = 0; message.FindMessage("hit", i, &hit) == B_OK; ++i) {
+    receivedRows.Read(message, "hit", [&](const BMessage &hit) {
       auto row = std::make_unique<PaneEntry>();
       row->path = hit.GetString("path", "");
       row->name = Leaf(row->path);
       row->device = hit.GetInt64("device", -1);
       if (Listi::InterruptedVolumes().ContainsDevice(row->device) ||
           Listi::InterruptedVolumes().Contains(row->path))
-        continue;
+        return;
       row->node = hit.GetInt64("node", -1);
       row->kind = hit.GetInt32("kind", 0);
       row->directory = hit.GetBool("directory", false);
@@ -182,12 +182,14 @@ bool Pane::HandleQueryReply(BMessage &message) {
       row->modified = hit.GetInt64("date", 0);
       row->attributeCells.push_back({Listi::ParentLocation(row->path), B_STRING_TYPE});
       queryRows.push_back(std::move(row));
-    }
+    });
     return true;
   }
   const bool initial = scanning;
   auto state = CaptureNavigation();
-  const std::string error = message.GetString("error", "");
+  std::string error = message.GetString("error", "");
+  if (error.empty() && !message.GetBool("cancelled", false) && !receivedRows.Complete(message))
+    error = "Incomplete search results. Reload to try again.";
   if (!error.empty() || message.GetBool("cancelled", false)) {
     Listi::RetireReadWorker(queryWorker);
     ClearRows();

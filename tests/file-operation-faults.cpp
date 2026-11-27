@@ -34,6 +34,7 @@ ino_t directoryForSync = -1;
 bool deviceGone = false, reportFat = false, synthesizeStageMode = false;
 std::string simulatedHardlink;
 int failures = 0;
+int exactNameScans = 0;
 
 void Check(bool ok, const char *label) {
   std::cout << (ok ? "PASS " : "FAIL ") << label << '\n';
@@ -55,6 +56,8 @@ bool Has(const Result &result, const fs::path &source, const fs::path &dest,
 
 extern "C" int __real_openat(int, const char *, int, ...);
 extern "C" int __wrap_openat(int directory, const char *path, int flags, ...) {
+  if ((flags & O_DIRECTORY) && !strcmp(path, "."))
+    ++exactNameScans;
   if (!(flags & O_CREAT))
     return __real_openat(directory, path, flags);
   va_list args;
@@ -517,6 +520,32 @@ int main() {
   TestDirectoryClaims(root, out);
   TestMovePermissions(root, out);
   TestNameFlush(root, out);
+  {
+    const auto inputs = root / "skip-inputs", outputs = root / "skip-outputs";
+    fs::create_directory(inputs);
+    fs::create_directory(outputs);
+    Job copy{Action::Copy, {}, outputs.string()};
+    for (int index = 0; index < 128; ++index) {
+      const auto name = std::to_string(index);
+      copy.sources.push_back((inputs / name).string());
+      std::ofstream(inputs / name) << "source";
+      std::ofstream(outputs / name) << "target";
+    }
+    int prompts = 0, scansAtChoice = 0;
+    Hooks hooks;
+    hooks.conflict = [&](const std::string &) {
+      ++prompts;
+      scansAtChoice = exactNameScans;
+      return Decision::SkipAll;
+    };
+    const auto skipped = Run(copy, hooks);
+    bool intact = true;
+    for (const auto &source : copy.sources)
+      intact &= Read(source) == "source" && Read(outputs / fs::path(source).filename()) == "target";
+    Check(skipped.skipped == 128 && !skipped.completed && skipped.errors.empty() &&
+              prompts == 1 && exactNameScans == scansAtChoice && intact,
+          "Skip All leaves all bytes intact without enumerating later conflict names");
+  }
   const std::string payload(1000, 'x');
   std::ofstream(source) << payload;
   std::ofstream(target) << "original";

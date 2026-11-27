@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "SavedNavigationController.h"
 #include "Common.h"
+#include "StoredFields.h"
 #include <stdexcept>
 #include <utility>
 
@@ -37,9 +38,9 @@ SavedNavigationController::PreparePlaceEdit(const BMessage &message) const {
   PlacePrompt prompt{std::string(label.question) + path, label.button, message,
                      std::nullopt};
   if (action != 0)
-    prompt.accepted.AddString("promptName", place->name.c_str());
+    CheckStoredField(prompt.accepted.AddString("promptName", place->name.c_str()));
   prompt.accepted.what = kPlaceAccepted;
-  prompt.accepted.AddBool("placeLabel", true);
+  CheckStoredField(prompt.accepted.AddBool("placeLabel", true));
   if (action != 2)
     prompt.initial = place ? place->name : places.SuggestedName(path);
   return prompt;
@@ -70,11 +71,12 @@ void SavedNavigationController::EditPlace(const BMessage &edit) {
   }
   auto save = next.Message();
   save.what = kSavePlaces;
-  save.AddMessenger("origin", owner);
-  save.AddMessage("edit", &edit);
+  if (owner.IsValid())
+    CheckStoredField(save.AddMessenger("origin", owner));
+  CheckStoredField(save.AddMessage("edit", &edit));
   if (auto existing = places.Find(path))
-    save.AddString("previousName", existing->name.c_str());
-  save.AddInt64("serial", ++placesSerial);
+    CheckStoredField(save.AddString("previousName", existing->name.c_str()));
+  CheckStoredField(save.AddInt64("serial", ++placesSerial));
   pendingPlaces = std::move(next);
   if (service.SendMessage(&save) != B_OK) {
     pendingPlaces.reset();
@@ -100,12 +102,17 @@ bool SavedNavigationController::FinishPlaceSave(const BMessage &reply) {
 }
 
 BMessage SavedNavigationController::SearchStore() const {
-  auto message = searches.Message();
-  message.what = kSearchStore;
-  message.AddInt64("revision", searchesRevision);
-  message.AddBool("writable", searchesWritable);
-  message.AddBool("saving", pendingSearch.has_value());
-  return message;
+  try {
+    auto message = searches.Message();
+    message.what = kSearchStore;
+    CheckStoredField(message.AddInt64("revision", searchesRevision));
+    CheckStoredField(message.AddBool("writable", searchesWritable));
+    CheckStoredField(message.AddBool("saving", pendingSearch.has_value()));
+    return message;
+  } catch (const std::exception &) {
+    // Never send an apparently valid empty or shortened list to an editor.
+    return BMessage(kSearchStore);
+  }
 }
 
 std::optional<SavedNavigationController::SearchUpdate>
@@ -125,9 +132,7 @@ SavedNavigationController::EditSearch(const BMessage &edit, BMessenger author) {
     if (modifies && revision != searchesRevision) {
       BMessage expected, actual;
       const auto *current = searches.Find(edit.GetString("name", ""));
-      if (current)
-        current->WriteTo(actual);
-      if (!current || edit.FindMessage("expectedSearch", &expected) != B_OK ||
+      if (!current || !current->WriteTo(actual) || edit.FindMessage("expectedSearch", &expected) != B_OK ||
           !actual.HasSameData(expected, true, true))
         throw std::runtime_error("This saved search changed in another window.");
     }
@@ -141,16 +146,18 @@ SavedNavigationController::EditSearch(const BMessage &edit, BMessenger author) {
 
     auto request = next.Message();
     request.what = kSaveSearches;
-    request.AddMessenger("origin", owner);
-    request.AddMessage("edit", &edit);
+    if (owner.IsValid())
+      CheckStoredField(request.AddMessenger("origin", owner));
+    CheckStoredField(request.AddMessage("edit", &edit));
     auto key = edit.GetBool("remove", false) ? edit.GetString("name", "") : chosen;
     if (auto existing = searches.Find(key)) {
       BMessage previous;
-      existing->WriteTo(previous);
-      request.AddMessage("previous", &previous);
+      if (!existing->WriteTo(previous))
+        throw std::runtime_error("Could not encode the previous search.");
+      CheckStoredField(request.AddMessage("previous", &previous));
     }
-    request.AddInt64("revision", searchesRevision);
-    request.AddInt64("serial", ++searchesSerial);
+    CheckStoredField(request.AddInt64("revision", searchesRevision));
+    CheckStoredField(request.AddInt64("serial", ++searchesSerial));
     pendingSearch = PendingSearch{searchesRevision, std::move(next), std::move(chosen), author};
     if (service.SendMessage(&request) != B_OK) {
       pendingSearch.reset();

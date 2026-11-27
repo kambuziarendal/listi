@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: MIT
+#include "StoredFields.h"
 #include "SavedSearches.h"
 #include "MessageStore.h"
 #include <algorithm>
 #include <stdexcept>
 #include <utility>
 namespace Listi {
-void SavedSearch::WriteTo(BMessage &message) const {
-  message.AddString("name", name.c_str());
-  message.AddBool("live", live);
-  request.WriteCriteria(message);
+bool SavedSearch::WriteTo(BMessage &message) const {
+  return message.AddString("name", name.c_str()) == B_OK &&
+         message.AddBool("live", live) == B_OK && request.WriteCriteria(message);
 }
 
 SavedSearch SavedSearch::FromMessage(const BMessage &message) {
@@ -75,9 +75,7 @@ void SavedSearches::ApplyEdit(const BMessage &request) {
   if (request.FindMessage("previous", &expected) == B_OK) {
     auto old = Find(expected.GetString("name", ""));
     BMessage actual;
-    if (old)
-      old->WriteTo(actual);
-    if (!old || !actual.HasSameData(expected, true, true))
+    if (!old || !old->WriteTo(actual) || !actual.HasSameData(expected, true, true))
       throw std::runtime_error("This saved search changed in another window.");
   }
   if (edit.GetBool("remove", false))
@@ -87,22 +85,19 @@ void SavedSearches::ApplyEdit(const BMessage &request) {
 }
 BMessage SavedSearches::Message() const {
   BMessage result;
-  result.AddInt32("version", 2);
+  CheckStoredField(result.AddInt32("version", 2));
   for (const auto &item : items) {
     BMessage entry;
-    item.WriteTo(entry);
-    result.AddMessage("search", &entry);
+    if (!item.WriteTo(entry))
+      throw std::runtime_error("Could not encode the complete saved search.");
+    CheckStoredField(result.AddMessage("search", &entry));
   }
   return result;
 }
 SavedSearches SavedSearches::FromMessage(const BMessage &m) {
   if (m.GetInt32("version", 0) != 1 && m.GetInt32("version", 0) != 2)
     throw std::runtime_error("Unsupported saved-search format.");
-  type_code type;
-  int32 count = 0;
-  if (m.GetInfo("search", &type, &count) == B_OK &&
-      (type != B_MESSAGE_TYPE || count > int32(Limit)))
-    throw std::runtime_error("Invalid saved-search list.");
+  const auto count = StoredCount(m, "search", Limit);
   SavedSearches result;
   for (int32 i = 0; i < count; ++i) {
     BMessage entry;

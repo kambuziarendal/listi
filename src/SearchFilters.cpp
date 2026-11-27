@@ -144,15 +144,15 @@ bool CompiledSearchFilters::Matches(const std::string &path,
   }
   return true;
 }
-void WriteSearchFilters(BMessage &m, const SearchFilters &f) {
+bool WriteSearchFilters(BMessage &m, const SearchFilters &f) {
   BMessage filters;
-  filters.AddString("extension", f.extension.c_str());
-  filters.AddString("minimum", f.minimumSize.c_str());
-  filters.AddString("maximum", f.maximumSize.c_str());
-  filters.AddString("from", f.fromDate.c_str());
-  filters.AddString("through", f.throughDate.c_str());
-  filters.AddBool("created", f.created);
-  m.AddMessage("filters", &filters);
+  return filters.AddString("extension", f.extension.c_str()) == B_OK &&
+         filters.AddString("minimum", f.minimumSize.c_str()) == B_OK &&
+         filters.AddString("maximum", f.maximumSize.c_str()) == B_OK &&
+         filters.AddString("from", f.fromDate.c_str()) == B_OK &&
+         filters.AddString("through", f.throughDate.c_str()) == B_OK &&
+         filters.AddBool("created", f.created) == B_OK &&
+         m.AddMessage("filters", &filters) == B_OK;
 }
 SearchFilters ReadSearchFilters(const BMessage &m) {
   type_code type;

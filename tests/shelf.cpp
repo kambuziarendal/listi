@@ -52,6 +52,47 @@ void Refused(Action action, const char *reason, const char *name) {
   Check(false, name);
 }
 
+void CheckProtectedSources(const fs::path &root) {
+  for (auto action : {Listi::Action::Copy, Listi::Action::Move}) {
+    const auto base = root / (action == Listi::Action::Move ? "move" : "copy");
+    const auto incoming = base / "in/set", out = base / "out";
+    const auto selected = out / "set/doc", valid = base / "valid";
+    fs::create_directories(incoming / "doc");
+    fs::create_directories(selected);
+    fs::create_directory(valid);
+    const auto first = base / "in/first";
+    std::ofstream(first) << "first source";
+    std::ofstream(out / "first") << "first target";
+    std::ofstream(incoming / "doc/file") << "incoming";
+    std::ofstream(selected / "file") << "selected";
+    const auto alias = base / "alias";
+    fs::create_directory_symlink(out / "set", alias);
+    Listi::Shelf shelf;
+    shelf.Add({first.string(), incoming.string(), (alias / "doc").string()});
+    Refused([&] { Listi::PrepareShelfTransfer(shelf.Snapshot(), action, out.string()); },
+            "contains a selected source", "Shelf rejects nested source/output overlap before first root");
+    Check(Read(first) == "first source" && Read(out / "first") == "first target" &&
+              Read(incoming / "doc/file") == "incoming" && Read(selected / "file") == "selected" &&
+              !fs::exists(out / "doc"),
+          "rejected Shelf transfer leaves both versions and the preceding conflict intact");
+    Listi::Hooks overwrite;
+    overwrite.conflict = [](const auto &) { return Listi::Decision::ReplaceAll; };
+    const Listi::Job raw{action, {first.string(), incoming.string(), selected.string()}, out.string()};
+    const auto refused = Listi::Run(raw, overwrite);
+    Check(!refused.completed && !refused.errors.empty() && Read(out / "first") == "first target" &&
+              Read(selected / "file") == "selected" && Read(incoming / "doc/file") == "incoming",
+          "unprepared worker job detects the overlap before writing any root");
+    const auto result = Listi::Run(Listi::PrepareShelfTransfer(shelf.Snapshot(), action, valid.string()), {});
+    Check(result.completed == 3 && result.completedRoots.size() == 3 && result.errors.empty() &&
+              Read(valid / "first") == "first source" && Read(valid / "set/doc/file") == "incoming" &&
+              Read(valid / "doc/file") == "selected" && Read(out / "first") == "first target" &&
+              fs::exists(first) == (action == Listi::Action::Copy) &&
+              fs::exists(selected) == (action == Listi::Action::Copy) &&
+              fs::exists(incoming) == (action == Listi::Action::Copy),
+          "Shelf retry to disjoint output delivers every selected version");
+  }
+}
+
 void CheckManyFolders(const fs::path &root) {
   const auto sources = root / "sources", copyTarget = root / "many-copies",
              archives = root / "archives";
@@ -193,6 +234,7 @@ void CheckManyFolders(const fs::path &root) {
 int main() {
   try {
     Fixture fixture;
+    CheckProtectedSources(fixture.root);
     const auto a = fixture.root / "a", b = fixture.root / "b",
                target = fixture.root / "target", alias = fixture.root / "alias";
     fs::create_directory(a);

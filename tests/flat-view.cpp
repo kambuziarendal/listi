@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "FileSearch.h"
+#include "ScanRowFaults.h"
 #include "Common.h"
 #include "FileClipboard.h"
 #include "FlatView.h"
@@ -481,10 +482,21 @@ int main() {
     });
   };
   Check(scanShows(3, "Scan complete"), "Flat View initially scans the whole folder");
+  auto refresh = [&] {
+    return Inspect(refreshed, [](BWindow &window) {
+      return window.PostMessage(kRefresh, window.FindView("flat view")) == B_OK;
+    });
+  };
+  for (auto fault : {ScanFault::Append, ScanFault::Decode}) {
+    ScanFault::Arm(fault, kSearchRows);
+    Check(refresh() && scanShows(1, "Incomplete:") && ScanFault::calls >= 2,
+          "failed middle hit cannot certify a partial Flat View");
+    ScanFault::Arm(ScanFault::None, 0);
+    Check(refresh() && scanShows(3, "Scan complete"),
+          "refresh after a broken hit recovers all files");
+  }
   InterruptedVolumes().Block(blocked);
-  const bool refreshPosted = Inspect(refreshed, [](BWindow &window) {
-    return window.PostMessage(kRefresh, window.FindView("flat view")) == B_OK;
-  });
+  const bool refreshPosted = refresh();
   Check(refreshPosted && scanShows(2, "Incomplete: 1"),
         "Flat View refresh keeps healthy files and reports the unavailable branch");
   refreshed.SendMessage(B_QUIT_REQUESTED);

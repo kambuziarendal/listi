@@ -417,6 +417,7 @@ struct MillerColumns::State {
   bool active = false, enabled = false, attached = false;
   std::string location, reading;
   PaneModel incoming;
+  Listi::ScanRows receivedRows;
   Listi::ReadWorker *scanner = nullptr;
   std::shared_ptr<std::atomic<int64>> generation =
       std::make_shared<std::atomic<int64>>(0);
@@ -473,6 +474,7 @@ struct MillerColumns::State {
             CreateDirectoryScanner(BMessenger(owner), generation, delivery);
         Listi::StartReadWorker(scanner);
       }
+      receivedRows = {};
       reading = rows->location;
       const auto serial = ++*generation;
       BMessage scan(kScan);
@@ -708,10 +710,9 @@ void MillerColumns::MessageReceived(BMessage *message) {
     return;
   auto rows = it->rows;
   if (message->what == kRows) {
-    BMessage item;
-    for (int i = 0; message->FindMessage("entry", i, &item) == B_OK; ++i) {
+    state->receivedRows.Read(*message, "entry", [&](const BMessage &item) {
       if (item.GetBool("parent", false))
-        continue;
+        return;
       auto row = std::make_unique<PaneEntry>();
       row->name = item.GetString("name", "");
       row->path = item.GetString("path", "");
@@ -720,12 +721,13 @@ void MillerColumns::MessageReceived(BMessage *message) {
       row->device = item.GetInt64("device", -1);
       row->node = item.GetInt64("node", -1);
       state->incoming.Add(std::move(row));
-    }
+    });
     return;
   }
   const bool deliveryFailed = state->delivery->failedSerial.load() == serial;
   if (message->what == kScanDone || deliveryFailed) {
-    const bool failed = deliveryFailed || message->HasString("error");
+    const bool failed = deliveryFailed || message->HasString("error") ||
+                        !state->receivedRows.Complete(*message);
     rows->partial = !failed && message->HasString("inspectionWarning");
     rows->SetToolTip(rows->partial ? message->GetString("inspectionWarning", "") : "");
     state->Finish(rows, failed);

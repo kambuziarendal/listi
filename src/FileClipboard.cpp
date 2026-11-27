@@ -395,6 +395,13 @@ ClipboardPaste PrepareFilePaste(const std::string &destination,
     job.sources.push_back(item.path);
     job.expectedSources.emplace(item.path, item.node);
   }
+  if (!copy.sources.empty() && !move.sources.empty()) {
+    auto selection = copy.sources;
+    selection.insert(selection.end(), move.sources.begin(), move.sources.end());
+    CheckTransferOutputTrees(selection, canonical);
+    copy.siblingPasteSources = move.expectedSources;
+    move.siblingPasteSources = copy.expectedSources;
+  }
   if (!copy.sources.empty())
     paste.jobs.push_back(PrepareTransfer(std::move(copy)));
   if (!move.sources.empty()) {

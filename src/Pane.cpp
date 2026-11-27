@@ -647,6 +647,7 @@ void Pane::StartNavigation(const std::string &request, int target, bool trash,
     Listi::RetireReadWorker(scanner);
   if (!scanner && !IsSearchList())
     StartDirectoryReader();
+  receivedRows = {};
   scanning = true;
   locationValid = false;
   folderIdentity = {-1, -1};
@@ -1349,9 +1350,8 @@ void Pane::MessageReceived(BMessage *m) {
     if (!scanning || m->GetInt64("serial", -1) != serial)
       break;
     scanDelivery->ReleaseBatch(serial);
-    BMessage e;
     const size_t first = entries.Visible().size();
-    for (int i = 0; m->FindMessage("entry", i, &e) == B_OK; i++) {
+    receivedRows.Read(*m, "entry", [&](const BMessage &e) {
       auto row = std::make_unique<PaneEntry>();
       row->name = e.GetString("name", "");
       row->path = e.GetString("path", "");
@@ -1367,7 +1367,7 @@ void Pane::MessageReceived(BMessage *m) {
       row->device = e.GetInt64("device", -1);
       if (Listi::InterruptedVolumes().ContainsDevice(row->device) ||
           Listi::InterruptedVolumes().Contains(row->path))
-        continue;
+        return;
       row->node = e.GetInt64("node", -1);
       if (path == "@disks") {
         row->unmountedDisk = e.GetBool("unmountedDisk", false);
@@ -1400,7 +1400,7 @@ void Pane::MessageReceived(BMessage *m) {
         row->icon = icons.Get(bits, length, pixels);
       }
       entries.AddScanned(std::move(row), einn ? "" : filter->Text(), restore);
-    }
+    });
     if (mode == 0)
       list->Append(first);
     else if (mode == MillerMode)
@@ -1416,7 +1416,10 @@ void Pane::MessageReceived(BMessage *m) {
     savedSelection.clear();
     scanTimer.reset();
     path = m->GetString("path", path);
-    locationValid = !m->HasString("error");
+    const char *error = m->GetString("error", nullptr);
+    if (!error && !receivedRows.Complete(*m))
+      error = "Incomplete directory listing. Reload to try again.";
+    locationValid = error == nullptr;
     folderIdentity = {m->GetInt64("folderDevice", -1), m->GetInt64("folderNode", -1)};
     if (!locationValid) pendingVisit.reset();
     if (locationValid && mode != 0)
@@ -1429,8 +1432,7 @@ void Pane::MessageReceived(BMessage *m) {
     SetDisplayMode(finalMode, mode == 0 && finalMode == mode && locationValid);
     edit->SetText(LocationLabel().c_str());
     sidebar->UpdateLocation();
-    const char *error;
-    if (m->FindString("error", &error) == B_OK) {
+    if (error) {
       ClearRows();
       BString s("Cannot open: ");
       s << error;

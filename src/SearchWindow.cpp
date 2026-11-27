@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+#include "ScanRows.h"
 #include "ReadWorker.h"
 #include "PaneNavigationState.h"
 #include "SearchWindow.h"
@@ -49,6 +50,7 @@ class SearchView : public BGroupView {
   SavedSearches saved;
   std::string chosen;
   bool chosenChanged = false;
+  ScanRows receivedRows;
   int64 storeRevision = 0, resultRevision = 0;
   bool writable = true, saving = false, initial = true;
   std::vector<SearchHit> pending;
@@ -135,17 +137,24 @@ class SearchView : public BGroupView {
     savedField->SetEnabled(!saving);
   }
   void Store(const BMessage &m) {
-    if (m.GetInt64("revision", 0) < storeRevision)
+    if (m.HasInt32("version") && m.GetInt64("revision", 0) < storeRevision)
       return;
-    auto next = SavedSearches::FromMessage(m);
+    SavedSearches next;
+    try {
+      next = SavedSearches::FromMessage(m);
+    } catch (const std::exception &) {
+      writable = saving = false;
+      StoreControls();
+      Status("Could not refresh the complete saved searches. Reopen the search editor.");
+      return;
+    }
     if (!m.HasString("chosen") && !chosen.empty() && !chosenChanged) {
       const auto *before = saved.Find(chosen);
       const auto *after = next.Find(chosen);
       if (before && after) {
         BMessage previous, current;
-        before->WriteTo(previous);
-        after->WriteTo(current);
-        chosenChanged = !previous.HasSameData(current, true, true);
+        chosenChanged = !before->WriteTo(previous) || !after->WriteTo(current) ||
+                        !previous.HasSameData(current, true, true);
       } else
         chosenChanged = !after;
     }
@@ -436,26 +445,36 @@ public:
         break;
       BMessage edit(kSearchEdit);
       // The owner addresses embedded searches by view, standalone by window.
-      edit.AddMessenger("searchEditor", embedded ? BMessenger(this)
-                                                  : BMessenger(Window()));
-      edit.AddInt64("revision", storeRevision);
-      edit.AddBool("remove", m->what == kForget);
-      edit.AddBool("replace", !chosen.empty() && chosen == name->Text());
+      const char *incomplete = "Could not prepare the complete saved-search edit. Nothing was submitted.";
+      if (edit.AddMessenger("searchEditor", embedded ? BMessenger(this) : BMessenger(Window())) != B_OK ||
+          edit.AddInt64("revision", storeRevision) != B_OK ||
+          edit.AddBool("remove", m->what == kForget) != B_OK ||
+          edit.AddBool("replace", !chosen.empty() && chosen == name->Text()) != B_OK) {
+        Status(incomplete);
+        break;
+      }
       if (!chosen.empty() && chosen == name->Text()) {
         if (const auto *previous = saved.Find(chosen)) {
           BMessage expected;
-          previous->WriteTo(expected);
-          edit.AddMessage("expectedSearch", &expected);
+          if (!previous->WriteTo(expected) || edit.AddMessage("expectedSearch", &expected) != B_OK) {
+            Status(incomplete);
+            break;
+          }
         }
       }
-      if (m->what == kForget)
-        edit.AddString("name", name->Text());
-      else {
-        SavedSearch item{name->Text(), Criteria(),
-                         live->Value() == B_CONTROL_ON};
+      if (m->what == kForget) {
+        if (edit.AddString("name", name->Text()) != B_OK) {
+          Status(incomplete);
+          break;
+        }
+      } else {
+        SavedSearch item{name->Text(), Criteria(), live->Value() == B_CONTROL_ON};
         if (!ValidateFilters(item.request))
           break;
-        item.WriteTo(edit);
+        if (!item.WriteTo(edit)) {
+          Status(incomplete);
+          break;
+        }
       }
       if (owner.SendMessage(&edit) == B_OK) {
         saving = true;
@@ -505,7 +524,10 @@ public:
       const auto criteria = Criteria();
       if (!ValidateFilters(criteria))
         break;
-      criteria.WriteCriteria(request);
+      if (!criteria.WriteCriteria(request)) {
+        Status("Could not prepare complete search criteria.");
+        break;
+      }
       SelectSection(0);
       ++serial;
       generation->store(serial);
@@ -572,6 +594,7 @@ public:
       if (m->GetInt64("revision", -1) <= resultRevision)
         break;
       resultRevision = m->GetInt64("revision", -1);
+      receivedRows = {};
       initial = m->GetBool("initial", false);
       pending.clear();
       break;
@@ -580,18 +603,17 @@ public:
         break;
       if (resultRevision == 0 || m->GetInt64("revision", -1) != resultRevision)
         break;
-      BMessage item;
-      for (int32 i = 0; m->FindMessage("hit", i, &item) == B_OK; ++i) {
+      receivedRows.Read(*m, "hit", [&](const BMessage &item) {
         SearchHit hit{item.GetString("path", ""), item.GetInt64("device", -1),
                       item.GetInt64("node", -1)};
         if (hit.path.empty() || hit.path[0] != '/' || hit.device < 0 ||
             hit.node < 0)
-          continue;
+          return;
         if (initial)
           results->Add(hit);
         else
           pending.push_back(hit);
-      }
+      });
       if (initial)
         Status("Searching: " + std::to_string(results->CountRows()) +
                " results. Snapshot in progress.");
@@ -602,6 +624,12 @@ public:
         break;
       if (m->GetInt64("revision", -1) != resultRevision)
         break;
+      const std::string error = m->GetString("error", "");
+      if (error.empty() && !m->GetBool("cancelled", false) && !receivedRows.Complete(*m)) {
+        Cancel();
+        Status("Incomplete: could not read all results. Start again to retry.");
+        break;
+      }
       bool updating = m->GetBool("live", false);
       if (!initial) {
         results->Reconcile(pending);
@@ -609,7 +637,6 @@ public:
         BMessenger(this).SendMessage(kSearchResultPicked);
       }
       Busy(updating);
-      std::string error = m->GetString("error", "");
       std::string state =
           !error.empty()                   ? "Failed / incomplete"
           : m->GetBool("cancelled", false) ? "Interrupted / incomplete"
@@ -637,7 +664,10 @@ public:
       SavedSearch query{name->Text(), criteria,
                         criteria.predicate && live->Value() == B_CONTROL_ON};
       BMessage request(kOpenSearchList);
-      query.WriteTo(request);
+      if (!query.WriteTo(request)) {
+        Status("Could not prepare complete search criteria.");
+        break;
+      }
       request.AddInt32("pane", pane);
       owner.SendMessage(&request);
       break;

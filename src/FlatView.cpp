@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+#include "ScanRows.h"
 #include "ColumnRows.h"
 #include "AdaptiveColumnList.h"
 #include "FlatView.h"
@@ -220,6 +221,7 @@ class FlatView : public BGroupView {
   BButton *stop, *collect;
   FlatResults *results;
   std::string needle, scanState = "Scanning…";
+  ScanRows receivedRows;
   bool scanning = false;
 
   static BStringView *Line(const char *name, const char *text) {
@@ -262,6 +264,7 @@ class FlatView : public BGroupView {
     Listi::ClearColumnRows(*results);
     results->NotifyPreview();
     files.clear();
+    receivedRows = {};
     shelfStatus->SetText("");
     shelfStatus->SetToolTip("");
     scanState = "Scanning…";
@@ -506,15 +509,14 @@ public:
     case kSearchRows: {
       if (!scanning || message->GetInt64("serial", -1) != generation->load())
         break;
-      BMessage item;
-      for (int32 i = 0; message->FindMessage("hit", i, &item) == B_OK; ++i) {
+      receivedRows.Read(*message, "hit", [&](const BMessage &item) {
         SearchHit hit{item.GetString("path", ""), item.GetInt64("device", -1),
                       item.GetInt64("node", -1), item.GetString("folder", ""),
                       item.GetInt64("size", 0), item.GetInt64("date", 0)};
         std::string name = hit.path.substr(hit.path.find_last_of('/') + 1);
         auto &file = files.emplace_back(File{std::move(hit), std::move(name)});
         UpdateRow(file);
-      }
+      });
       UpdateStatus();
       break;
     }
@@ -528,6 +530,8 @@ public:
         scanState = "Incomplete: " + error;
       else if (message->GetBool("cancelled", false))
         scanState = "Incomplete: scan interrupted.";
+      else if (!receivedRows.Complete(*message))
+        scanState = "Incomplete: could not read all results. Refresh to retry.";
       else if (message->GetBool("limited", false))
         scanState = "Incomplete: scan limit reached.";
       else if (skipped)

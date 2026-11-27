@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+#include "StoredFields.h"
 #include "FolderHistoryListing.h"
 #include "FolderHistory.h"
 #include "Sha256.h"
@@ -19,16 +20,20 @@ std::string Revision(const BMessage &entry, const std::atomic_bool &cancel) {
   revision.Update(content, strlen(content) + 1);
   // Filesystem attribute enumeration order is not part of the revision.
   std::map<std::string, std::string> attributes;
-  BMessage attr;
-  for (int32 i = 0; entry.FindMessage("attr", i, &attr) == B_OK; ++i) {
+  const auto count = StoredCount(entry, "attr");
+  for (int32 i = 0; i < count; ++i) {
+    const auto attr = StoredItem(entry, "attr", i);
     if (cancel) throw std::runtime_error("Canceled.");
     Sha256 value;
     const auto type = attr.GetUInt32("type", 0);
     value.Update(&type, sizeof(type));
     const void *bytes = nullptr;
     ssize_t length = 0;
-    if (attr.FindData("value", B_RAW_TYPE, &bytes, &length) == B_OK)
+    const auto status = attr.FindData("value", B_RAW_TYPE, &bytes, &length);
+    if (status == B_OK)
       value.Update(bytes, length);
+    else if (status != B_NAME_NOT_FOUND)
+      throw std::runtime_error("Invalid history attribute value.");
     attributes.emplace(attr.GetString("name", ""), value.Finish());
   }
   for (const auto &[name, value] : attributes) {
@@ -39,8 +44,9 @@ std::string Revision(const BMessage &entry, const std::atomic_bool &cancel) {
 }
 void Collect(const BMessage &dir, const std::string &prefix, HistoryRows &rows, unsigned depth,
              bool &truncated, const std::atomic_bool &cancel) {
-  BMessage child;
-  for (int32 i = 0; dir.FindMessage("child", i, &child) == B_OK; ++i) {
+  const auto count = StoredCount(dir, "child");
+  for (int32 i = 0; i < count; ++i) {
+    const auto child = StoredItem(dir, "child", i);
     if (cancel) throw std::runtime_error("Canceled.");
     if (rows.size() >= kDisplayLimit || depth > 128) { truncated = true; return; }
     std::string name = child.GetString("name", "");

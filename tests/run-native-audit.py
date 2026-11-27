@@ -24,7 +24,7 @@ archive-local-move-faults archive-local-move tar-edit-ownership tar-move-ownersh
 archive-editor-faults archive-editor archive-move-faults archive-move
 archive-folder-operations transfer-races archive-ambiguity archive-metadata archive-volumes
 sevenzip-backend archive-passwords archive-jobs ar-writer arj-writer rar-store
-cab-writer lha-writer preferences-state message-store-faults recovery-inventory main-window-routing working-windows folder-tabs application-services settings-window
+cab-writer lha-writer preferences-state stored-collection-faults message-store-faults recovery-inventory main-window-routing working-windows folder-tabs application-services settings-window
 workspace-layout workspace-editor miller-columns navigation-history selection-model type-to-select
 pane-filter pane-search-list file-list-export selection-summary selection-sort saved-places saved-searches saved-navigation-controller file-search
 live-search search-results-view flat-view file-clipboard clipboard-text-file file-drop image-convert
@@ -36,8 +36,10 @@ audit-io theme-text connection-defaults ssh-key-format folder-history
 """.split()
 
 WRAPS = {
+    "stored-collection-faults": ["_ZN8BMessage10AddMessageEPKcPKS_"],
+    "folder-tabs": ["_ZN8BMessage10AddMessageEPKcPKS_"],
     "job-snapshot": ["_ZN8BMessage9AddStringEPKcS1_"],
-    "folder-history": ["write", "fstat", "real_time_clock_usecs"],
+    "folder-history": ["write", "fstat", "real_time_clock_usecs", "_ZNK8BMessage11FindMessageEPKciPS_"],
     "working-windows": ["stat", "_ZN10BPopUpMenu2GoE6BPointbbb"],
     "removable-copy": ["fsync", "write", "read"],
     "directory-finalization": ["fsync", "fs_stat_dev"],
@@ -56,9 +58,9 @@ WRAPS = {
     "terminal-delivery": ["_ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl",
                           "_ZN5BView10DrawBitmapEPK7BBitmap5BRectS3_"],
     "application-services": ['fsync', '_Z14find_directory15directory_whichP5BPathbP7BVolume'],
-    "directory-delivery": ['fstatat', 'opendir', 'readdir', '_ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl'],
+    "directory-delivery": ['_ZN8BMessage10AddMessageEPKcPKS_', '_ZNK8BMessage11FindMessageEPKciPS_', 'fstatat', 'opendir', 'readdir', '_ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl'],
     "operation-queue": ['_ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl', 'opendir'],
-    "flat-view": ['_ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl', 'opendir'],
+    "flat-view": ['_ZN8BMessage10AddMessageEPKcPKS_', '_ZNK8BMessage11FindMessageEPKciPS_', '_ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl', 'opendir'],
     "folder-compare": ['opendir'],
     "properties-faults": ['_ZN5BNode9WriteAttrEPKcjlPKvm', '_ZN5BNode4SyncEv', '_ZN8BMessage9AddStringEPKcS1_', 'fsync'],
 }

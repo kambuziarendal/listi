@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Local copy and move check whether a target would overwrite another selected source, including across the copy and move parts of a Tracker paste. Skip All no longer rescans destination names for each skipped file.
+- Folder history reports unreadable saved children or attributes instead of restoring only a prefix. Shelf collections, saved places, searches and working sets reject incomplete saves.
+- Directory listings and Flat View check how many rows were delivered before reporting a complete scan.
+
 ## 0.38.0-48 (private alpha candidate)
 
 - Replace All cannot replace a result delivered earlier in the same transfer. A directory alias with a different spelling is not an implicit merge, including on a later attempt.

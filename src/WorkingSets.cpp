@@ -2,6 +2,7 @@
 #include "WorkingSets.h"
 #include "ApplicationServices.h"
 #include "MessageStore.h"
+#include "StoredFields.h"
 #include "WindowOverview.h"
 #include <Alert.h>
 #include <Button.h>
@@ -67,41 +68,29 @@ class SetDialog : public BWindow {
     if (first == std::string::npos)
       throw std::runtime_error("Enter a working set name.");
     label = label.substr(first, label.find_last_not_of(" \t") - first + 1);
-    BMessage set;
-    set.AddString("name", label.c_str());
-    BMessage capture(kCaptureWorkingWindow);
+    std::vector<BMessenger> selected;
     for (int32 n = 0; ; ++n) {
-      int32 i = list->CurrentSelection(n);
+      const int32 i = list->CurrentSelection(n);
       if (i < 0)
         break;
-      BMessage snapshot;
-      if (choices.at(i).target.SendMessage(&capture, &snapshot, 250000, 1000000) != B_OK ||
-          snapshot.what != kCaptureWorkingWindow)
-        throw std::runtime_error("A selected window closed or is busy. No set was saved.");
-      set.AddMessage("window", &snapshot);
+      selected.push_back(choices.at(i).target);
     }
-    if (!set.HasMessage("window"))
-      throw std::runtime_error("Select at least one file manager window.");
+    const auto set = CaptureWorkingSet(label, selected);
     std::lock_guard<std::mutex> guard(storeLock);
-    BMessage store = ReadSets(), existing;
-    for (int32 i = 0; store.FindMessage("set", i, &existing) == B_OK; ++i)
-      if (label == existing.GetString("name", ""))
+    BMessage store = ReadSets();
+    const auto count = StoredCount(store, "set");
+    for (int32 i = 0; i < count; ++i)
+      if (label == StoredItem(store, "set", i).GetString("name", ""))
         throw std::runtime_error("A set with this name already exists. Choose another name.");
-    store.AddMessage("set", &set);
+    CheckStoredField(store.AddMessage("set", &set));
     SaveMessageStore(SettingsPath("Listi_working_sets").String(), store);
   }
   void Open() {
-    BMessage set, window;
+    BMessage set;
     if (list->CurrentSelection() < 0 ||
         saved.FindMessage("set", list->CurrentSelection(), &set) != B_OK)
       throw std::runtime_error("Select a saved working set.");
-    for (int32 i = 0; set.FindMessage("window", i, &window) == B_OK; ++i) {
-      BrowserRequest request;
-      window.AddString("workingSetName", set.GetString("name", ""));
-      request.workingSet = window;
-      if (!open(std::move(request)))
-        throw std::runtime_error("Could not queue the next window.");
-    }
+    QueueWorkingSet(set, open);
   }
 
 public:
@@ -119,9 +108,9 @@ public:
           list->Select(i);
       }
     } else {
-      BMessage set;
-      for (int32 i = 0; saved.FindMessage("set", i, &set) == B_OK; ++i)
-        list->AddItem(new BStringItem(set.GetString("name", "")));
+      const auto count = StoredCount(saved, "set");
+      for (int32 i = 0; i < count; ++i)
+        list->AddItem(new BStringItem(StoredItem(saved, "set", i).GetString("name", "")));
       if (list->CountItems())
         list->Select(0);
     }
@@ -172,6 +161,45 @@ public:
     }
   }
 };
+}
+
+BMessage CaptureWorkingSet(const std::string &label, const std::vector<BMessenger> &selected) {
+  if (selected.empty())
+    throw std::runtime_error("Select at least one file manager window.");
+  BMessage set;
+  CheckStoredField(set.AddString("name", label.c_str()));
+  BMessage capture(kCaptureWorkingWindow);
+  for (const auto &target : selected) {
+    BMessage snapshot;
+    if (target.SendMessage(&capture, &snapshot, 250000, 1000000) != B_OK ||
+        snapshot.what != kCaptureWorkingWindow)
+      throw std::runtime_error("Could not capture a complete selected window. No set was saved.");
+    CheckStoredField(set.AddMessage("window", &snapshot));
+  }
+  return set;
+}
+
+void QueueWorkingSet(const BMessage &set, const BrowserOpener &open) {
+  const auto count = StoredCount(set, "window");
+  if (!count)
+    throw std::runtime_error("There are no windows in this saved set.");
+  for (int32 i = 0; i < count; ++i) {
+    try {
+      BrowserRequest request;
+      auto &snapshot = request.workingSet.emplace();
+      if (set.FindMessage("window", i, &snapshot) != B_OK)
+        throw std::runtime_error("Unreadable saved window.");
+      CheckStoredField(snapshot.AddString("workingSetName", set.GetString("name", "")));
+      CheckStoredField(snapshot.AddInt32("setIndex", i + 1));
+      if (!open(std::move(request)))
+        throw std::runtime_error("Could not queue the window.");
+    } catch (const std::exception &error) {
+      const auto queued = i == 0 ? std::string("No windows were queued.") :
+          "The first " + std::to_string(i) + " of " + std::to_string(count) +
+          " windows were already queued.";
+      throw std::runtime_error(queued + " Window " + std::to_string(i + 1) + ": " + error.what());
+    }
+  }
 }
 
 void ShowWorkingSets(WorkingWindow &owner, bool saving, BrowserOpener open) {

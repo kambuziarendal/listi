@@ -87,6 +87,8 @@ struct Job {
   std::map<std::string, std::string> restoreTargets;
   // Metadata from the selected pane row, not a later lookup at the same URL.
   std::map<std::string, FileEntry> expectedRemoteSources;
+  // Other half of a mixed Tracker paste. Both jobs are queued in-process.
+  std::map<std::string, NodeIdentity> siblingPasteSources;
 };
 class JobReportStore;
 struct Hooks {

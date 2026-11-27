@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "FileOperation.h"
+#include "TransferCommand.h"
 #include "UnavailableVolume.h"
 #include "JobReportStore.h"
 #include "BulkRename.h"
@@ -268,6 +269,34 @@ struct Runner {
   std::map<std::pair<dev_t, ino_t>, std::string> directoryClaims;
   using NodeKey = std::pair<dev_t, ino_t>;
   std::map<NodeKey, std::string> publishedFiles;
+  std::set<NodeKey> selectedTransferRoots;
+  void GuardTransferSelection(const Job &job) {
+    if (job.action != Action::Copy && job.action != Action::Move)
+      return;
+    if (job.sources.size() == 1 && job.siblingPasteSources.empty())
+      return; // Own-entry and descendant checks already guard single selections.
+    std::vector<std::string> available;
+    auto protect = [&](const std::string &path) {
+      struct stat st;
+      if (lstat(path.c_str(), &st) == 0) {
+        selectedTransferRoots.emplace(st.st_dev, st.st_ino);
+        available.push_back(path);
+      } else if (errno != ENOENT && errno != ENOTDIR) {
+        Fail(path);
+      }
+      // Missing sources are still reported per root by Execute().
+    };
+    for (const auto &[path, frozen] : job.expectedSources)
+      selectedTransferRoots.emplace(frozen.device, frozen.inode);
+    for (const auto &path : job.sources)
+      protect(path);
+    for (const auto &[path, frozen] : job.siblingPasteSources) {
+      selectedTransferRoots.emplace(frozen.device, frozen.inode);
+      protect(path);
+    }
+    if (available.size() > 1)
+      CheckTransferOutputTrees(available, job.destination);
+  }
   static NodeKey Key(const struct stat &node) { return {node.st_dev, node.st_ino}; }
   std::string DirectoryConflict(const struct stat &node, const std::string &src,
                                 const std::string &dst, const PinnedDirectory &parent) const {
@@ -571,10 +600,6 @@ struct Runner {
     if (guardedJob && guardedJob->action == Action::Duplicate)
       throw std::runtime_error(
           dst + ": already exists; duplicate does not overwrite");
-    if (skipAll) {
-      result.skipped++;
-      return false;
-    }
     if (replaceAll)
       return true;
     Decision d;
@@ -1004,6 +1029,8 @@ struct Runner {
     if (existed && st.st_dev == before.st_dev && st.st_ino == before.st_ino)
       throw std::runtime_error(src +
                                ": source and destination are the same entry");
+    if (existed && selectedTransferRoots.count(Key(before)))
+      throw std::runtime_error(dst + ": destination is a selected source; left untouched");
     if (S_ISDIR(st.st_mode)) {
       if (existed && !S_ISDIR(before.st_mode))
         throw std::runtime_error(
@@ -1109,6 +1136,12 @@ struct Runner {
     if (existed && S_ISDIR(before.st_mode))
       throw std::runtime_error(dst +
                                ": a directory cannot be replaced by a file");
+    // No write is possible after Skip All. Inspect the stored spelling only
+    // for conflicts where a replacement or separate name is still possible.
+    if (existed && skipAll) {
+      ++result.skipped;
+      return false;
+    }
     const auto parentPath = ParentLocation(dst);
     struct stat parentIdentity;
     if (lstat(parentPath.c_str(), &parentIdentity))
@@ -1467,6 +1500,7 @@ struct Runner {
         target = Join(job.destination, named ? job.entryName : Leaf(source));
       Outcome(source, target);
     }
+    GuardTransferSelection(job);
     if (named) {
       if (job.sources.size() != 1 || job.expectedSources.size() != 1 ||
           job.expectedDestination.device < 0 ||
@@ -1637,6 +1671,7 @@ struct Runner {
         if (job.action == Action::Move && !recoverableMove &&
             !Exists(destination)) {
           MoveName(job, source, destination, sourceStat);
+          selectedTransferRoots.erase(Key(sourceStat)); // Now guarded by the delivery claim.
           result.completedRoots.emplace_back(source, destination);
           ++result.completed;
           if (h.fileDone)
@@ -1661,6 +1696,7 @@ struct Runner {
                 RetainMovedSource(source, beforeMove);
               else
                 RemoveCopied(source, beforeMove, &removedAny);
+              selectedTransferRoots.erase(Key(sourceStat));
             } catch (const Cancelled &) {
               if (!removedAny)
                 result.retainedMoveCopy.emplace(source, destination);

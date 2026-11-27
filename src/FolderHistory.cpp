@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+#include "StoredFields.h"
 #include "FolderHistory.h"
 #include "DirectoryFinalization.h"
 #include "EmptyAttribute.h"
@@ -312,13 +313,15 @@ void CollectAttributes(int fd, BMessage &entry, const std::atomic_bool &cancel,
 }
 
 void ApplyAttributes(int fd, const BMessage &entry, const std::atomic_bool &cancel) {
-  BMessage attr;
-  for (int32 i = 0; entry.FindMessage("attr", i, &attr) == B_OK; ++i) {
+  const auto count = StoredCount(entry, "attr");
+  for (int32 i = 0; i < count; ++i) {
+    const auto attr = StoredItem(entry, "attr", i);
     CheckCancel(cancel);
     const char *name = attr.GetString("name", "");
     const void *bytes = "";
     ssize_t length = 0;
-    attr.FindData("value", B_RAW_TYPE, &bytes, &length);
+    const auto status = attr.FindData("value", B_RAW_TYPE, &bytes, &length);
+    Require(status == B_OK || status == B_NAME_NOT_FOUND, "Invalid history attribute value.");
     Require(*name && length >= 0 && length <= kAttributeLimit, "Invalid history attribute.");
     const auto type = attr.GetUInt32("type", 0);
     const auto *data = static_cast<const char *>(bytes);
@@ -431,9 +434,9 @@ void SaveNode(int fd, int parent, const std::string &name, dev_t device,
 std::string RestoreMarker(const BMessage &entry) {
   const std::string prefix = "Listi:RestoreIncomplete";
   std::set<std::string> names;
-  BMessage attr;
-  for (int32 i = 0; entry.FindMessage("attr", i, &attr) == B_OK; ++i)
-    names.insert(attr.GetString("name", ""));
+  const auto count = StoredCount(entry, "attr");
+  for (int32 i = 0; i < count; ++i)
+    names.insert(StoredItem(entry, "attr", i).GetString("name", ""));
   auto name = prefix;
   for (size_t i = 1; names.count(name); ++i)
     name = prefix + "-" + std::to_string(i);
@@ -460,9 +463,10 @@ BMessage FindRegularFile(BMessage folder, const fs::path &relative) {
   Require(!relative.empty() && relative.is_relative(), "Select a file in this version.");
   for (const auto &part : relative) {
     Require(Leaf(part) && S_ISDIR(folder.GetInt32("mode", 0)), "Invalid saved path.");
-    BMessage child;
     bool found = false;
-    for (int32 i = 0; folder.FindMessage("child", i, &child) == B_OK; ++i) {
+    const auto count = StoredCount(folder, "child");
+    for (int32 i = 0; i < count; ++i) {
+      const auto child = StoredItem(folder, "child", i);
       if (part != child.GetString("name", "")) continue;
       folder = child;
       found = true;
@@ -470,7 +474,7 @@ BMessage FindRegularFile(BMessage folder, const fs::path &relative) {
     }
     Require(found, "File is not in this version.");
   }
-  Require(S_ISREG(folder.GetInt32("mode", 0)) && !folder.HasMessage("child"), "Select a regular file.");
+  Require(S_ISREG(folder.GetInt32("mode", 0)) && StoredCount(folder, "child") == 0, "Select a regular file.");
   return folder;
 }
 
@@ -478,8 +482,9 @@ void RestoreNode(int fd, int store, const BMessage &entry, const std::atomic_boo
                  unsigned depth) {
   CheckCancel(cancel);
   Require(depth <= 128, "History folder nesting exceeds 128 levels.");
-  BMessage child;
-  for (int32 i = 0; entry.FindMessage("child", i, &child) == B_OK; ++i) {
+  const auto count = StoredCount(entry, "child");
+  for (int32 i = 0; i < count; ++i) {
+    const auto child = StoredItem(entry, "child", i);
     CheckCancel(cancel);
     std::string name = child.GetString("name", "");
     Require(Leaf(name), "Invalid history entry name.");
@@ -742,8 +747,8 @@ void HistoryStore::Restore(const std::string &point, const std::string &destinat
   CheckCancel(cancel);
   state->store->Verify();
   parent->Verify();
-  if (!single) Check(mkdirat(parent->Descriptor(), leaf.c_str(), 0700) == 0, "Create new copy at " + target.string());
   const auto marker = RestoreMarker(root);
+  if (!single) Check(mkdirat(parent->Descriptor(), leaf.c_str(), 0700) == 0, "Create new copy at " + target.string());
   const int flags = single ? O_CREAT | O_EXCL | O_RDWR : O_RDONLY | O_DIRECTORY;
   FD output(openat(parent->Descriptor(), leaf.c_str(), flags | O_NOFOLLOW | O_CLOEXEC, 0600),
             "Open new copy at " + target.string());
