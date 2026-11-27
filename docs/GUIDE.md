@@ -153,6 +153,8 @@ Modified**, each ascending or descending. in the ordinary local Details view. Re
   both the staging file and the final copy. During publication the new name
   can be visible before the copy finishes. If interrupted, consult the job
   report and recovery inventory before using a partial copy.
+- **Replace all** applies to pre-existing targets, not to a result already delivered by another source in the same job. For a local copy or move, choose **Keep both** when offered, or skip the entry. An existing folder with a different on-disk spelling is not merged automatically on retry; use a separate name if both folders should survive.
+- When downloading network folders, new local folders start private. Check **Details** after interruption: existing folders keep their permissions. If a destination grants group or other access that the source does not grant, choose a different destination.
 - A regular copy to FAT can ask **Copy without attributes**: the file bytes can
   be copied, but the FAT volume cannot store the Haiku attributes on the source.
   Consent applies only to this copy job on that volume; the original retains
