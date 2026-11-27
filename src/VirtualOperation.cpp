@@ -17,6 +17,7 @@
 #include <filesystem>
 #include <fcntl.h>
 #include <limits>
+#include <set>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -161,6 +162,51 @@ struct Runner {
     const auto inserted = directoryOwners.emplace(key, src);
     if (!inserted.second && inserted.first->second != src)
       throw std::runtime_error("Two source folders resolve to the same destination: " + dst);
+  }
+  struct FileClaims {
+    std::set<std::string> reserved;
+    std::optional<std::set<std::string>> replaceable;
+  };
+  std::map<std::string, FileClaims> fileClaims;
+  void CheckFileDestination(const std::string &dst, bool exists, const TransferControl &control) {
+    const auto parent = ParentLocation(dst);
+    const auto leaf = LocationLeaf(dst);
+    auto &claims = fileClaims[parent];
+    if (claims.reserved.count(leaf))
+      throw std::runtime_error("Another selected file already claimed this destination: " + dst);
+    if (exists) {
+      // Stat may echo the spelling requested even when it resolved an alias.
+      // Enumerate once, when replacement first matters. A newly created name
+      // was absent at lookup; it must never become replaceable later this job.
+      if (!claims.replaceable) {
+        std::set<std::string> names;
+        if (IsVirtual(parent)) {
+          for (const auto &entry : ListFiles(parent, control))
+            names.insert(entry.name);
+        } else {
+          for (const auto &entry : std::filesystem::directory_iterator(parent)) {
+            control.Check();
+            names.insert(entry.path().filename().string());
+          }
+        }
+        for (const auto &reserved : claims.reserved) {
+          if (!names.erase(reserved))
+            throw std::runtime_error("Cannot distinguish a previous destination name in " +
+                                     parent + ". Use separate names.");
+        }
+        claims.replaceable = std::move(names);
+      }
+      if (!claims.replaceable->count(leaf))
+        throw std::runtime_error("Destination aliases another name or was not listed separately: " +
+                                 dst + ". Use separate names.");
+    }
+  }
+  void ReservePublishedName(const std::string &dst) {
+    auto &claims = fileClaims.at(ParentLocation(dst));
+    const auto leaf = LocationLeaf(dst);
+    claims.reserved.insert(leaf);
+    if (claims.replaceable)
+      claims.replaceable->erase(leaf);
   }
   std::string selectedSource;
   void Guard() {
@@ -361,8 +407,10 @@ struct Runner {
       if (localParent) {
         localParent->Verify();
         const auto leaf = LocationLeaf(dst);
-        if (!exists) {
-          if (mkdirat(localParent->Descriptor(), leaf.c_str(), 0755))
+        if (exists) {
+          localParent->RequireExactLeaf(leaf);
+        } else {
+          if (mkdirat(localParent->Descriptor(), leaf.c_str(), 0700))
             throw std::runtime_error(dst + ": " + strerror(errno));
           ++publishedEntries;
         }
@@ -370,11 +418,25 @@ struct Runner {
         if (fstatat(localParent->Descriptor(), leaf.c_str(), &named,
                     AT_SYMLINK_NOFOLLOW) || !S_ISDIR(named.st_mode))
           throw std::runtime_error(dst + ": destination directory changed.");
+        // Do not populate a private source into a more accessible folder,
+        // even on a retry or a filesystem that ignored the creation mode.
+        if ((named.st_mode & 0077 & ~source.permissions) != 0)
+          throw std::runtime_error(dst + ": destination folder grants access not present on the source. "
+                                  "Nothing was added here. Choose a separate destination.");
         ClaimDirectory("local:" + std::to_string(named.st_dev) + ":" +
                        std::to_string(named.st_ino), src, dst);
         directories.emplace(dst, NodeIdentity{int32_t(named.st_dev), int64_t(named.st_ino)});
         Guard();
         directory.emplace(dst, named.st_dev, named.st_ino);
+        if (!hooks.privateStaging && !ParseLocation(src).Archive()) {
+          std::string note = exists ? "Already present on this attempt; existing permissions retained." :
+                                      "This job created this folder with restricted access.";
+          if (exists && (named.st_mode & 0777) != (source.permissions & 0777)) {
+            result.copyLimitations = true;
+            note += " Different source permissions were not applied.";
+          }
+          RecordOutcome({src, dst, exists ? "existing folder" : "folder created", std::move(note)});
+        }
       } else {
         if (!exists) {
           MakeFolder(dst, control);
@@ -383,9 +445,9 @@ struct Runner {
             throw std::runtime_error("Created folder could not be verified: " + dst);
         }
         // A provider can resolve an alias to the existing folder yet return
-        // the requested spelling from stat. Without identity, only merge a
-        // folder if the parent actually lists that spelling.
-        if (exists && target.providerIdentity.empty()) {
+        // the requested spelling from stat. Even a stable ID cannot prove
+        // that the user intended this spelling on a subsequent job.
+        if (exists) {
           const auto siblings = ListFiles(parent, control);
           const auto leaf = LocationLeaf(dst);
           if (std::none_of(siblings.begin(), siblings.end(), [&](const FileEntry &e) {
@@ -401,10 +463,27 @@ struct Runner {
       for (const auto &e : entries)
         Copy(e.path, ChildLocation(dst, e.name), depth + 1, &e);
       control.Check();
+      std::vector<std::string> nowOmitted;
+      ListingMethod finalMethod;
+      auto current = ListFiles(src, control, &nowOmitted, &finalMethod);
+      if (!VisibleEntriesOnly(initialMethod) && VisibleEntriesOnly(finalMethod))
+        NoteLimitedListing(src);
+      std::sort(omitted.begin(), omitted.end());
+      std::sort(nowOmitted.begin(), nowOmitted.end());
+      if (omitted != nowOmitted || !SameListing(entries, current))
+        throw std::runtime_error("Source folder changed during transfer: " + src);
       const bool ordinaryCopy = job.action == Action::Copy &&
           !job.copyForArchiveMove && !hooks.privateStaging;
       std::string limitations;
       if (!exists && !IsVirtual(dst)) {
+        if (source.permissions & 0077) {
+          // A private staging folder must not be opened using stale access
+          // bits if the source became private while a child was transferred.
+          FileEntry finalSource;
+          if (!StatFile(src, finalSource, control) || !source.SameRevision(finalSource) ||
+              (source.permissions & 0777) != (finalSource.permissions & 0777))
+            throw std::runtime_error("Source folder changed before setting destination permissions: " + src);
+        }
         if (!directory->SetCopyMode(source.permissions & 0777, ordinaryCopy))
           limitations = kNtfsPermissionNotice;
         if (source.modifiedKnown || source.modified > 0) {
@@ -424,15 +503,6 @@ struct Runner {
         result.copyLimitations = true;
         RecordOutcome({src, dst, "filesystem limitations", std::move(limitations)});
       }
-      std::vector<std::string> nowOmitted;
-      ListingMethod finalMethod;
-      auto current = ListFiles(src, control, &nowOmitted, &finalMethod);
-      if (!VisibleEntriesOnly(initialMethod) && VisibleEntriesOnly(finalMethod))
-        NoteLimitedListing(src);
-      std::sort(omitted.begin(), omitted.end());
-      std::sort(nowOmitted.begin(), nowOmitted.end());
-      if (omitted != nowOmitted || !SameListing(entries, current))
-        throw std::runtime_error("Source folder changed during transfer: " + src);
       if (result.skipped == skippedBefore && omissions == omittedBefore) {
         if (hooks.fileDone)
           hooks.fileDone(src, dst);
@@ -441,6 +511,7 @@ struct Runner {
     }
     if (exists && target.directory)
       throw std::runtime_error("Destination is a folder");
+    CheckFileDestination(dst, exists, control);
     if (!IsVirtual(dst)) {
       struct stat before {};
       if (exists && lstat(dst.c_str(), &before))
@@ -481,8 +552,10 @@ struct Runner {
       for (const auto &entry : done.outcomes)
         if (entry.status == "copied" || entry.status == "partial" ||
             entry.status == "published-flush-failed" ||
-            entry.status == "published-recovery-pending")
+            entry.status == "published-recovery-pending") {
+          ReservePublishedName(dst);
           ++publishedEntries;
+        }
       // Replace already counted skipped conflicts. Completion is counted by
       // RunVirtual once per selected root, not once per published child.
       // A containing archive job must not report its private staging paths.
@@ -587,6 +660,9 @@ struct Runner {
         RenameFile(dst, backup, control);
       }
       control.Check();
+      // Reserve before the server mutation: a lost acknowledgement still
+      // leaves a possible delivery that a later root must not overwrite.
+      ReservePublishedName(dst);
       commitAttempted = true;
       receipt.publication = Publication::Unknown;
       RenameFile(staged, dst, control);
