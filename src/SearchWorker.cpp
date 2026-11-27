@@ -7,6 +7,7 @@
 #include <NodeMonitor.h>
 #include <Query.h>
 #include <sys/stat.h>
+#include <cerrno>
 #include <cstdlib>
 namespace Listi {
 namespace {
@@ -63,7 +64,7 @@ class SearchWorker : public Listi::ReadWorker {
       return ok;
     };
     SearchSummary summary;
-    size_t blockedHits = 0;
+    size_t unverifiedHits = 0;
     if (Listi::InterruptedVolumes().Contains(request.root))
       summary.error = Listi::kUnavailableVolumeText;
     else if (!initial && !SameSearchEntry(root))
@@ -74,13 +75,20 @@ class SearchWorker : public Listi::ReadWorker {
           request, [&] { return Alive(); },
           [&](const SearchHit &hit) {
             if (Listi::InterruptedVolumes().Contains(hit.path)) {
-              ++blockedHits;
+              ++unverifiedHits;
               return true;
             }
             BMessage item;
             if (paneRows) {
               struct stat st;
-              if (lstat(hit.path.c_str(), &st) || st.st_dev != hit.device || st.st_ino != hit.node)
+              if (lstat(hit.path.c_str(), &st) != 0) {
+                // A vanished path no longer matches. Other errors leave an
+                // existing hit unverified and must mark this snapshot partial.
+                if (errno != ENOENT && errno != ENOTDIR)
+                  ++unverifiedHits;
+                return true;
+              }
+              if (st.st_dev != hit.device || st.st_ino != hit.node)
                 return true;
               struct stat target;
               const bool directory = S_ISDIR(st.st_mode) ||
@@ -106,7 +114,7 @@ class SearchWorker : public Listi::ReadWorker {
             return ++count < 40 || flush();
           },
           initial ? query.get() : nullptr);
-    summary.skipped += blockedHits;
+    summary.skipped += unverifiedHits;
     if (!Alive()) {
       Stop();
       return;

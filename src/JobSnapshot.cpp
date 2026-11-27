@@ -136,7 +136,11 @@ BMessage EncodeJob(const Job &job, uint32 what) {
   for (const auto &[source, target] : job.restoreTargets) {
     BMessage item;
     RequireJobField(item.AddString("source", source.c_str()));
-    RequireJobField(item.AddString("target", target.c_str()));
+    RequireJobField(item.AddString("target", target.path.c_str()));
+    if (!target.path.empty()) {
+      RequireJobField(item.AddInt32("parentDevice", target.parent.device));
+      RequireJobField(item.AddInt64("parentNode", target.parent.inode));
+    }
     RequireJobField(m.AddMessage("restoreTarget", &item));
   }
   for (const auto &entry : job.expectedArchiveSets) {
@@ -196,8 +200,10 @@ Job DecodeJob(const BMessage &m) {
   ReadItems(m, "restoreTarget", [&](const BMessage &item) {
     // An empty (but present) target records an unavailable original path.
     const char *target;
-    RequireSnapshot(item.FindString("target", &target) == B_OK &&
-                    job.restoreTargets.emplace(RequiredString(item, "source"), target).second);
+    RequireSnapshot(item.FindString("target", &target) == B_OK);
+    NodeIdentity parent{item.GetInt32("parentDevice", -1), item.GetInt64("parentNode", -1)};
+    RequireSnapshot(!*target || (parent.device >= 0 && parent.inode >= 0));
+    RequireSnapshot(job.restoreTargets.emplace(RequiredString(item, "source"), RestoreTarget{target, parent}).second);
   });
   return job;
 }

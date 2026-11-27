@@ -9,12 +9,39 @@
 #include <ColumnListView.h>
 #include <LayoutBuilder.h>
 #include <Window.h>
+#include <atomic>
+#include <cerrno>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <set>
 #include <sys/stat.h>
 #include <unistd.h>
+
+namespace {
+enum class Recheck { Off, IO, Replace, Vanish };
+std::atomic<Recheck> fault{Recheck::Off};
+std::atomic<int> lookups{0};
+std::string targetPath, heldPath;
+}
+
+// FileSearch identifies the hit first; SearchWorker then checks the same path
+// before creating a selectable row. Inject only at that second observation.
+extern "C" int __real_lstat(const char *, struct stat *);
+extern "C" int __wrap_lstat(const char *path, struct stat *st) {
+  const auto mode = fault.load();
+  if (mode != Recheck::Off && targetPath == path && ++lookups == 2) {
+    if (mode == Recheck::IO) {
+      errno = EIO;
+      return -1;
+    }
+    if (rename(path, heldPath.c_str()) != 0)
+      std::abort();
+    if (mode == Recheck::Replace && !(std::ofstream(path) << "replacement"))
+      std::abort();
+  }
+  return __real_lstat(path, st);
+}
 
 namespace {
 class QueryReplies : public BMessageFilter {
@@ -199,6 +226,46 @@ int main() {
   pane->MessageReceived(&up);
   check(await(folder) && pane->Selected() == std::vector<std::string>{a} &&
         pane->CaptureNavigation().focused == a, "Up selects the child folder");
+  const std::string scope = root + "/recheck";
+  check(mkdir(scope.c_str(), 0700) == 0, "create independent recheck fixture");
+  const auto firstHit = scope + "/row-1", lastHit = scope + "/row-3";
+  targetPath = scope + "/row-2";
+  heldPath = root + "/held-original";
+  for (const auto &path : {firstHit, targetPath, lastHit})
+    std::ofstream(path) << path;
+  SavedSearch recheck{"Recheck", {scope, "row-"}, false};
+  BMessage recheckRequest(kOpenSearchList);
+  recheck.WriteTo(recheckRequest);
+  pane->MessageReceived(&recheckRequest);
+  auto rowCount = [&](size_t count) {
+    return await([&] { return ready() && pane->IsSearchList() &&
+                              pane->MatchPattern("row-?", false) == count; });
+  };
+  auto partialStatus = [&] {
+    return status && std::string(status->Text()).find("Partial search") == 0;
+  };
+  check(rowCount(3) && !partialStatus(), "control shows three verified hits");
+  for (auto mode : {Recheck::IO, Recheck::Replace, Recheck::Vanish}) {
+    lookups = 0;
+    fault = mode;
+    pane->Reload();
+    const bool observed = rowCount(2) && lookups >= 2;
+    fault = Recheck::Off;
+    check(observed && partialStatus() == (mode == Recheck::IO),
+          "I/O loss is marked partial, removed or replaced identity is stale");
+    pane->MatchPattern("row-?", true);
+    const auto remaining = pane->SelectedLocalIdentities();
+    check(remaining.size() == 2 && remaining.count(firstHit) && remaining.count(lastHit),
+          "unchecked hit or replacement never enters the file selection");
+    if (mode != Recheck::IO)
+      check(rename(heldPath.c_str(), targetPath.c_str()) == 0,
+            "restore original for retry");
+    pane->Reload();
+    check(rowCount(3) && !partialStatus(), "retry restores all three verified hits");
+  }
+  for (const auto &path : {firstHit, targetPath, lastHit})
+    unlink(path.c_str());
+  rmdir(scope.c_str());
   w->Quit();
   unlink(original.c_str());
   unlink((a + "/retained").c_str());

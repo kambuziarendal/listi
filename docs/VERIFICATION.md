@@ -122,6 +122,40 @@ After building, `python3 tests/run-native-audit.py [case ...]` is equivalent
 to the audit step without the application rebuild. It asks the native build
 for its exact target, objects, compiler, include and link flags.
 
+For the archive-input and transfer-preflight regressions, run:
+
+```sh
+python3 tests/run-native-audit.py archive-copy-inputs transfer-preflight file-clipboard shelf
+```
+
+The archive test also exercises the separate Extract command. To include real
+hard-link aliases, point `LISTI_ARCHIVE_ALIAS_DIR` at a disposable directory
+on a mounted test image. Provide two pairs of empty files: `original.zip`
+hard-linked to `other.zip`, and `plain.7z.002` hard-linked to `payload.bin`.
+The test writes archive bytes through these names. The preflight test checks
+that a window can process Cancel while its worker is reading a merge tree.
+
+For the restore, search and partition-list checks, run
+`file-operation-faults`, `pane-search-list` and `disk-actions` with the
+same runner. The disk test uses a disposable filesystem image, not a USB device.
+
+The pre-merge candidate following `e0bd3b4` was tested locally on Haiku
+R1/beta6 x86_64 in QEMU. Nineteen selected native programs and all 58
+built-in checks passed. The observations below are from the build tree, not
+GitHub Actions, an installed package, or a physical USB device.
+
+| Workflow | Failure and recovery observed |
+| --- | --- |
+| Archive Copy and Extract | A collision on a later member stopped the first replacement too. The ZIP bytes and member list were unchanged. Real hard-link aliases on ext2, including a middle 7z part, were protected; a nested target swapped while queued was rejected with the source fingerprint unchanged. An independent replacement and extraction to a new folder succeeded. |
+| Pane search | On a transient I/O error, two of three hits were selectable and the pane reported partial results. A replaced or vanished hit was not selectable. Reload recovered all three. |
+| Trash restore | Swapping the parent for a different directory at the confirmed path left the payload and original-path metadata in Trash. A fresh confirmation restored the payload to the newly confirmed directory. |
+| Local transfer preflight | For 128 and 4,096 files, with and without an overlap, the window thread never opened the incoming merge tree for enumeration. It handled Cancel during a paused worker scan. Cancellation and overlap both left the first output unwritten; disjoint mixed paste succeeded in the clipboard case. |
+| Disk list | Dropping the partition offset on both mounted and unmounted fixture rows produced a visible reload message instead of a selectable disk. Reload returned the full identity; the normal mount and unmount checks passed. |
+
+The separate Linux portable run passed 89 transfer checks both normally and
+under ASan/UBSan, plus 25,000 seeded parser inputs. No physical disconnect or
+power-loss test is included.
+
 For Shelf collections, run:
 
 ```sh

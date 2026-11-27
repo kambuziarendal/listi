@@ -38,7 +38,7 @@ void RequireAvailableEndpoints(const Listi::Job &job, bool resolveLinks = false)
   requireAvailable(job.destinationFolder);
   requireAvailable(job.archivePath);
   for (const auto &entry : job.restoreTargets)
-    requireAvailable(entry.second);
+    requireAvailable(entry.second.path);
   for (const auto &source : job.sources)
     requireAvailable(source);
 }

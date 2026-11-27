@@ -151,7 +151,13 @@ int main(int argc, char **argv) {
       }
     }
     Set(clip, mixed);
-    Check(Rejected([&] { PrepareFilePaste(b, &clip); }) &&
+    paste = PrepareFilePaste(b, &clip);
+    Check(paste.jobs.size() == 2 && !paste.lease.empty(), "mixed paste reserved for queued checks");
+    const auto overlappingCopy = Run(paste.jobs.front(), replace);
+    const auto overlappingMove = Run(paste.jobs.back(), replace);
+    FinishFilePaste(paste, Moved(overlappingMove), &clip);
+    Check(!overlappingCopy.completed && !overlappingCopy.errors.empty() &&
+              !overlappingMove.completed && !overlappingMove.errors.empty() &&
               !Data(clip).HasString("listi:paste-lease") &&
               Read(incoming + "/doc/content") == "incoming" &&
               Read(selected + "/content") == "keep" && !Exists(b + "/doc"),

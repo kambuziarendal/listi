@@ -20,9 +20,9 @@ OUTPUT = ROOT / "build/native-audit-tests"
 REQUIRED = """
 file-operation-faults directory-finalization copy-crash-recovery worker-lifecycle virtual-operation-faults archive-read-scope
 operation-queue removable-copy disk-actions archive-move-scaling directory-delivery terminal-delivery search-filters
-archive-local-move-faults archive-local-move tar-edit-ownership tar-move-ownership same-file-type folder-compare
+archive-local-move-faults archive-local-move archive-copy-inputs tar-edit-ownership tar-move-ownership same-file-type folder-compare
 archive-editor-faults archive-editor archive-move-faults archive-move
-archive-folder-operations transfer-races archive-ambiguity archive-metadata archive-volumes
+archive-folder-operations transfer-races transfer-preflight archive-ambiguity archive-metadata archive-volumes
 sevenzip-backend archive-passwords archive-jobs ar-writer arj-writer rar-store
 cab-writer lha-writer preferences-state stored-collection-faults message-store-faults recovery-inventory main-window-routing working-windows folder-tabs application-services settings-window
 workspace-layout workspace-editor miller-columns navigation-history selection-model type-to-select
@@ -36,6 +36,9 @@ audit-io theme-text connection-defaults ssh-key-format folder-history
 """.split()
 
 WRAPS = {
+    "transfer-preflight": ["opendir", "readdir", "closedir"],
+    "disk-actions": ["_ZN8BMessage8AddInt64EPKcl"],
+    "pane-search-list": ["lstat"],
     "stored-collection-faults": ["_ZN8BMessage10AddMessageEPKcPKS_"],
     "folder-tabs": ["_ZN8BMessage10AddMessageEPKcPKS_"],
     "job-snapshot": ["_ZN8BMessage9AddStringEPKcS1_"],

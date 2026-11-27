@@ -1371,9 +1371,14 @@ void Pane::MessageReceived(BMessage *m) {
       row->node = e.GetInt64("node", -1);
       if (path == "@disks") {
         row->unmountedDisk = e.GetBool("unmountedDisk", false);
-        if (e.HasInt32("partition"))
-          row->partition = std::make_unique<Listi::DiskPartition>(
-              Listi::DiskPartition::ReadFrom(e));
+        if (row->unmountedDisk || e.HasInt32("partition")) {
+          auto partition = Listi::DiskPartition::ReadFrom(e);
+          if (partition.id < 0) {
+            receivedRows.failed = true;
+            return;
+          }
+          row->partition = std::make_unique<Listi::DiskPartition>(std::move(partition));
+        }
       }
       // Virtual listings have no local node identity; retain their path-based
       // behavior. A replacement local entry must not inherit selection.

@@ -1009,12 +1009,46 @@ int main() {
   if (fs::exists(inTrash))
     fs::remove(inTrash);
 
+  // Swap a directory after preview, before execution of the confirmed snapshot.
+  {
+    const auto project = root / "project", original = root / "old-project", note = project / "note";
+    fs::create_directory(project);
+    std::ofstream(note) << payload;
+    const auto trashPath = MoveToTrash(note.string());
+    Job restore{Action::Restore, {trashPath}, {}};
+    FreezeLocalJob(restore);
+    const auto identity = restore.expectedSources.at(trashPath);
+    restore.restoreTargets[trashPath] = CaptureRestoreTarget(trashPath, identity);
+    auto encoded = EncodeJob(restore, 'test');
+    auto submitted = DecodeSubmittedJob(encoded, {Action::Restore});
+    BMessage incomplete;
+    encoded.FindMessage("restoreTarget", &incomplete);
+    incomplete.RemoveName("parentNode");
+    encoded.ReplaceMessage("restoreTarget", &incomplete);
+    Check(!DecodeSubmittedJob(encoded, {Action::Restore}),
+          "a restore confirmation without its parent identity is refused");
+    fs::rename(project, original);
+    fs::create_directory(project);
+    Check(submitted.has_value(), "restore confirmation includes the original directory identity");
+    const auto rejected = submitted ? Run(*submitted, {}) : Result{};
+    Check(!rejected.completed && !rejected.errors.empty() && Read(trashPath) == payload &&
+              !fs::exists(note) && !fs::exists(original / "note") &&
+              OriginalTrashPath(trashPath, identity) == note.string(),
+          "replaced project folder cannot receive a confirmed restore");
+    restore.restoreTargets[trashPath] = CaptureRestoreTarget(trashPath, identity);
+    const auto retry = Run(DecodeJob(EncodeJob(restore, 'test')), {});
+    Check(retry.completed == 1 && retry.errors.empty() && !fs::exists(trashPath) &&
+              Read(note) == payload && !fs::exists(original / "note"),
+          "a fresh restore confirmation can target the replacement folder");
+  }
+
   const auto trashed = MoveToTrash(source.string());
   Job guardedRestore{Action::Restore, {trashed}, {}};
   FreezeLocalJob(guardedRestore);
   const auto shown = OriginalTrashPath(trashed, guardedRestore.expectedSources.at(trashed));
   Check(shown == source.string(), "restore preview identifies exact original path");
-  guardedRestore.restoreTargets[trashed] = shown + "-different";
+  guardedRestore.restoreTargets[trashed] = CaptureRestoreTarget(trashed, guardedRestore.expectedSources.at(trashed));
+  guardedRestore.restoreTargets.at(trashed).path += "-different";
   result = Run(guardedRestore, {});
   Check(!result.completed && !result.errors.empty() && fs::exists(trashed) && !fs::exists(source),
         "restore refuses to repoint a user's destination after confirmation");

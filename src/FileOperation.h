@@ -7,6 +7,7 @@
 #include <optional>
 #include <utility>
 #include <stdint.h>
+#include <sys/stat.h>
 #include <string>
 #include <vector>
 
@@ -42,6 +43,10 @@ struct NodeIdentity {
 };
 struct BulkRenameGuard {
   std::string contents, rootStamp;
+};
+struct RestoreTarget {
+  std::string path;
+  NodeIdentity parent;
 };
 struct Job {
   Action action = Action::Copy;
@@ -84,7 +89,7 @@ struct Job {
   // In-process guard for cross-window Copy, never decoded from messages.
   std::function<void()> checkDestinationWindow;
   // For confirmed Trash restores, bind the previewed original paths as well as the entries.
-  std::map<std::string, std::string> restoreTargets;
+  std::map<std::string, RestoreTarget> restoreTargets;
   // Metadata from the selected pane row, not a later lookup at the same URL.
   std::map<std::string, FileEntry> expectedRemoteSources;
   // Other half of a mixed Tracker paste. Both jobs are queued in-process.
@@ -107,6 +112,8 @@ struct Hooks {
   std::function<Decision(const CopyConflict &)> copyConflict;
   // Offered only by ordinary Copy, never Move or private staging.
   std::function<bool(const std::string &, const std::string &)> confirmFatCopy;
+  // Outlives private staging, whose temporary file is NOT the only input.
+  std::function<void(const std::string &, const struct stat &)> checkOverwrite;
 };
 enum class Publication { NotAttempted, Unknown, Published };
 struct UploadVerification {

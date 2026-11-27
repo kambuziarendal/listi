@@ -213,8 +213,11 @@ public:
         deliveryFailed = true;
         return;
       }
-      if (disk && st.st_dev == disk->mountedDevice && !disk->protectedVolume)
-        disk->partition.WriteTo(item);
+      if (disk && st.st_dev == disk->mountedDevice && !disk->protectedVolume &&
+          !disk->partition.WriteTo(item)) {
+        deliveryFailed = true;
+        return;
+      }
       const bool cells = !parent && (S_ISREG(st.st_mode) || S_ISDIR(st.st_mode)) &&
                          m->HasString("attribute");
       const bool localIcon = icons && (S_ISREG(targetMode) || S_ISDIR(targetMode));
@@ -333,11 +336,11 @@ public:
         if (item.AddString("name", (disk.name + " (unmounted)").c_str()) != B_OK ||
             item.AddString("path", key.c_str()) != B_OK ||
             item.AddBool("sizeKnown", false) != B_OK ||
-            item.AddBool("unmountedDisk", true) != B_OK) {
+            item.AddBool("unmountedDisk", true) != B_OK ||
+            !disk.partition.WriteTo(item)) {
           deliveryFailed = true;
           return true;
         }
-        disk.partition.WriteTo(item);
         append(item);
         return false;
       });

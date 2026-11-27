@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "Trash.h"
+#include "VirtualFile.h"
 #include "FileOperation.h"
 #include <Directory.h>
 #include <Entry.h>
@@ -180,9 +181,19 @@ std::string OriginalTrashPath(const std::string &path, const NodeIdentity &expec
     throw std::runtime_error("Not a top-level Trash entry");
   return ReadOriginalPath(node, path, trash);
 }
+RestoreTarget CaptureRestoreTarget(const std::string &path, const NodeIdentity &expected) {
+  RestoreTarget target;
+  target.path = OriginalTrashPath(path, expected);
+  BDirectory parent(ParentLocation(target.path).c_str());
+  Require(parent.InitCheck(), target.path + " (original folder must exist)");
+  node_ref identity;
+  Require(parent.GetNodeRef(&identity), target.path);
+  target.parent = {identity.device, identity.node};
+  return target;
+}
 std::string RestoreFromTrash(const std::string &path, std::string *warning,
                              const NodeIdentity *expected,
-                             const std::string *confirmedTarget) {
+                             const RestoreTarget *confirmedTarget) {
   BEntry entry(path.c_str(), false);
   if (expected)
     CheckIdentity(entry, *expected);
@@ -201,11 +212,9 @@ std::string RestoreFromTrash(const std::string &path, std::string *warning,
                    opened.inode != expected->inode))
     throw std::runtime_error(current + ": selected entry changed; not restored.");
   auto target = ReadOriginalPath(node, current, trash);
-  if (confirmedTarget && target != *confirmedTarget)
+  if (confirmedTarget && target != confirmedTarget->path)
     throw std::runtime_error(path + ": restore destination changed; select Restore again.");
-  std::string parentPath = target.substr(0, target.find_last_of('/'));
-  if (parentPath.empty())
-    parentPath = "/";
+  const auto parentPath = ParentLocation(target);
   BDirectory destination(parentPath.c_str());
   Require(destination.InitCheck(),
           parentPath + " (original folder must exist)");
@@ -218,6 +227,9 @@ std::string RestoreFromTrash(const std::string &path, std::string *warning,
         path + ": original folder now points into Trash; entry retained.");
   node_ref destinationIdentity;
   Require(destination.GetNodeRef(&destinationIdentity), parentPath);
+  if (confirmedTarget && (destinationIdentity.device != confirmedTarget->parent.device ||
+                          destinationIdentity.node != confirmedTarget->parent.inode))
+    throw std::runtime_error(path + ": original folder was replaced; retained in Trash. Select Restore again.");
   if (destinationIdentity.device != identity.device)
     throw std::runtime_error(path + ": original folder is now on another volume.");
   // No intentional replacement or recursive merge. The same check/rename

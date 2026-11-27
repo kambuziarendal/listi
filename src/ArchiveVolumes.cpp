@@ -44,7 +44,7 @@ ArchiveVolume Capture(const std::string &path) {
   if (lstat(path.c_str(), &st) || !S_ISREG(st.st_mode) || st.st_size < 0)
     throw std::runtime_error(
         "Archive part is missing or is not a regular file: " + path);
-  return {path, ArchivePasswordIdentity(st), st.st_size};
+  return {path, ArchivePasswordIdentity(st), st.st_size, st.st_dev, st.st_ino};
 }
 } // namespace
 ArchiveVolumes FindArchiveVolumes(const std::string &path) {

@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: MIT
 #pragma once
 #include <stdint.h>
+#include <sys/types.h>
 #include <string>
 #include <vector>
 namespace Listi {
 struct ArchiveVolume {
   std::string path, identity;
   int64_t size = 0;
+  dev_t device;
+  ino_t inode;
 };
 struct ArchiveVolumes {
   enum Kind { Single, Joined7z, Rar } kind = Single;

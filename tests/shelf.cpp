@@ -69,8 +69,11 @@ void CheckProtectedSources(const fs::path &root) {
     fs::create_directory_symlink(out / "set", alias);
     Listi::Shelf shelf;
     shelf.Add({first.string(), incoming.string(), (alias / "doc").string()});
-    Refused([&] { Listi::PrepareShelfTransfer(shelf.Snapshot(), action, out.string()); },
-            "contains a selected source", "Shelf rejects nested source/output overlap before first root");
+    const auto prepared = Listi::PrepareShelfTransfer(shelf.Snapshot(), action, out.string());
+    const auto guarded = Listi::Run(prepared, {});
+    Check(!guarded.completed && !guarded.errors.empty() &&
+              guarded.errors.front().find("contains a selected source") != std::string::npos,
+          "Shelf worker rejects nested source/output overlap before first root");
     Check(Read(first) == "first source" && Read(out / "first") == "first target" &&
               Read(incoming / "doc/file") == "incoming" && Read(selected / "file") == "selected" &&
               !fs::exists(out / "doc"),

@@ -26,6 +26,7 @@ std::string ResolveFolder(const std::string &path) {
 using Node = std::pair<dev_t, ino_t>;
 
 struct SelectionTrees {
+  const TransferControl &control;
   std::set<Node> roots, ancestors;
   static bool SameEntry(const std::string &source, const Node &node) {
     struct stat st;
@@ -37,6 +38,7 @@ struct SelectionTrees {
   // which may have different case and normalization rules than the source.
   void CheckMerge(const std::string &source, const std::string &target,
                   unsigned depth) const {
+    control.Check();
     struct stat output;
     if (lstat(target.c_str(), &output)) {
       if (errno == ENOENT)
@@ -73,10 +75,13 @@ struct SelectionTrees {
 };
 }
 void CheckTransferOutputTrees(const std::vector<std::string> &sources,
-                              const std::string &destination) {
-  SelectionTrees selection;
+                              const std::string &destination,
+                              const std::function<bool()> &proceed) {
+  const TransferControl control{proceed};
+  SelectionTrees selection{control, {}, {}};
   std::set<std::string> checked;
   for (const auto &source : sources) {
+    control.Check();
     if (IsVirtual(source))
       continue;
     struct stat st;
@@ -85,6 +90,7 @@ void CheckTransferOutputTrees(const std::vector<std::string> &sources,
     selection.roots.emplace(st.st_dev, st.st_ino);
     auto parent = ResolveFolder(ParentLocation(source));
     while (checked.insert(parent).second) {
+      control.Check();
       if (stat(parent.c_str(), &st))
         throw std::runtime_error("Cannot check source folder: " + parent);
       selection.ancestors.emplace(st.st_dev, st.st_ino);
@@ -95,6 +101,7 @@ void CheckTransferOutputTrees(const std::vector<std::string> &sources,
   }
   // A different selected directory can contain the destination itself.
   for (auto parent = ResolveFolder(destination);; parent = ParentLocation(parent)) {
+    control.Check();
     struct stat st;
     if (stat(parent.c_str(), &st))
       throw std::runtime_error("Cannot check destination folder: " + parent);
@@ -165,8 +172,6 @@ Job PrepareTransfer(Job job, bool allowSameFolder) {
   if (!allowSameFolder && InTransferSourceFolder(job))
     throw std::runtime_error(
         "A selected entry is already in the destination folder.");
-  if (target.Local())
-    CheckTransferOutputTrees(job.sources, resolved);
   return job;
 }
 }

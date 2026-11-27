@@ -40,10 +40,10 @@ std::string PreviewRestore(Job &job) {
     auto &target = job.restoreTargets[source];
     preview += "\n" + LocationLeaf(source) + " → ";
     try {
-      target = OriginalTrashPath(source, job.expectedSources.at(source));
-      preview += target;
+      target = CaptureRestoreTarget(source, job.expectedSources.at(source));
+      preview += target.path;
       struct stat st;
-      if (lstat(target.c_str(), &st) == 0)
+      if (lstat(target.path.c_str(), &st) == 0)
         preview += " (already exists)";
       else if (errno != ENOENT)
         preview += " (cannot check destination)";

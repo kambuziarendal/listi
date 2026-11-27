@@ -273,29 +273,31 @@ struct Runner {
   void GuardTransferSelection(const Job &job) {
     if (job.action != Action::Copy && job.action != Action::Move)
       return;
-    if (job.sources.size() == 1 && job.siblingPasteSources.empty())
-      return; // Own-entry and descendant checks already guard single selections.
     std::vector<std::string> available;
-    auto protect = [&](const std::string &path) {
+    const bool mixedPaste = !job.siblingPasteSources.empty();
+    auto protect = [&](const std::string &path, const NodeIdentity *frozen) {
+      Check();
       struct stat st;
       if (lstat(path.c_str(), &st) == 0) {
+        if (mixedPaste && (!frozen || st.st_dev != frozen->device || st.st_ino != frozen->inode))
+          throw std::runtime_error("The clipboard selection changed: " + path);
         selectedTransferRoots.emplace(st.st_dev, st.st_ino);
         available.push_back(path);
-      } else if (errno != ENOENT && errno != ENOTDIR) {
+      } else if (mixedPaste || (errno != ENOENT && errno != ENOTDIR)) {
         Fail(path);
       }
-      // Missing sources are still reported per root by Execute().
+      // Ordinary jobs still report missing roots individually in Execute().
+      if (frozen)
+        selectedTransferRoots.emplace(frozen->device, frozen->inode);
     };
-    for (const auto &[path, frozen] : job.expectedSources)
-      selectedTransferRoots.emplace(frozen.device, frozen.inode);
-    for (const auto &path : job.sources)
-      protect(path);
-    for (const auto &[path, frozen] : job.siblingPasteSources) {
-      selectedTransferRoots.emplace(frozen.device, frozen.inode);
-      protect(path);
+    for (const auto &path : job.sources) {
+      const auto frozen = job.expectedSources.find(path);
+      protect(path, frozen == job.expectedSources.end() ? nullptr : &frozen->second);
     }
-    if (available.size() > 1)
-      CheckTransferOutputTrees(available, job.destination);
+    for (const auto &[path, frozen] : job.siblingPasteSources)
+      protect(path, &frozen);
+    if (!available.empty())
+      CheckTransferOutputTrees(available, job.destination, h.proceed);
   }
   static NodeKey Key(const struct stat &node) { return {node.st_dev, node.st_ino}; }
   std::string DirectoryConflict(const struct stat &node, const std::string &src,
@@ -1029,6 +1031,8 @@ struct Runner {
     if (existed && st.st_dev == before.st_dev && st.st_ino == before.st_ino)
       throw std::runtime_error(src +
                                ": source and destination are the same entry");
+    if (existed && h.checkOverwrite)
+      h.checkOverwrite(dst, before);
     if (existed && selectedTransferRoots.count(Key(before)))
       throw std::runtime_error(dst + ": destination is a selected source; left untouched");
     if (S_ISDIR(st.st_mode)) {
@@ -1344,12 +1348,14 @@ struct Runner {
                                 stagedMetadata, staged, published, ntfsTarget);
       } else if (existed) {
         const auto target = Leaf(dst);
-        if (fstatat(parent, target.c_str(), &currentTarget, AT_SYMLINK_NOFOLLOW) ||
-            !SameEntry(before, currentTarget))
-          throw std::runtime_error(dst + ": destination changed during operation; left untouched");
         // A conflict answer can wait while another writer renames the target.
         // Check the actual spelling again even if the same inode still resolves.
         parentDirectory.RequireExactLeaf(target);
+        if (fstatat(parent, target.c_str(), &currentTarget, AT_SYMLINK_NOFOLLOW) ||
+            !SameEntry(before, currentTarget))
+          throw std::runtime_error(dst + ": destination changed during operation; left untouched");
+        if (h.checkOverwrite)
+          h.checkOverwrite(dst, currentTarget);
         if (renameat(parent, leaf.c_str(), parent, target.c_str()))
           Fail(dst);
       } else {
@@ -1601,7 +1607,7 @@ struct Runner {
               frozen == job.expectedSources.end() ? observed : frozen->second;
           const auto confirmed = job.restoreTargets.find(source);
           if (!job.restoreTargets.empty() &&
-              (confirmed == job.restoreTargets.end() || confirmed->second.empty()))
+              (confirmed == job.restoreTargets.end() || confirmed->second.path.empty()))
             throw std::runtime_error(source + ": original location unavailable at confirmation; retained in Trash.");
           const std::string destination =
               job.action == Action::Trash
@@ -1743,6 +1749,55 @@ struct Runner {
     }
   }
 };
+// The local publisher sees a private intermediate as its source. Retain the
+// original read dependencies through preflight, the conflict prompt and rename.
+Hooks VirtualTransferHooks(const Job &job, const Hooks &hooks) {
+  const bool localCopy = job.action == Action::Copy && !IsVirtual(job.destination);
+  std::set<std::string> archives;
+  for (const auto &entry : job.expectedArchiveSets)
+    archives.insert(entry.first);
+  std::set<std::pair<dev_t, ino_t>> inputs;
+  bool hasLocal = false;
+  if (localCopy) {
+    for (const auto &source : job.sources) {
+      const auto from = ParseLocation(source);
+      if (from.Archive())
+        archives.insert(from.archive);
+      if (from.Local()) {
+        struct stat st;
+        if (lstat(source.c_str(), &st))
+          Fail(source);
+        inputs.emplace(st.st_dev, st.st_ino);
+        hasLocal = true;
+      }
+    }
+    if (hasLocal) {
+      CheckTransferOutputTrees(job.sources, job.destination, hooks.proceed);
+      for (const auto &[path, frozen] : job.expectedSources)
+        inputs.emplace(frozen.device, frozen.inode);
+    }
+  }
+  for (const auto &path : archives) {
+    const auto parts = FindArchiveVolumes(path);
+    const auto frozen = job.expectedArchiveSets.find(path);
+    if (frozen != job.expectedArchiveSets.end() && parts.Fingerprint() != frozen->second)
+      throw std::runtime_error("Archive changed after selection. Select its entries again.");
+    if (localCopy)
+      for (const auto &part : parts.files)
+        inputs.emplace(part.device, part.inode);
+  }
+  Hooks guarded = hooks;
+  if (!inputs.empty()) {
+    guarded.checkOverwrite = [inputs = std::move(inputs), previous = hooks.checkOverwrite](
+        const std::string &path, const struct stat &target) {
+      if (inputs.count({target.st_dev, target.st_ino}))
+        throw std::runtime_error("Destination is a selected input or source archive volume: " + path);
+      if (previous)
+        previous(path, target);
+    };
+  }
+  return guarded;
+}
 } // namespace
 Result Run(const Job &j, const Hooks &h) {
   if (j.action == Action::BulkRename || j.action == Action::UndoBulkRename)
@@ -1773,16 +1828,17 @@ Result Run(const Job &j, const Hooks &h) {
       return result;
     }
     try {
-      for (const auto &entry : j.expectedArchiveSets)
-        if (FindArchiveVolumes(entry.first).Fingerprint() != entry.second)
-          throw std::runtime_error(
-              "Archive changed after selection. Select its entries again.");
+      const Hooks guarded = VirtualTransferHooks(j, h);
+      return RunVirtual(j, guarded);
+    } catch (const Cancelled &) {
+      Result result;
+      result.cancelled = true;
+      return result;
     } catch (const std::exception &e) {
       Result result;
       result.errors.push_back(e.what());
       return result;
     }
-    return RunVirtual(j, h);
   }
 
   Runner r{h};
