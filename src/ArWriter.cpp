@@ -2,6 +2,7 @@
 #include "ArWriter.h"
 #include "StagingSpace.h"
 #include "ArchiveBackend.h"
+#include "ArchiveVolumes.h"
 
 #include <algorithm>
 #include <array>
@@ -286,8 +287,10 @@ std::shared_ptr<const Index> OpenIndex(int fd, const std::string &path,
   control.Check();
   const bool scoped = ArchiveListingScopeActive();
   struct stat state;
-  if (scoped && cached.index && cached.path == path && !fstat(fd, &state) &&
-      SameState(state, cached.index->state)) {
+  Require(!fstat(fd, &state), "Cannot inspect the opened Unix ar archive.");
+  if (control.archiveVersion)
+    CheckOpenedArchiveVersion(path, ArchivePasswordIdentity(state), control);
+  if (scoped && cached.index && cached.path == path && SameState(state, cached.index->state)) {
     VerifySame(fd, path, state);
     return cached.index;
   }

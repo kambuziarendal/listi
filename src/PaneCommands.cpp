@@ -19,6 +19,18 @@ namespace {
 constexpr uint32 kPreviewPattern = 'sppv';
 }
 
+void Pane::BindTransferDestination(Listi::Job &job) const {
+  job.destination = Path();
+  if (!job.destination.empty() && job.destination.front() == '/') {
+    const auto [device, node] = FolderIdentity();
+    if (!LocationValid() || device < 0 || node < 0 || IsSearchList())
+      throw std::runtime_error("Wait for the destination folder to load, or reload it.");
+    job.expectedDestination = {int32_t(device), node};
+  } else {
+    entries.BindArchiveView(job, job.destination);
+  }
+}
+
 bool Pane::HandleSelectionCommand(const BMessage &request, InlineAction &prompt,
                                   OperationQueue &queue) {
   switch (request.what) {

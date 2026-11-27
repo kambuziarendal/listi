@@ -36,6 +36,12 @@ struct TransferControl {
   std::function<bool()> proceed;
   std::function<void(uint64_t)> progress;
   NetworkCleanupBudget *cleanup = nullptr;
+  // Bound by an archive member transfer; listings and reads must not adopt a new revision.
+  const std::string *archiveVersion = nullptr;
+  void RequireArchiveVersion(const std::string &actual) const {
+    if (archiveVersion && *archiveVersion != actual)
+      throw std::runtime_error("Archive changed after selection. Reload and select again.");
+  }
   void Check() const {
     if (proceed && !proceed())
       throw Cancelled();

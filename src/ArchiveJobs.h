@@ -16,6 +16,7 @@ Job PrepareArchiveEditTarget(const std::string &archive,
                              const std::string &internalFolder = "/",
                              const Hooks &hooks = {});
 void SetArchiveEditAdditions(Job &, const std::vector<std::string> &add);
+void SetArchiveEditRemovals(Job &, const std::vector<std::string> &remove);
 Job PrepareArchiveEditJob(const std::string &archive,
                           const std::vector<std::string> &add,
                           const std::vector<std::string> &remove,

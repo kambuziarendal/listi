@@ -6,6 +6,7 @@
 #include "BulkRename.h"
 #include "DirectoryFinalization.h"
 #include "ArchiveVolumes.h"
+#include "ArchiveJobChecks.h"
 #include "ArchiveJobs.h"
 #include "ImageConvert.h"
 #include "NamedEntry.h"
@@ -321,6 +322,7 @@ struct Runner {
     GuardDirectories();
     if (!guardedJob)
       return;
+    ArchiveJobChecks::VerifyArchiveSets(*guardedJob);
     struct stat st;
     if (!guardedJob->expectedSources.empty()) {
       auto expected = guardedJob->expectedSources.find(guardedSource);
@@ -1751,36 +1753,34 @@ struct Runner {
 };
 // The local publisher sees a private intermediate as its source. Retain the
 // original read dependencies through preflight, the conflict prompt and rename.
-Hooks VirtualTransferHooks(const Job &job, const Hooks &hooks) {
+Hooks VirtualTransferHooks(Job &job, const Hooks &hooks) {
   const bool localCopy = job.action == Action::Copy && !IsVirtual(job.destination);
   std::set<std::string> archives;
   for (const auto &entry : job.expectedArchiveSets)
     archives.insert(entry.first);
   std::set<std::pair<dev_t, ino_t>> inputs;
   bool hasLocal = false;
-  if (localCopy) {
-    for (const auto &source : job.sources) {
-      const auto from = ParseLocation(source);
-      if (from.Archive())
-        archives.insert(from.archive);
-      if (from.Local()) {
-        struct stat st;
-        if (lstat(source.c_str(), &st))
-          Fail(source);
-        inputs.emplace(st.st_dev, st.st_ino);
-        hasLocal = true;
-      }
+  for (const auto &source : job.sources) {
+    const auto from = ParseLocation(source);
+    if (from.Archive())
+      archives.insert(from.archive);
+    if (localCopy && from.Local()) {
+      struct stat st;
+      if (lstat(source.c_str(), &st))
+        Fail(source);
+      inputs.emplace(st.st_dev, st.st_ino);
+      hasLocal = true;
     }
-    if (hasLocal) {
-      CheckTransferOutputTrees(job.sources, job.destination, hooks.proceed);
-      for (const auto &[path, frozen] : job.expectedSources)
-        inputs.emplace(frozen.device, frozen.inode);
-    }
+  }
+  if (hasLocal) {
+    CheckTransferOutputTrees(job.sources, job.destination, hooks.proceed);
+    for (const auto &[path, frozen] : job.expectedSources)
+      inputs.emplace(frozen.device, frozen.inode);
   }
   for (const auto &path : archives) {
     const auto parts = FindArchiveVolumes(path);
-    const auto frozen = job.expectedArchiveSets.find(path);
-    if (frozen != job.expectedArchiveSets.end() && parts.Fingerprint() != frozen->second)
+    const auto fingerprint = parts.Fingerprint();
+    if (job.expectedArchiveSets.emplace(path, fingerprint).first->second != fingerprint)
       throw std::runtime_error("Archive changed after selection. Select its entries again.");
     if (localCopy)
       for (const auto &part : parts.files)
@@ -1828,8 +1828,9 @@ Result Run(const Job &j, const Hooks &h) {
       return result;
     }
     try {
-      const Hooks guarded = VirtualTransferHooks(j, h);
-      return RunVirtual(j, guarded);
+      Job transfer = j;
+      const Hooks guarded = VirtualTransferHooks(transfer, h);
+      return RunVirtual(transfer, guarded);
     } catch (const Cancelled &) {
       Result result;
       result.cancelled = true;

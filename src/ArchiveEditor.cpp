@@ -460,22 +460,25 @@ bool ArchiveEditSession::Save(const Hooks &hooks) {
   ValidateArchive();
   auto edit = target;
   SetArchiveEditAdditions(edit, {candidate});
-  Job published;
   Hooks internal = hooks;
   // Saving this one selected member explicitly replaces its previous version.
   internal.conflict = [](const std::string &) { return Decision::Replace; };
-  internal.fileDone = [&](const std::string &, const std::string &) {
-    published =
-        PrepareArchiveEditTarget(target.destination, "/" + target.archivePath);
-  };
   auto result = Run(edit, internal);
   if (result.cancelled)
     throw Cancelled();
   Require(result.errors.empty() && result.completed == 1 &&
-              !published.destination.empty(),
+              !result.publishedArchiveVersion.empty(),
           result.errors.empty()
               ? "Could not save the archive. Working copy was retained."
               : result.errors.front());
+  const auto current = FindArchiveVolumes(target.destination);
+  Require(current.Fingerprint() == result.publishedArchiveVersion,
+          "Archive changed after this save was published. Working copy kept. "
+          "Reconcile it with the current archive before continuing.");
+  auto published = target;
+  const auto &file = current.files.front();
+  published.expectedSources.at(target.destination) = {int32_t(file.device), int64_t(file.inode)};
+  published.expectedArchiveSets.at(target.destination) = result.publishedArchiveVersion;
   // The journal certifies both the archive fingerprint and the saved bytes.
   // Install and flush the baseline first. An interruption must leave a stale
   // fingerprint that refuses writeback, never a current one with old bytes.

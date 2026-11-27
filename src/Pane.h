@@ -86,6 +86,7 @@ public:
   }
   const char *Path() const { return path.String(); }
   const PaneModel &ExportModel() const { return entries; }
+  void BindTransferDestination(Listi::Job &) const;
   bool CancelSelectionGesture();
   void FocusList();
   void ToggleTreeFocus();

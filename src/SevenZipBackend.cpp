@@ -215,6 +215,7 @@ struct State {
     volumes = FindArchiveVolumes(p);
     path = volumes.files.front().path;
     identity = volumes.Fingerprint();
+    control.RequireArchiveVersion(identity);
     format = SevenZipFormat(path);
     Require(engine->formats.count(format),
             "The p7zip engine does not support this archive");

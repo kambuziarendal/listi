@@ -124,10 +124,15 @@ Job PrepareArchiveEditJob(const std::string &archive,
   Job job = PrepareArchiveEditTarget(archive, internalFolder);
   if (!add.empty())
     SetArchiveEditAdditions(job, add);
+  SetArchiveEditRemovals(job, remove);
+  return job;
+}
+
+void SetArchiveEditRemovals(Job &job, const std::vector<std::string> &remove) {
   std::set<std::string> removed;
   for (const auto &source : remove) {
     auto location = ParseLocation(source);
-    Require(location.Archive() && location.archive == archive &&
+    Require(location.Archive() && location.archive == job.destination &&
                 location.path != "/",
             "Select entries from one archive, not the archive root.");
     removed.insert(MemberPath(location.path));
@@ -143,7 +148,6 @@ Job PrepareArchiveEditJob(const std::string &archive,
     if (!covered)
       job.archiveRemove.push_back(path);
   }
-  return job;
 }
 void FreezeArchiveTargets(Job &transfer) {
   std::set<std::string> inspected;

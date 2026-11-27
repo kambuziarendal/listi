@@ -44,6 +44,8 @@ public:
       task->target = PrepareArchiveEditTarget(task->archive, task->folder, hooks);
       ArchiveJobChecks::RequireArchiveVersions(task->command, task->target);
       ArchiveJobChecks::Guards(task->command);
+      if (task->command.action == Action::Delete)
+        SetArchiveEditRemovals(task->target, task->command.sources);
     } catch (const std::exception &e) {
       task->error = e.what();
     }
@@ -243,7 +245,7 @@ ArchivePrompt ArchiveActions::ConfirmAddition(const Job &job,
   return {text, "Update archive", accepted};
 }
 
-ArchivePrompt ArchiveActions::ConfirmRemoval(const Pane &source) {
+void ArchiveActions::InspectRemoval(const Pane &source, BMessenger owner) {
   const auto selected = source.Selected();
   if (selected.empty())
     throw std::runtime_error("Select entries inside one writable archive.");
@@ -251,17 +253,19 @@ ArchivePrompt ArchiveActions::ConfirmRemoval(const Pane &source) {
   if (!location.Archive())
     throw std::runtime_error(
         "Open an archive and select the entries to remove.");
-  Job view;
-  source.ExportModel().BindArchiveView(view, source.Path());
-  ArchiveJobChecks::VerifyArchiveSets(view);
-  auto job = PrepareArchiveEditJob(location.archive, {}, selected, location.path);
-  RequireScannedSources(source, job);
+  Job command;
+  command.action = Action::Delete;
+  command.sources = selected;
+  Inspect(source, owner, std::move(command), location.archive, location.path);
+}
+
+ArchivePrompt ArchiveActions::ConfirmRemoval(const Job &job, size_t selectedCount) {
   const auto accepted = EncodeJob(job, kArchiveEditAccepted);
   BString text;
   text
-      << "Remove " << int32(selected.size())
+      << "Remove " << int32(selectedCount)
       << " selected entries from this archive?\n\n"
-      << location.archive.c_str()
+      << job.destination.c_str()
       << "\n\nThe archive is rebuilt safely. The original remains unchanged if the job fails.";
   return {text, "Remove from archive", accepted};
 }

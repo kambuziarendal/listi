@@ -291,21 +291,24 @@ void checkArchiveInspection(const std::string &root) {
   };
   formatPaused = create_sem(0, "archive inspection paused");
   resumeFormat = create_sem(0, "archive inspection released");
-  for (bool cancel : {true, false}) {
-    navigate(cancel ? root : OpenArchive(ar.destination));
-    if (cancel)
+  for (const auto command : {kAddArchive, kMkdir, kRemoveArchive}) {
+    navigate(command == kAddArchive ? root : OpenArchive(ar.destination));
+    if (command == kAddArchive)
       check(pane->MatchPattern("inspect.ar", true) == 1, "select the ar in the real pane");
+    if (command == kRemoveArchive)
+      check(pane->MatchPattern("A", true) == 1, "select an ar member to remove");
+    const auto previousCancels = window->cancels.load();
     pauseFormatRead = true;
-    window->PostMessage(cancel ? kAddArchive : kMkdir);
+    window->PostMessage(command);
     window->Unlock();
     const auto held = acquire_sem_etc(formatPaused, 1, B_RELATIVE_TIMEOUT, 4000000);
     check(held == B_OK && window->LockWithTimeout(500000) == B_OK,
           "archive format reader can pause without holding the window");
     check(question->Pending() && !question->FindView("Name:"),
           "only the cancellable inspection is pending");
-    if (cancel) {
+    if (command != kMkdir) {
       window->PostMessage(kInlineCancel);
-      check(wait([&] { return window->cancels.load() == 1; }) && !question->Pending(),
+      check(wait([&] { return window->cancels.load() == previousCancels + 1; }) && !question->Pending(),
             "window handles Cancel before paused read returns");
     } else {
       navigate(root);

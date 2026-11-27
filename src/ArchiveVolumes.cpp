@@ -111,6 +111,13 @@ std::string ArchiveVolumes::Fingerprint() const {
            file.identity + ";";
   return out;
 }
+void CheckOpenedArchiveVersion(const std::string &path, const std::string &identity,
+                               const TransferControl &control) {
+  if (control.archiveVersion) {
+    const ArchiveVolumes opened{ArchiveVolumes::Single, {{path, identity, 0, 0, 0}}};
+    control.RequireArchiveVersion(opened.Fingerprint());
+  }
+}
 void ArchiveVolumes::Verify() const {
   for (const auto &file : files) {
     struct stat st;

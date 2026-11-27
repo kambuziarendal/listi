@@ -142,8 +142,8 @@ void FileOperationFlow::ShowArchive(uint32 action, const Pane &source,
     archiveActions.ShowAddPicker(source, owner);
     ShowInspectionProgress();
   } else if (action == kRemoveArchive) {
-    auto prompt = ArchiveActions::ConfirmRemoval(source);
-    AskInline(prompt.text.String(), prompt.button, prompt.accepted);
+    archiveActions.InspectRemoval(source, owner);
+    ShowInspectionProgress();
   } else {
     archiveActions.ShowJobWindow(action == kExtractArchive, source, target,
                                  owner);
@@ -215,7 +215,10 @@ void FileOperationFlow::FinishInspection(const Pane &source) {
     return;
   if (command.action == Action::EditArchive)
     archiveActions.OpenAddPicker(target, owner);
-  else
+  else if (command.action == Action::Delete) {
+    auto prompt = ArchiveActions::ConfirmRemoval(target, command.sources.size());
+    AskInline(prompt.text.String(), prompt.button, prompt.accepted);
+  } else
     AskEntryName(command, &target);
 }
 
@@ -260,10 +263,8 @@ void FileOperationFlow::BeginOperation(Action action, const Pane &source,
         !ParseLocation(job.sources.front()).Archive())
       job.expectedRemoteSources = source.ExportModel().SelectedRemoteEntries();
   }
-  if (isTransfer) {
-    job.destination = target.Path();
-    target.ExportModel().BindArchiveView(job, target.Path());
-  }
+  if (isTransfer)
+    target.BindTransferDestination(job);
   if ((action == Action::Trash || action == Action::Delete) &&
       !job.sources.empty() && ParseLocation(job.sources.front()).Archive()) {
     ShowArchive(kRemoveArchive, source, target);
