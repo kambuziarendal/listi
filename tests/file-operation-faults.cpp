@@ -2,6 +2,7 @@
 // Deterministic native syscall faults, including when the test user is root.
 #include "FileOperation.h"
 #include "JobSnapshot.h"
+#include "TransferCommand.h"
 #include "JobReportStore.h"
 #include "Trash.h"
 #include <Node.h>
@@ -165,6 +166,142 @@ extern "C" status_t __wrap__ZN5BNode10RemoveAttrEPKc(BNode *node, const char *na
 }
 
 namespace {
+// The prepared image is disposable; validate the exact three links and do
+// not delete a caller's directory unless it contains only these fixture names.
+void TestDeleteHardlinks(const fs::path &root) {
+  const char *prepared = getenv("LISTI_DELETE_HARDLINK_FIXTURE");
+  for (const std::string scenario : {"complete", "cancel", "replace", "edit"}) {
+    const auto base = (prepared ? fs::path(prepared) : root) / scenario;
+    const auto selected = base / "selected", first = selected / "z", second = selected / "a";
+    const auto outside = base / "outside";
+    if (!prepared) {
+      fs::create_directories(selected);
+      std::ofstream(outside) << "shared bytes";
+      if (link(outside.c_str(), first.c_str())) {
+        fs::remove_all(base);
+        std::cout << "NOTE hard-link deletion needs the prepared volume on this filesystem\n";
+        break;
+      }
+      if (link(outside.c_str(), second.c_str()))
+        throw std::runtime_error("Cannot make second fixture link");
+    }
+    struct stat a, z, external;
+    if (!fs::is_directory(fs::symlink_status(selected)) ||
+        std::distance(fs::directory_iterator(selected), fs::directory_iterator()) != 2 ||
+        lstat(first.c_str(), &z) || lstat(second.c_str(), &a) || lstat(outside.c_str(), &external) ||
+        !S_ISREG(z.st_mode) || z.st_nlink != 3 || z.st_ino != a.st_ino ||
+        z.st_dev != a.st_dev || z.st_ino != external.st_ino || z.st_dev != external.st_dev ||
+        Read(outside) != "shared bytes")
+      throw std::runtime_error("Invalid disposable hard-link fixture: " + selected.string());
+    bool interrupted = false;
+    Hooks hooks;
+    hooks.progress = [&](const std::string &path, uint64_t) {
+      if (path != first.string())
+        return;
+      if (scenario == "cancel")
+        interrupted = true;
+      if (scenario == "edit")
+        std::ofstream(outside, std::ios::app) << " changed";
+      if (scenario == "replace") {
+        std::ofstream(base / "replacement") << "new bytes";
+        fs::rename(base / "replacement", second);
+      }
+    };
+    hooks.proceed = [&] { return !interrupted; };
+    const auto r = Run({Action::Delete, {selected.string()}, ""}, hooks);
+    const bool complete = scenario == "complete";
+    Check(r.completed == int(complete) && r.cancelled == (scenario == "cancel") &&
+          r.errors.empty() == (complete || interrupted) &&
+          r.partialDeletions == int(!complete) && !fs::exists(first) &&
+          fs::exists(selected) != complete && fs::exists(second) != complete &&
+          Has(r, first, "", "completed") &&
+          (complete ? Has(r, second, "", "completed") && Has(r, selected, "", "completed")
+                    : Has(r, selected, "", "partial") &&
+                      Has(r, second, "", interrupted ? "unprocessed" : "failed")) &&
+          Read(outside) == (scenario == "edit" ? "shared bytes changed" : "shared bytes") &&
+          (complete || Read(second) == (scenario == "replace" ? "new bytes" : Read(outside))),
+          ("delete hard links: " + scenario + ", outside link and accurate receipt").c_str());
+    if (!prepared)
+      fs::remove_all(base);
+  }
+  const auto independent = root / "independent";
+  fs::create_directory(independent);
+  std::ofstream(independent / "a") << "one";
+  std::ofstream(independent / "z") << "two";
+  const auto normal = Run({Action::Delete, {independent.string()}, ""}, {});
+  Check(normal.completed == 1 && normal.errors.empty() && !fs::exists(independent),
+        "deleting independent files still completes");
+}
+
+void TestFileClaims(const fs::path &parent, bool insensitive) {
+  for (const auto action : {Action::Copy, Action::Move}) {
+    const auto base = parent / "claim-matrix", dest = base / "dest";
+    fs::create_directories(base / "one");
+    fs::create_directories(base / "two");
+    fs::create_directory(dest);
+    const auto old = base / "one" / "FirstExistingItem.tmp", first = base / "one" / "Report.tmp";
+    const auto second = base / "two" / "report.tmp";
+    std::ofstream(old) << "replacement";
+    std::ofstream(dest / old.filename()) << "old";
+    std::ofstream(first) << "first report";
+    std::ofstream(second) << "second report";
+    int prompts = 0;
+    Hooks repeat;
+    repeat.conflict = [&](const auto &) { ++prompts; return Decision::ReplaceAll; };
+    const auto job = PrepareTransfer({action, {old.string(), first.string(), second.string()}, dest.string()});
+    const auto r = Run(job, repeat);
+    const bool move = action == Action::Move;
+    Check(prompts == 1 && r.completed == (insensitive ? 2 : 3) &&
+              r.errors.empty() == !insensitive && Read(dest / old.filename()) == "replacement" &&
+              Read(dest / first.filename()) == "first report" &&
+              fs::exists(first) != move && (insensitive ? Read(second) == "second report" &&
+                    Has(r, second, dest / second.filename(), "failed", "already delivered")
+                  : Read(dest / second.filename()) == "second report" && fs::exists(second) != move),
+          "Replace All cannot discard the earlier file; distinct destination entries still succeed");
+    if (insensitive) {
+      const auto again = Run(PrepareTransfer({action, {second.string()}, dest.string()}), repeat);
+      Check(!again.completed && again.errors.size() == 1 && Read(second) == "second report" &&
+                Read(dest / first.filename()) == "first report",
+            "remaining-file retry cannot replace a differently spelled stored name");
+      Hooks keep;
+      keep.copyConflict = [](const CopyConflict &choice) {
+        return choice.separateOnly ? Decision::KeepBoth : Decision::Abort;
+      };
+      const auto recovered = Run(PrepareTransfer({action, {second.string()}, dest.string()}), keep);
+      Check(recovered.completed == 1 && recovered.errors.empty() &&
+                Read(dest / "report (2).tmp") == "second report" &&
+                Read(dest / first.filename()) == "first report",
+            "retry under a separate name delivers the remaining file without losing the first");
+    }
+    fs::remove_all(base);
+  }
+}
+void TestClaimedKeepBoth(const fs::path &root) {
+  const auto base = root / "claim-keep", named = base / "dest", prior = base / "one" / "item";
+  const auto second = base / "two" / "item", occupied = named / "item";
+  fs::create_directories(prior.parent_path());
+  fs::create_directories(second.parent_path());
+  fs::create_directory(named);
+  std::ofstream(prior) << "first";
+  std::ofstream(second) << "second";
+  std::ofstream(occupied) << "old";
+  bool offered = false;
+  Hooks hooks;
+  hooks.conflict = [](const auto &) { return Decision::ReplaceAll; };
+  hooks.copyConflict = [&](const CopyConflict &choice) {
+    offered = choice.separateOnly && choice.proposed == (named / "item (2)").string();
+    return Decision::KeepBoth;
+  };
+  // The UI preflight rejects equal top-level spellings. Exercise the worker's
+  // exact same claim transition as Report/report on the optional real volume.
+  const auto moved = Run({Action::Move, {prior.string(), second.string()}, named.string()}, hooks);
+  Check(offered && moved.completed == 2 && moved.errors.empty() &&
+            !fs::exists(prior) && !fs::exists(second) && Read(occupied) == "first" &&
+            Read(named / "item (2)") == "second" &&
+            Has(moved, second, named / "item (2)", "moved"),
+        "even after Replace All, a second source can only use its own unoccupied target");
+  fs::remove_all(base);
+}
 void TestDirectoryClaims(const fs::path &root, const fs::path &out) {
   for (const auto action : {Action::Copy, Action::Move}) {
     for (const bool existing : {false, true}) {
@@ -225,6 +362,52 @@ void TestDirectoryClaims(const fs::path &root, const fs::path &out) {
           "case-insensitive fixture resolves both spellings to one real inode");
     run(test, true);
     run(test, true); // The first delivery must survive a retry.
+    // Each Run creates a fresh worker. A restarted app has no claims from
+    // the old job; the persisted spelling itself must guard these retries.
+    fs::remove_all(test / "set");
+    const auto first = source / "Drafts", other = source / "drafts";
+    auto attempt = [&](std::vector<std::string> paths, const Hooks &h = {}) {
+      return Run(PrepareTransfer({Action::Copy, std::move(paths), test.string()}), h);
+    };
+    auto firstJob = attempt({first.string(), other.string()});
+    auto reversed = attempt({other.string(), first.string()});
+    auto remaining = attempt({other.string()});
+    Check(firstJob.completed == 1 && firstJob.errors.size() == 1 &&
+              reversed.completed == 1 && reversed.errors.size() == 1 &&
+              !remaining.completed && remaining.errors.size() == 1 &&
+              fs::is_directory(test / "Drafts" / "one") && !fs::exists(test / "Drafts" / "two"),
+          "opposite-order and remaining-only fresh jobs never merge a differently spelled folder");
+    Hooks separate;
+    separate.copyConflict = [&](const CopyConflict &request) {
+      Check(request.separateOnly && request.source == other.string(),
+            "directory alias offers a separate name without Replace");
+      return Decision::KeepBoth;
+    };
+    const auto chosen = attempt({other.string()}, separate);
+    Check(chosen.completed == 1 && chosen.errors.empty() &&
+              fs::is_directory(test / "drafts (2)" / "two") &&
+              !fs::exists(test / "Drafts" / "two") && !fs::exists(test / "drafts (2)" / "one"),
+          "explicit separate name preserves both directory trees on the real target");
+    const auto nested = root / "siblings";
+    fs::create_directory(nested);
+    std::ofstream(nested / "Report.tmp") << "upper";
+    std::ofstream(nested / "report.tmp") << "lower";
+    Hooks nestedConflict;
+    nestedConflict.conflict = [](const auto &) { return Decision::ReplaceAll; };
+    const auto files = Run(PrepareTransfer({Action::Copy, {nested.string()}, test.string()}), nestedConflict);
+    const auto upper = nested / "Report.tmp", lower = nested / "report.tmp";
+    const auto upperDst = test / "siblings" / "Report.tmp", lowerDst = test / "siblings" / "report.tmp";
+    const bool deliveredUpper = Read(upperDst) == "upper";
+    Check(!files.completed && files.partialCopies == 1 && files.errors.size() == 1 &&
+              Has(files, nested, test / "siblings", "partial") &&
+              Has(files, deliveredUpper ? upper : lower, deliveredUpper ? upperDst : lowerDst, "copied") &&
+              Has(files, deliveredUpper ? lower : upper, deliveredUpper ? lowerDst : upperDst,
+                  "failed", "already delivered") &&
+              Read(lowerDst) == (deliveredUpper ? "upper" : "lower") &&
+              Read(upper) == "upper" && Read(lower) == "lower",
+          "sibling files in one local copy retain first publication and a partial folder receipt");
+    fs::remove_all(nested);
+    TestFileClaims(test, true);
     fs::remove_all(test);
   } else {
     std::cout << "NOTE separate case-insensitive volume not configured\n";
@@ -318,6 +501,9 @@ int main() {
   const auto root = fs::canonical(temp);
   const auto out = root / "out", source = root / "file", target = out / "file";
   fs::create_directory(out);
+  TestDeleteHardlinks(root);
+  TestFileClaims(root, false);
+  TestClaimedKeepBoth(root);
   TestDirectoryClaims(root, out);
   TestMovePermissions(root, out);
   TestNameFlush(root, out);

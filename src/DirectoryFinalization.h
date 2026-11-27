@@ -23,6 +23,9 @@ public:
 
   int Descriptor() const { return fd; }
   void Verify() const;
+  // An equivalent lookup is not evidence that the stored name matches.
+  bool HasExactLeaf(const std::string &leaf) const;
+  void RequireExactLeaf(const std::string &leaf) const;
   // False only for the known Haiku NTFS chmod limitation.
   bool SetCopyMode(mode_t mode, bool allowUnsupportedNtfs) const;
   // False only for the known Haiku NTFS directory-fsync limitation.

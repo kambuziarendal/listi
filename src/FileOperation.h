@@ -34,6 +34,7 @@ enum class Decision { Replace, ReplaceAll, Skip, SkipAll, Abort, KeepBoth };
 struct CopyConflict {
   std::string source, destination, proposed;
   int64_t sourceSize, destinationSize, sourceModified, destinationModified;
+  bool separateOnly = false; // Never replace a prior output or merge an alias.
 };
 struct NodeIdentity {
   int32_t device = -1;

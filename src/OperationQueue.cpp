@@ -405,8 +405,10 @@ public:
         Listi::SetViewVisible(comparison[i], present);
       }
       const bool fat = m->GetBool("fat", false);
+      const bool separate = m->GetBool("separateOnly", false);
       repeat->SetValue(B_CONTROL_OFF);
-      Listi::SetViewVisible(repeat, !fat);
+      Listi::SetViewVisible(repeat, !fat && !separate);
+      Listi::SetViewVisible(replaceChoice, !separate);
       Listi::SetViewVisible(keepChoice, !fat && m->HasString("detail"));
       Listi::SetViewVisible(skipChoice, !fat);
       replaceChoice->SetLabel(fat ? "Copy without attributes" : "Replace");
@@ -417,6 +419,7 @@ public:
         button->SetMessage(answer);
       }
       summary->SetText(fat ? "FAT cannot store Haiku file attributes."
+                           : separate ? "These sources need separate names."
                            : "Destination exists. Choose how to continue:");
       file->SetText(m->GetString("path", ""));
       ShowChoices(true);
@@ -916,6 +919,9 @@ bool OperationQueue::Answer(Listi::Decision d, int64 request) {
         int(d) < int(Listi::Decision::Replace) ||
         int(d) > int(allowKeepBoth ? Listi::Decision::KeepBoth : Listi::Decision::Abort))
       return false;
+    if (separateOnly && d != Listi::Decision::KeepBoth && d != Listi::Decision::Skip &&
+        d != Listi::Decision::Abort)
+      return false;
     answer = int(d);
   }
   changed.notify_all();
@@ -936,6 +942,7 @@ Listi::Decision OperationQueue::Ask(const std::string &path, const Listi::CopyCo
     request = ++conflictSerial;
     operation = runningOperation;
     allowKeepBoth = copy != nullptr;
+    separateOnly = copy && copy->separateOnly;
     askingFat = fatDestination != nullptr;
     awaitingAnswer = true;
   }
@@ -948,7 +955,12 @@ Listi::Decision OperationQueue::Ask(const std::string &path, const Listi::CopyCo
     m.AddString("detail", ("Destination: " + *fatDestination).c_str());
     m.AddString("detail", "Copy file contents without Haiku attributes for this job on this FAT volume? Originals stay unchanged.");
   }
-  if (copy) {
+  if (copy && copy->separateOnly) {
+    m.AddBool("separateOnly", true);
+    m.AddString("detail", ("Incoming: " + copy->source).c_str());
+    m.AddString("detail", ("Conflicting destination: " + path).c_str());
+    m.AddString("detail", ("Keep both as: " + copy->proposed).c_str());
+  } else if (copy) {
     m.AddString("detail", ("Incoming: " + DescribeFile(copy->source, copy->sourceSize,
                                                        copy->sourceModified)).c_str());
     m.AddString("detail", ("Existing: " + DescribeFile(path, copy->destinationSize,
@@ -1019,7 +1031,8 @@ void OperationQueue::Loop() {
     Listi::Hooks hooks;
     hooks.report = std::make_shared<Listi::JobReportStore>();
     hooks.proceed = [this] { return Proceed(); };
-    if (job.action == Listi::Action::Copy && !Listi::IsVirtual(job.destination) &&
+    if ((job.action == Listi::Action::Copy || job.action == Listi::Action::Move) &&
+        !Listi::IsVirtual(job.destination) &&
         std::none_of(job.sources.begin(), job.sources.end(),
                      [](const auto &path) { return Listi::IsVirtual(path); }))
       hooks.copyConflict = [this](const auto &c) { return Ask(c.destination, &c); };

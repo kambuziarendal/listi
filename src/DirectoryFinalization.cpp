@@ -4,6 +4,8 @@
 #include <cerrno>
 #include <chrono>
 #include <cstring>
+#include <dirent.h>
+#include <memory>
 #include <fcntl.h>
 #ifdef __HAIKU__
 #include <Directory.h>
@@ -37,6 +39,34 @@ void PinnedDirectory::Verify() const {
   if ((follow ? stat(path.c_str(), &now) : lstat(path.c_str(), &now)) ||
       !S_ISDIR(now.st_mode) || now.st_dev != device || now.st_ino != inode)
     throw std::runtime_error(path + ": destination directory changed.");
+}
+
+bool PinnedDirectory::HasExactLeaf(const std::string &leaf) const {
+  // Open a fresh description so the shared pin's enumeration offset never moves.
+  const int scan = openat(fd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  DIR *raw = scan < 0 ? nullptr : fdopendir(scan);
+  if (!raw) {
+    const int error = errno;
+    if (scan >= 0)
+      close(scan);
+    throw std::runtime_error(path + ": cannot inspect stored entry names: " + strerror(error));
+  }
+  const auto closeDirectory = [](DIR *dir) { closedir(dir); };
+  std::unique_ptr<DIR, decltype(closeDirectory)> entries(raw, closeDirectory);
+  errno = 0;
+  while (auto *entry = readdir(entries.get())) {
+    if (leaf == entry->d_name)
+      return true;
+    errno = 0;
+  }
+  if (errno)
+    throw std::runtime_error(path + ": cannot inspect stored entry names: " + strerror(errno));
+  return false;
+}
+void PinnedDirectory::RequireExactLeaf(const std::string &leaf) const {
+  if (!HasExactLeaf(leaf))
+    throw std::runtime_error(path + "/" + leaf +
+                             ": destination uses a different spelling; choose a separate name");
 }
 
 bool PinnedDirectory::SetCopyMode(mode_t mode,
