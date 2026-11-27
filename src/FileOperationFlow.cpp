@@ -206,13 +206,16 @@ void FileOperationFlow::BeginOperation(Action action, const Pane &source,
   const bool create = action == Action::MakeDirectory || action == Action::MakeFile;
   if (!create) {
     job.sources = source.Selected();
+    source.ExportModel().BindArchiveView(job, source.Path());
     job.expectedSources = source.SelectedLocalIdentities();
     if (!job.sources.empty() && IsVirtual(job.sources.front()) &&
         !ParseLocation(job.sources.front()).Archive())
       job.expectedRemoteSources = source.ExportModel().SelectedRemoteEntries();
   }
-  if (isTransfer)
+  if (isTransfer) {
     job.destination = target.Path();
+    target.ExportModel().BindArchiveView(job, target.Path());
+  }
   if ((action == Action::Trash || action == Action::Delete) &&
       !job.sources.empty() && ParseLocation(job.sources.front()).Archive()) {
     ShowArchive(kRemoveArchive, source, target);

@@ -2,6 +2,7 @@
 #include "ArchiveActions.h"
 
 #include "ArchiveWindow.h"
+#include "ArchiveJobChecks.h"
 #include "JobSnapshot.h"
 #include "Pane.h"
 #include "VirtualFile.h"
@@ -16,6 +17,9 @@ namespace Listi {
 
 namespace {
 void RequireScannedSources(const Pane &pane, const Job &job) {
+  Job view;
+  pane.ExportModel().BindArchiveView(view, pane.Path());
+  ArchiveJobChecks::RequireArchiveVersions(view, job);
   // Split archives can have additional guards for parts not selected in the
   // panel. Match each selected local row, not the size of the full part set.
   for (const auto &[path, displayed] : pane.SelectedLocalIdentities()) {
@@ -66,8 +70,7 @@ void ArchiveActions::ShowAddPicker(const Pane &source, BMessenger owner) {
   if (lstat(archiveAddTarget.c_str(), &st) || !S_ISREG(st.st_mode))
     throw std::runtime_error("Choose one local writable archive.");
   auto target = PrepareArchiveEditTarget(archiveAddTarget, archiveAddFolder);
-  if (!location.Archive())
-    RequireScannedSources(source, target);
+  RequireScannedSources(source, target);
   auto chosen = EncodeJob(target, kArchiveAddChosen);
   archiveAddPicker.reset(new BFilePanel(
       B_OPEN_PANEL, &owner, nullptr,
@@ -77,12 +80,16 @@ void ArchiveActions::ShowAddPicker(const Pane &source, BMessenger owner) {
 }
 
 Job ArchiveActions::ReadAdditions(const BMessage &message) {
+  type_code type;
+  int32 count;
+  if (message.GetInfo("refs", &type, &count) != B_OK || type != B_REF_TYPE || count < 1)
+    throw std::runtime_error("The file selection is incomplete. Select the files again.");
   std::vector<std::string> additions;
-  entry_ref ref;
-  BPath path;
-  for (int32 i = 0; message.FindRef("refs", i, &ref) == B_OK; ++i) {
-    if (path.SetTo(&ref) != B_OK)
-      throw std::runtime_error("A selected file is unavailable.");
+  for (int32 i = 0; i < count; ++i) {
+    entry_ref ref;
+    BPath path;
+    if (message.FindRef("refs", i, &ref) != B_OK || path.SetTo(&ref) != B_OK)
+      throw std::runtime_error("A selected file is unavailable. Select the files again.");
     additions.emplace_back(path.Path());
   }
   auto job = DecodeJob(message);
@@ -140,7 +147,11 @@ ArchivePrompt ArchiveActions::ConfirmRemoval(const Pane &source) {
   if (!location.Archive())
     throw std::runtime_error(
         "Open an archive and select the entries to remove.");
+  Job view;
+  source.ExportModel().BindArchiveView(view, source.Path());
+  ArchiveJobChecks::VerifyArchiveSets(view);
   auto job = PrepareArchiveEditJob(location.archive, {}, selected, location.path);
+  RequireScannedSources(source, job);
   const auto accepted = EncodeJob(job, kArchiveEditAccepted);
   BString text;
   text

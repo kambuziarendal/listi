@@ -4,7 +4,6 @@
 #include "Common.h"
 #include "ClipboardLock.h"
 #include "ArchiveJobs.h"
-#include "ArchiveVolumes.h"
 #include "JobSnapshot.h"
 #include "VirtualFile.h"
 #include <FindDirectory.h>
@@ -244,7 +243,8 @@ BMessage MakeFileSelection(const std::vector<std::string> &paths, bool cut,
 
 void PutFileClipboard(const std::vector<std::string> &paths, bool cut,
                       BClipboard *clipboard,
-                      const std::map<std::string, NodeIdentity> &expected) {
+                      const std::map<std::string, NodeIdentity> &expected,
+                      const std::map<std::string, std::string> &archiveVersions) {
   if (std::any_of(paths.begin(), paths.end(), [](const auto &path) {
         return ParseLocation(path).Archive();
       })) {
@@ -257,6 +257,7 @@ void PutFileClipboard(const std::vector<std::string> &paths, bool cut,
             "Copy archive entries separately from local files.");
     }
     Job selection{cut ? Action::Move : Action::Copy, paths, ""};
+    selection.expectedArchiveSets = archiveVersions;
     FreezeArchiveTargets(selection);
     if (cut) {
       const auto archive = ParseLocation(paths.front()).archive;
@@ -285,7 +286,8 @@ void PutFileClipboard(const std::vector<std::string> &paths, bool cut,
 }
 
 ClipboardPaste PrepareFilePaste(const std::string &destination,
-                                BClipboard *clipboard) {
+                                BClipboard *clipboard,
+                                const std::map<std::string, std::string> &destinationVersion) {
   {
     ClipboardLock lock(clipboard);
     BMessage encoded;
@@ -309,10 +311,9 @@ ClipboardPaste PrepareFilePaste(const std::string &destination,
             !job.expectedArchiveSets.count(location.archive))
           throw std::runtime_error("Invalid archive clipboard source.");
       }
-      for (const auto &entry : job.expectedArchiveSets)
-        if (FindArchiveVolumes(entry.first).Fingerprint() != entry.second)
-          throw std::runtime_error(
-              "An archive changed since Copy. Select the entries again.");
+      for (const auto &[path, shown] : destinationVersion)
+        if (job.expectedArchiveSets.emplace(path, shown).first->second != shown)
+          throw std::runtime_error("Archive changed since Copy. Reload and select again.");
       ClipboardPaste paste;
       if (!cut && !ParseLocation(destination).Archive() &&
           (destination.empty() || destination[0] != '/'))
@@ -342,6 +343,7 @@ ClipboardPaste PrepareFilePaste(const std::string &destination,
     paste.items = ReadFileClipboard(*clipboard->Data());
     Job transfer;
     transfer.destination = destination;
+    transfer.expectedArchiveSets = destinationVersion;
     bool cut = false, copy = false;
     for (const auto &item : paste.items) {
       cut |= item.cut;

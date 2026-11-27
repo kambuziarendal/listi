@@ -554,8 +554,14 @@ void Pane::Navigate(const char *p) {
 }
 void Pane::NavigateFromColumn(const std::string &folder,
                               const std::string &selection, bool invoke,
-                              bool context, BPoint at, const PaneEntry *clicked) {
+                              bool context, BPoint at, const PaneEntry *clicked,
+                              const std::string &archiveVersion) {
   BMessage message(kColumnNavigate);
+  if (!archiveVersion.empty() && Listi::ParseLocation(folder).Archive() &&
+      message.AddString("archiveVersion", archiveVersion.c_str()) != B_OK) {
+    SetStatus("Cannot verify column entry. Reload and select again.");
+    return;
+  }
   if (clicked && !Listi::IsVirtual(clicked->path)) {
     message.AddString("clickedPath", clicked->path.c_str());
     message.AddInt64("device", clicked->device);
@@ -625,7 +631,10 @@ void Pane::StartNavigation(const std::string &request, int target, bool trash,
   savedSelection.clear();
   if (refresh && pendingVisit) {
     savedSelection = pendingVisit->selected;
-  } else if (target < 0 && !trash && path == request.c_str()) {
+  } else if (target < 0 && sameDirectory && request.rfind("archive://", 0) == 0) {
+    if (!restore && !entries.archiveVersion.empty())
+      pendingVisit = CaptureVisit(entries.Visible().size());
+  } else if (target < 0 && sameDirectory) {
     for (auto entry : entries.Visible())
       if (entries.IsSelected(entry->path))
         savedSelection.emplace(entry->path,
@@ -1424,6 +1433,15 @@ void Pane::MessageReceived(BMessage *m) {
     const char *error = m->GetString("error", nullptr);
     if (!error && !receivedRows.Complete(*m))
       error = "Incomplete directory listing. Reload to try again.";
+    if (!error && Listi::ParseLocation(path.String()).Archive()) {
+      entries.archiveVersion = m->GetString("archiveVersion", "");
+      if (entries.archiveVersion.empty())
+        error = "Missing archive version. Reload and select again.";
+    }
+    if (!entries.archiveVersion.empty() && restoring && restoring->archiveVersion != entries.archiveVersion) {
+      entries.SetSelection({}, "");
+      restoring->focused.clear();
+    }
     locationValid = error == nullptr;
     folderIdentity = {m->GetInt64("folderDevice", -1), m->GetInt64("folderNode", -1)};
     if (!locationValid) pendingVisit.reset();
@@ -1450,7 +1468,9 @@ void Pane::MessageReceived(BMessage *m) {
       std::string picked = action.GetString("selection", "");
       if (!picked.empty())
         entries.SetSelection({picked}, picked);
-      bool changedColumn = !ColumnEntryUnchanged(action);
+      bool changedColumn = !ColumnEntryUnchanged(action) ||
+          (action.HasString("archiveVersion") &&
+           entries.archiveVersion != action.GetString("archiveVersion", ""));
       if (!picked.empty() && action.HasString("clickedPath")) {
         const auto *row = entries.OnlySelected();
         changedColumn |= !row || row->device != action.GetInt64("device", -1) ||
@@ -1472,6 +1492,7 @@ void Pane::MessageReceived(BMessage *m) {
           entries.SetSelection({reveal.path}, reveal.path);
         reveal = {};
       }
+      if (changedColumn || !picked.empty()) pendingVisit.reset();
       if (pendingVisit && !restoring) RestoreVisit();
       else SendSelection();
       if (stale)

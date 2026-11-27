@@ -6,6 +6,7 @@
 #include "JobReportStore.h"
 #include "Trash.h"
 #include <Node.h>
+#include <String.h>
 #include <fcntl.h>
 #include <cstdarg>
 #include <fs_attr.h>
@@ -169,6 +170,54 @@ extern "C" status_t __wrap__ZN5BNode10RemoveAttrEPKc(BNode *node, const char *na
 }
 
 namespace {
+// Real prelinked image on Haiku: the names exist even on drivers which
+// cannot create links or provide a native Tracker Trash directory.
+void TestSharedTrashPath(const fs::path &root) {
+  const auto one = root / "trash-one/note", two = root / "trash-two/note";
+  fs::create_directory(one.parent_path());
+  fs::create_directory(two.parent_path());
+  std::ofstream(one) << "first";
+  std::ofstream(two) << "second";
+  const auto trashedOne = MoveToTrash(one.string());
+  const auto trashedTwo = MoveToTrash(two.string());
+  const auto restoredOne = RestoreFromTrash(trashedOne);
+  const auto restoredTwo = RestoreFromTrash(trashedTwo);
+  Check(restoredOne == one && restoredTwo == two && Read(one) == "first" && Read(two) == "second",
+        "two independent files of the same name restore to their own folders");
+  const char *fixture = getenv("LISTI_DELETE_HARDLINK_FIXTURE");
+  if (!fixture)
+    return;
+  const auto base = fs::path(fixture) / "complete";
+  const auto first = base / "selected/z", second = base / "selected/a", third = base / "outside";
+  struct stat before{}, after{};
+  Check(!lstat(third.c_str(), &before) && before.st_nlink == 3 &&
+            fs::equivalent(first, third) && fs::equivalent(second, third),
+        "three fixture names refer to one inode before Trash");
+  const auto contents = Read(third);
+  BNode node(third.c_str());
+  BString originalPath, observedPath;
+  const auto previous = node.ReadAttrString("_trk/original_path", &originalPath);
+  for (const auto &path : {first, second}) {
+    bool refused = false;
+    try {
+      CheckTrashSource(path.string());
+    } catch (const std::runtime_error &error) {
+      refused = std::string(error.what()).find("hard links") != std::string::npos;
+    }
+    const auto result = Run({Action::Trash, {path.string()}, {}}, {});
+    Check(refused && !result.completed && !result.errors.empty() &&
+              result.errors.front().find("hard links") != std::string::npos,
+          "Trash preview and worker refuse a shared original-path attribute");
+  }
+  Check(!lstat(third.c_str(), &after) && before.st_ino == after.st_ino &&
+            before.st_nlink == after.st_nlink && before.st_mode == after.st_mode &&
+            before.st_ctim.tv_sec == after.st_ctim.tv_sec && before.st_ctim.tv_nsec == after.st_ctim.tv_nsec &&
+            fs::equivalent(first, third) && fs::equivalent(second, third) &&
+            Read(third) == contents && node.ReadAttrString("_trk/original_path", &observedPath) == previous &&
+            (previous != B_OK || originalPath == observedPath),
+        "both selected names and the outside link retain bytes and metadata");
+}
+
 // The prepared image is disposable; validate the exact three links and do
 // not delete a caller's directory unless it contains only these fixture names.
 void TestDeleteHardlinks(const fs::path &root) {
@@ -514,6 +563,7 @@ int main() {
   const auto root = fs::canonical(temp);
   const auto out = root / "out", source = root / "file", target = out / "file";
   fs::create_directory(out);
+  TestSharedTrashPath(root);
   TestDeleteHardlinks(root);
   TestFileClaims(root, false);
   TestClaimedKeepBoth(root);

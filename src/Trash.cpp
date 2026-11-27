@@ -79,6 +79,14 @@ std::string CheckedTrash(const std::string &original, bool create) {
                                         "ancestors or an already trashed entry.");
   return trash;
 }
+// Tracker stores the original path on the inode, not on each directory entry.
+struct stat CheckTrashLinks(const BStatable &entry, const std::string &path) {
+  struct stat st;
+  Require(entry.GetStat(&st), path);
+  if (!S_ISDIR(st.st_mode) && st.st_nlink > 1)
+    throw std::runtime_error(path + ": hard links share one Trash restore path; entry left in place.");
+  return st;
+}
 void CheckIdentity(BEntry &entry, const NodeIdentity &expected) {
   node_ref actual;
   Require(entry.GetNodeRef(&actual), "Check source identity");
@@ -92,8 +100,7 @@ void CheckTrashSource(const std::string &path, const NodeIdentity *expected,
   Require(entry.InitCheck(), path);
   if (expected)
     CheckIdentity(entry, *expected);
-  struct stat st;
-  Require(entry.GetStat(&st), path);
+  const auto st = CheckTrashLinks(entry, path);
   if (S_ISDIR(st.st_mode)) {
     BDirectory directory(&entry);
     Require(directory.InitCheck(), path);
@@ -107,6 +114,7 @@ std::string MoveToTrash(const std::string &path, const NodeIdentity *expected) {
   Require(entry.InitCheck(), path);
   if (expected)
     CheckIdentity(entry, *expected);
+  CheckTrashLinks(entry, path);
   const std::string original = EntryPath(entry);
   const std::string trash = CheckedTrash(original, true);
   BDirectory directory(trash.c_str());
@@ -124,6 +132,7 @@ std::string MoveToTrash(const std::string &path, const NodeIdentity *expected) {
   BString previous;
   bool hadPrevious = node.ReadAttrString(kOriginalPath, &previous) == B_OK;
   BString saved(original.c_str());
+  CheckTrashLinks(node, original);
   Require(node.WriteAttrString(kOriginalPath, &saved), original);
   // MoveTo(false) checks for a conflict before renaming. Haiku does not
   // provide an atomic no-replace or identity-conditional rename.
@@ -235,6 +244,7 @@ std::string RestoreFromTrash(const std::string &path, std::string *warning,
   // No intentional replacement or recursive merge. The same check/rename
   // race described for Trash still applies.
   CheckIdentity(entry, opened);
+  CheckTrashLinks(node, current);
   Require(entry.MoveTo(&destination, Leaf(target).c_str(), false), target);
   const auto status = node.RemoveAttr(kOriginalPath);
   if (status != B_OK) {

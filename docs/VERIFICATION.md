@@ -156,6 +156,36 @@ The separate Linux portable run passed 89 transfer checks both normally and
 under ASan/UBSan, plus 25,000 seeded parser inputs. No physical disconnect or
 power-loss test is included.
 
+### Archive selection and transfer retries
+
+Run these native cases against the same build:
+
+```sh
+python3 tests/run-native-audit.py archive-panel-version archive-jobs archive-copy-inputs virtual-operation-faults file-operation-faults
+```
+
+- `archive-panel-version` replaces the ZIP behind a displayed root or subfolder, or just a middle part of a split archive. It checks the pane commands, clipboard, drag, absence of output, and both ZIPs' contents before and after an explicit reload and reselection.
+- `archive-jobs` makes the second of three references from a native file picker unreadable. It checks that the ZIP is unchanged and reopens it after a successful retry to verify all chosen files and the original member.
+- `archive-copy-inputs` and `virtual-operation-faults` count staging writes for a second, 1 MiB file after Skip All. The first uses a real ZIP; the second uses a simulated SFTP provider, not a live server. If the second target is free, the same tests require a real staging attempt, an explicit error on injected ENOSPC, and a complete copy on retry.
+
+### Hard links and Tracker Trash
+
+Tracker stores the original path as a typed attribute on the inode. Two names
+of the same file cannot safely record two different paths there. Listi
+therefore refuses to trash or restore a multiply linked non-directory entry,
+rather than overwrite or clear a sibling's metadata. This does not prevent
+trashing a directory that contains hard links: the restore path belongs to
+the directory entry being moved, not its children.
+
+On a disposable Haiku R1/beta6 x86_64 VM, BFS supported the typed attribute
+and native Trash but did not create a hard link. On each of the ext2 and ext4
+images, three prelinked names shared one inode, but writing and reading back the Tracker string did
+not work and the native Trash lookup returned entry not found. On FAT, Trash
+lookup succeeded but typed attributes and hard-link creation did not. On NTFS,
+none of the three probes succeeded. We did not find the whole combination
+on these five volumes. Other drivers were not tested;
+the guard uses the observed link count, not a filesystem-name allowlist.
+
 For Shelf collections, run:
 
 ```sh

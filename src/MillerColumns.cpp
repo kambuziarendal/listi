@@ -211,11 +211,11 @@ public:
     const bool doubleClick = message->GetInt32("clicks", 1) == 2;
     if (!Current()) {
       if (row && row->directory && !secondary)
-        pane->NavigateFromColumn(row->path, {}, false, false, {}, row);
+        pane->NavigateFromColumn(row->path, {}, false, false, {}, row, entries.archiveVersion);
       else
         pane->NavigateFromColumn(location, row ? row->path : "",
                                  row && doubleClick && !secondary, secondary,
-                                 ConvertToScreen(point), row);
+                                 ConvertToScreen(point), row, entries.archiveVersion);
       return;
     }
     MakeFocus();
@@ -313,7 +313,8 @@ public:
         auto parent =
             Listi::ParentLocation(location == "@disks" ? "/" : location);
         if (parent != location)
-          pane->NavigateFromColumn(parent, BranchRow(parent, location));
+          pane->NavigateFromColumn(parent, BranchRow(parent, location), false, false, {},
+                                   nullptr, model->archiveVersion);
       } catch (const std::exception &error) {
         pane->ShowStatus(error.what());
       }
@@ -726,7 +727,10 @@ void MillerColumns::MessageReceived(BMessage *message) {
   }
   const bool deliveryFailed = state->delivery->failedSerial.load() == serial;
   if (message->what == kScanDone || deliveryFailed) {
-    const bool failed = deliveryFailed || message->HasString("error") ||
+    state->incoming.archiveVersion = message->GetString("archiveVersion", "");
+    const bool missingVersion = Listi::ParseLocation(rows->location).Archive() &&
+                                state->incoming.archiveVersion.empty();
+    const bool failed = missingVersion || deliveryFailed || message->HasString("error") ||
                         !state->receivedRows.Complete(*message);
     rows->partial = !failed && message->HasString("inspectionWarning");
     rows->SetToolTip(rows->partial ? message->GetString("inspectionWarning", "") : "");

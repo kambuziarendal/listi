@@ -64,8 +64,10 @@ void ClipboardFlow::Begin(uint32 action, Pane &pane) {
                                              : "Paths copied as text.");
         return;
       }
+      Job view;
+      pane.ExportModel().BindArchiveView(view, pane.Path());
       PutFileClipboard(selected, action == kClipboardCut, be_clipboard,
-                       pane.SelectedLocalIdentities(kFileSelectionLimit));
+                       pane.SelectedLocalIdentities(kFileSelectionLimit), view.expectedArchiveSets);
       BString status;
       status
           << int32(selected.size())
@@ -84,7 +86,9 @@ void ClipboardFlow::Begin(uint32 action, Pane &pane) {
       AskToSaveFile(pane.Path(), *content);
       return;
     }
-    clipboardPaste = PrepareFilePaste(pane.Path());
+    Job destination;
+    pane.ExportModel().BindArchiveView(destination, pane.Path());
+    clipboardPaste = PrepareFilePaste(pane.Path(), be_clipboard, destination.expectedArchiveSets);
     if (clipboardPaste.jobs.size() == 1 &&
         (clipboardPaste.jobs[0].action == Action::EditArchive ||
          clipboardPaste.jobs[0].action == Action::MoveArchive)) {

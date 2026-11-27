@@ -10,6 +10,7 @@ struct Job;
 namespace ArchiveJobChecks {
 std::string LocalSource(const std::string &path);
 void VerifyArchiveSets(const Job &);
+void RequireArchiveVersions(const Job &shown, const Job &prepared);
 void Guards(const Job &);
 std::string MemberPath(const std::string &path);
 

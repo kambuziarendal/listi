@@ -30,7 +30,7 @@ struct SelectionTrees {
   std::set<Node> roots, ancestors;
   static bool SameEntry(const std::string &source, const Node &node) {
     struct stat st;
-    return !IsVirtual(source) && lstat(source.c_str(), &st) == 0 &&
+    return lstat(source.c_str(), &st) == 0 &&
            Node(st.st_dev, st.st_ino) == node;
   }
   // Only descend through a merge when the destination lies on the path to a
@@ -52,7 +52,7 @@ struct SelectionTrees {
     if (!ancestors.count(node))
       return;
     struct stat input;
-    if (IsVirtual(source) || lstat(source.c_str(), &input) || depth > 64)
+    if (lstat(source.c_str(), &input) || depth > 64)
       throw std::runtime_error("Cannot check overlap with selected sources: " + source);
     if (!S_ISDIR(input.st_mode))
       return; // File operations never replace a directory with a non-directory.
@@ -110,8 +110,12 @@ void CheckTransferOutputTrees(const std::vector<std::string> &sources,
     if (parent == "/")
       break;
   }
-  for (const auto &source : sources)
-    selection.CheckMerge(source, ChildLocation(destination, LocationLeaf(source)), 0);
+  // RunVirtual checks projected provider/archive children against these same
+  // selected inputs before writing. They cannot be enumerated with opendir.
+  for (const auto &source : sources) {
+    if (!IsVirtual(source))
+      selection.CheckMerge(source, ChildLocation(destination, LocationLeaf(source)), 0);
+  }
 }
 bool InTransferSourceFolder(const Job &job) {
   if (job.expectedDestination.device < 0 || IsVirtual(job.destination))

@@ -545,6 +545,18 @@ struct Runner {
       struct stat before {};
       if (exists && lstat(dst.c_str(), &before))
         throw std::runtime_error("Destination changed before staging.");
+      // The first conflict still goes through the normal local publisher.
+      // Subsequent ordinary files need no scratch space for an already
+      // chosen Skip All. Never bypass name claims or protected inputs.
+      if (exists && skipAll && IsVirtual(src) && S_ISREG(before.st_mode)) {
+        control.Check();
+        if (hooks.checkOverwrite)
+          hooks.checkOverwrite(dst, before);
+        ++result.skipped;
+        if (!hooks.privateStaging)
+          RecordOutcome({src, dst, "skipped", ""});
+        return;
+      }
       TempFile temp(LocationLeaf(dst), src, dst);
       Stage(src, source, temp, control);
       control.Check();

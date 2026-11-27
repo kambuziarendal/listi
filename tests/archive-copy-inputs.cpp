@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "ArchiveJobs.h"
+#include "DownloadStageProbe.h"
 #include "ArchiveVolumes.h"
 #include "JobSnapshot.h"
 #include "TransferCommand.h"
@@ -114,6 +115,15 @@ void ZipCases(const fs::path &root, fs::path &outer, std::string &outerBytes) {
             Read(safe / "first") == "incoming" && Read(safe / "backup.zip") == "existing local source",
         "independent archive and local selections still copy together");
 
+  fs::permissions(mixed / "nested", fs::perms::owner_all);
+  const auto sibling = mixed / "nested/unrelated.txt";
+  Write(sibling, "other selected bytes");
+  const auto nestedSafe = Run(Copy({ChildLocation(url, "nested"), sibling.string()}, mixed), Replace());
+  Check(nestedSafe.completed == 2 && nestedSafe.errors.empty() &&
+            Read(waiting) == inner && Read(sibling) == "other selected bytes" &&
+            Read(mixed / "unrelated.txt") == "other selected bytes" && Read(outer) == outerBytes,
+        "virtual folder may merge beside a selected local source without overwriting it");
+
   auto extract = PrepareArchiveJob(true, {outer.string()});
   bool refused = false;
   try { SetArchiveDestination(extract, outer.parent_path().string(), outer.filename().string()); }
@@ -131,6 +141,24 @@ void ZipCases(const fs::path &root, fs::path &outer, std::string &outerBytes) {
             Read(outer) == outerBytes && Members(outer) == names,
         "Extract retry publishes a new folder and keeps the outer archive intact");
 }
+void SkipCases(const fs::path &root) {
+  namespace Probe = DownloadStageProbe;
+  const auto src = root / "skip-input", dst = root / "skip-output";
+  fs::create_directory(src);
+  fs::create_directory(dst);
+  Write(src / Probe::smallName, std::string(32768, 'a'));
+  Write(src / Probe::largeName, std::string(Probe::largeSize, 'b'));
+  auto create = PrepareArchiveJob(false, {(src / Probe::smallName).string(), (src / Probe::largeName).string()});
+  SetArchiveDestination(create, root.string(), "skip.zip");
+  Check(Run(create, {}).completed == 1, "created Skip All ZIP fixture");
+  const auto original = Read(create.destination);
+  const auto url = OpenArchive(create.destination);
+  // Haiku /tmp is a link. The local publisher presents the canonical target in its conflict question.
+  Probe::Exercise(Copy({ChildLocation(url, Probe::smallName), ChildLocation(url, Probe::largeName)}, fs::canonical(dst)),
+                  [](const Job &job, const Hooks &hooks) { return Run(job, hooks); }, "ZIP");
+  Check(Read(create.destination) == original, "all three Skip All attempts preserve ZIP bytes");
+}
+
 void SplitCase(const fs::path &target, bool alias) {
   const fs::path fixture("tests/fixtures/multipart");
   const auto original = FindArchiveVolumes((fixture / "plain.7z.001").string());
@@ -222,6 +250,7 @@ int main() {
     fs::path outer;
     std::string bytes;
     ZipCases(root, outer, bytes);
+    SkipCases(root);
     fs::create_directory(root / "split");
     SplitCase(root / "split", false);
     if (const char *alias = getenv("LISTI_ARCHIVE_ALIAS_DIR"))

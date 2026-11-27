@@ -300,7 +300,14 @@ public:
             done.AddInt64("folderNode", file.st_ino);
           }
         }
-        auto entries = Listi::ListFiles(path.String(), control);
+        if (Listi::InterruptedVolumes().ContainsResolved(path.String()))
+          throw std::runtime_error(Listi::kUnavailableVolumeText);
+        std::string fingerprint;
+        auto entries = location.Archive() ? Listi::ListArchiveView(location, control, fingerprint)
+                                          : Listi::ListFiles(path.String(), control);
+        if (location.Archive() && (fingerprint.empty() ||
+            done.AddString("archiveVersion", fingerprint.c_str()) != B_OK))
+          throw std::runtime_error("Cannot identify the listed archive. Reload and select again.");
         auto parent = Listi::ParentLocation(path.String());
         if (parent != path.String()) {
           Listi::FileEntry entry;

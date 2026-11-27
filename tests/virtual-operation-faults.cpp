@@ -5,6 +5,9 @@
 // -pthread -lsqlite3 -o /tmp/listi-faults
 // Real staging/dispatch code, deterministic fake network commit failures.
 #include "FileOperation.h"
+#if defined(__HAIKU__) || defined(LISTI_DOWNLOAD_STAGE_PROBE)
+#include "DownloadStageProbe.h"
+#endif
 #include "JobReportStore.h"
 #include "VirtualFile.h"
 #include "UnavailableVolume.h"
@@ -450,6 +453,51 @@ int main() {
             privatePublish.outcomes.empty() && done == 1,
         "archive staging keeps strict local publication policy and hides internal receipts");
   unlink(localTarget.c_str());
+
+#if defined(__HAIKU__) || defined(LISTI_DOWNLOAD_STAGE_PROBE)
+  {
+    namespace Probe = DownloadStageProbe;
+    const auto first = std::string("sftp://fixture/in/") + Probe::smallName;
+    const auto second = std::string("sftp://fixture/in/") + Probe::largeName;
+    reset();
+    files[first] = {std::string(32768, 'a'), 1};
+    files[second] = {std::string(Probe::largeSize, 'b'), 2};
+    localPublish = LocalPublish::Limited;
+    Job batch{Action::Copy, {first, second}, downloadFolder};
+    Probe::Exercise(batch, RunVirtual, "SFTP provider fixture");
+
+    const auto smaller = downloadFolder + "/" + Probe::smallName;
+    const auto larger = downloadFolder + "/" + Probe::largeName;
+    std::ofstream(smaller) << "keep";
+    std::ofstream(larger) << "keep";
+    files[second].identity = "captured";
+    StatFile(second, batch.expectedRemoteSources[second]);
+    Hooks changed;
+    changed.conflict = [&](const std::string &) {
+      files[second].identity = "replaced";
+      return Decision::SkipAll;
+    };
+    const auto stale = RunVirtual(batch, changed);
+    check(stale.skipped == 1 && !stale.completed &&
+              errorHas(stale, "Selected network entry changed") && Probe::Read(larger) == "keep",
+          "Skip All does not silence a stale provider source identity");
+    files[second].identity = "captured";
+    bool protectedNow = false;
+    changed.conflict = [&](const std::string &) { protectedNow = true; return Decision::SkipAll; };
+    changed.checkOverwrite = [&](const std::string &path, const struct stat &) {
+      if (protectedNow && path == larger)
+        throw std::runtime_error("protected after first conflict");
+    };
+    const auto guarded = RunVirtual(batch, changed);
+    check(guarded.skipped == 1 && !guarded.completed &&
+              errorHas(guarded, "protected after first conflict") && Probe::Read(larger) == "keep",
+          "Skip All rechecks protected targets after the first conflict");
+    unlink(smaller.c_str());
+    unlink(larger.c_str());
+    localPublish = LocalPublish::Unexpected;
+    reset();
+  }
+#endif
 
   const std::string sourceFolder = "sftp://fixture/in/folder";
   const std::string healthy = sourceFolder + "/a-readable";

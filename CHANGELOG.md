@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Archive commands use the version shown by the file pane. If another application replaces the archive, reload it and select the entries again. Add to archive rejects incomplete file-picker selections.
+- After Skip All, archive and network downloads skip existing ordinary files without writing their contents to a temporary file.
+- Trash and Restore refuse multiply linked files instead of changing the shared Tracker restore-path attribute.
 - Copying archive members to disk protects the source archive and its parts from replacement. Local copy and move check overlapping output trees on the worker so the window stays responsive and the check can be cancelled before writing.
 - Restore from Trash checks that the original folder is still the one shown at confirmation. If it was replaced, the item stays in Trash.
 - A pane search marks results partial after a file identity read error. The disk list reports a failed scan instead of showing a partition it cannot identify.

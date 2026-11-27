@@ -23,7 +23,7 @@ Job PrepareArchiveJob(bool extract, const std::vector<std::string> &sources) {
   Require(!extract || sources.size() == 1 ||
               ParseLocation(sources[0]).Archive(),
           "Select one archive, or entries inside one archive.");
-  std::set<std::string> names;
+  std::set<std::string> names, capturedArchives;
   for (const auto &source : sources) {
     const auto local = LocalSource(source);
     struct stat s;
@@ -36,7 +36,7 @@ Job PrepareArchiveJob(bool extract, const std::vector<std::string> &sources) {
     Require(names.insert(LocationLeaf(source)).second,
             "Selected entries have duplicate names.");
     job.expectedSources[local] = {int32_t(s.st_dev), int64_t(s.st_ino)};
-    if (extract) {
+    if (extract && capturedArchives.insert(local).second) {
       auto set = FindArchiveVolumes(local);
       job.expectedArchiveSets[set.files[0].path] = set.Fingerprint();
       for (const auto &part : set.files) {
@@ -86,7 +86,7 @@ void SetArchiveEditAdditions(Job &job, const std::vector<std::string> &add) {
   for (const auto &source : updated.sources)
     updated.expectedSources.erase(source);
   updated.sources.clear();
-  std::set<std::string> names;
+  std::set<std::string> names, capturedArchives;
   for (const auto &source : add) {
     const auto location = ParseLocation(source);
     Require(
@@ -107,7 +107,7 @@ void SetArchiveEditAdditions(Job &job, const std::vector<std::string> &add) {
     updated.sources.push_back(source);
     updated.expectedSources[physical] = {int32_t(st.st_dev),
                                          int64_t(st.st_ino)};
-    if (location.Archive()) {
+    if (location.Archive() && capturedArchives.insert(physical).second) {
       auto set = FindArchiveVolumes(physical);
       updated.expectedArchiveSets[set.files.front().path] = set.Fingerprint();
     }
@@ -145,16 +145,20 @@ Job PrepareArchiveEditJob(const std::string &archive,
   return job;
 }
 void FreezeArchiveTargets(Job &transfer) {
+  std::set<std::string> inspected;
   auto capture = [&](const std::string &path) {
     const auto location = ParseLocation(path);
-    if (!location.Archive())
+    if (!location.Archive() || !inspected.insert(location.archive).second)
       return;
     const auto set = FindArchiveVolumes(location.archive);
     const auto fingerprint = set.Fingerprint();
+    const auto shown = transfer.expectedArchiveSets.find(location.archive);
+    Require(shown == transfer.expectedArchiveSets.end() || shown->second == fingerprint,
+            "Archive changed since selection. Reload and select again.");
     const auto inserted = transfer.expectedArchiveSets.emplace(
         set.files.front().path, fingerprint);
     Require(inserted.first->second == fingerprint,
-            "Archive parts changed after selection. Select the archive again.");
+            "Archive parts changed after selection. Reload and select again.");
   };
   capture(transfer.destination);
   for (const auto &source : transfer.sources)
@@ -166,7 +170,9 @@ Job PrepareArchiveMutation(const Job &transfer) {
   if (transfer.action == Action::Delete || transfer.action == Action::Trash) {
     Require(!transfer.sources.empty(), "Select archive entries first.");
     location = ParseLocation(transfer.sources.front());
-    return PrepareArchiveEditJob(location.archive, {}, transfer.sources);
+    auto edit = PrepareArchiveEditJob(location.archive, {}, transfer.sources);
+    RequireArchiveVersions(transfer, edit);
+    return edit;
   }
   Require(location.Archive(), "Choose a destination inside an archive.");
   if (transfer.action == Action::Move && !transfer.sources.empty() &&
@@ -200,6 +206,7 @@ Job PrepareArchiveMutation(const Job &transfer) {
       edit.archiveRenames[source] = destination;
     }
   }
+  RequireArchiveVersions(transfer, edit);
   return edit;
 }
 Job PrepareArchiveCopy(const Job &transfer) {
@@ -218,6 +225,7 @@ Job PrepareArchiveCopy(const Job &transfer) {
                 found->second.inode == item.second.inode,
             "A selected source was replaced. Select it again.");
   }
+  RequireArchiveVersions(transfer, edit);
   return edit;
 }
 Job PrepareArchiveMove(const Job &transfer) {
@@ -279,6 +287,7 @@ Job PrepareArchiveMove(const Job &transfer) {
     CheckMoveVolumes(move);
     Guards(transfer);
     VerifyArchiveSets(transfer);
+    RequireArchiveVersions(transfer, move);
     return move;
   }
   Require(
@@ -324,6 +333,7 @@ Job PrepareArchiveMove(const Job &transfer) {
   // Do not refresh stale clipboard/confirmation guards during preparation.
   Guards(transfer);
   VerifyArchiveSets(transfer);
+  RequireArchiveVersions(transfer, move);
   return move;
 }
 void SetArchiveDestination(Job &job, const std::string &folder,

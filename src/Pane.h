@@ -43,7 +43,8 @@ public:
   void NavigateFromColumn(const std::string &folder,
                           const std::string &selection = {},
                           bool invoke = false, bool context = false,
-                          BPoint at = {}, const PaneEntry *clicked = nullptr);
+                          BPoint at = {}, const PaneEntry *clicked = nullptr,
+                          const std::string &archiveVersion = {});
   Listi::PaneNavigationState CaptureNavigation();
   void RestoreNavigation(const Listi::PaneNavigationState &);
   bool IsSearchList() const { return queries.count(path.String()) != 0; }

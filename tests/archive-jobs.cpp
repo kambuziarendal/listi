@@ -11,6 +11,8 @@
 #include "VirtualFile.h"
 #include <Application.h>
 #include <FindDirectory.h>
+#include <FilePanel.h>
+#include <set>
 #include <TextControl.h>
 #include <StringView.h>
 #include <Window.h>
@@ -101,10 +103,106 @@ void checkSuggestedNames(const std::string &root) {
   dialog->Quit();
 }
 
+// Scope the fault to Listi decoding the file panel's chosen message, not the
+// panel building its reply or an unrelated Tracker/clipboard read.
+static thread_local bool failMiddleRef = false;
+extern "C" status_t __real__ZNK8BMessage7FindRefEPKciP9entry_ref(
+    const BMessage *, const char *, int32, entry_ref *);
+extern "C" status_t __wrap__ZNK8BMessage7FindRefEPKciP9entry_ref(
+    const BMessage *message, const char *field, int32 index, entry_ref *ref) {
+  if (failMiddleRef && message->what == kArchiveAddChosen && !strcmp(field, "refs") && index == 1) {
+    failMiddleRef = false;
+    return B_NO_MEMORY;
+  }
+  return __real__ZNK8BMessage7FindRefEPKciP9entry_ref(message, field, index, ref);
+}
+
+class AdditionPanel : public BFilePanel {
+public:
+  using BFilePanel::BFilePanel;
+  BMessage chosen;
+  void SendMessage(const BMessenger *, BMessage *message) override {
+    if (message->what == kArchiveAddChosen)
+      chosen = *message;
+  }
+};
+
+void checkAddPicker(const std::string &root) {
+  const auto folder = root + "/picker";
+  check(mkdir(folder.c_str(), 0700) == 0, "create file picker fixture");
+  write(folder + "/original", "already archived");
+  auto create = PrepareArchiveJob(false, {folder + "/original"});
+  create.archiveFormat = "zip";
+  SetArchiveDestination(create, root, "picker.zip");
+  check(Run(create, {}).completed == 1, "create archive for file picker");
+  const auto original = read(create.destination);
+  BMessage selection(B_REFS_RECEIVED);
+  for (const char *leaf : {"A", "B", "C", "D"}) {
+    const auto path = folder + "/" + leaf;
+    write(path, std::string("data ") + leaf);
+    if (!strcmp(leaf, "D"))
+      continue;
+    entry_ref ref;
+    check(get_ref_for_path(path.c_str(), &ref) == B_OK && selection.AddRef("refs", &ref) == B_OK,
+          "select " + path);
+  }
+
+  // Invoke the native panel's normal multi-ref open entry point. It constructs
+  // the reply from its template, including both the frozen job and Tracker refs.
+  entry_ref directory;
+  check(get_ref_for_path(folder.c_str(), &directory) == B_OK, "resolve picker folder");
+  auto chosen = EncodeJob(PrepareArchiveEditTarget(create.destination), kArchiveAddChosen);
+  AdditionPanel panel(B_OPEN_PANEL, nullptr, &directory, B_FILE_NODE | B_DIRECTORY_NODE,
+                      true, &chosen, nullptr, false, false);
+  panel.Show();
+  auto choose = [&] {
+    check(panel.Window()->Lock(), "lock native file picker");
+    panel.chosen = BMessage();
+    panel.Window()->MessageReceived(&selection);
+    BMessage reply(panel.chosen);
+    panel.Window()->Unlock();
+    type_code type;
+    int32 count;
+    check(reply.GetInfo("refs", &type, &count) == B_OK && type == B_REF_TYPE && count == 3,
+          "native file picker returned all three refs");
+    return reply;
+  };
+  auto reply = choose();
+  bool rejected = false;
+  failMiddleRef = true;
+  try {
+    ArchiveActions::ReadAdditions(reply);
+  } catch (const std::exception &) {
+    rejected = true;
+  }
+  check(!failMiddleRef && rejected && read(create.destination) == original,
+        "failure on the middle ref rejects the selection before confirmation without editing the ZIP");
+  auto job = ArchiveActions::ReadAdditions(choose());
+  auto prompt = ArchiveActions::ConfirmAddition(job, {});
+  check(job.sources.size() == 3 && strstr(prompt.text.String(), "Add 3 selected entries"),
+        "complete retry can confirm all three sources");
+  const auto updated = Run(DecodeJob(prompt.accepted), {});
+  check(updated.errors.empty() && updated.completed == 1, "confirmed file picker retry updates ZIP");
+  auto archive = OpenArchive(create.destination);
+  std::set<std::string> names;
+  for (const auto &entry : ListFiles(archive))
+    names.insert(entry.name);
+  check(names == std::set<std::string>{"A", "B", "C", "original"} &&
+            vread(ChildLocation(archive, "original")) == "already archived",
+        "reopened ZIP contains exactly the chosen members plus the unchanged original");
+  for (const char *leaf : {"A", "B", "C", "D"}) {
+    const auto expected = std::string("data ") + leaf;
+    check(read(folder + "/" + leaf) == expected &&
+              (!strcmp(leaf, "D") || vread(ChildLocation(archive, leaf)) == expected),
+          std::string("preserved bytes for ") + leaf);
+  }
+}
+
 void *run(void *) {
  try{
   char pattern[]="/tmp/Listi-archive-jobs-XXXXXX";std::string root=mkdtemp(pattern);
   checkSuggestedNames(root);
+  checkAddPicker(root);
   Job moveRequest;
   moveRequest.action = Action::MoveArchive;
   moveRequest.sources = {root + "/local.txt"};

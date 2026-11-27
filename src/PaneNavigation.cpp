@@ -37,6 +37,7 @@ PaneEntry *Pane::ScrollRow(const std::string *path, float &top) {
 
 Listi::VisitPosition Pane::CaptureVisit(size_t selectionLimit) {
   Listi::VisitPosition visit;
+  visit.archiveVersion = entries.archiveVersion;
   auto scroll = ScrollPosition();
   visit.x = scroll.x;
   visit.y = scroll.y;
@@ -66,6 +67,7 @@ void Pane::RestoreVisit() {
   std::vector<std::string> selection;
   std::string focus;
   for (auto *row : entries.Visible()) {
+    if (entries.archiveVersion != visit.archiveVersion) break;
     auto selected = visit.selected.find(row->path);
     if (selected != visit.selected.end() && selected->second == IdentityOf(*row))
       selection.push_back(row->path);
@@ -106,6 +108,7 @@ Listi::PaneNavigationState Pane::CaptureNavigation() {
   state.folderView = restoredView >= 0 ? restoredView : prefs.PaneMode(id);
   state.sorting = Sorting();
   state.scroll = ScrollPosition();
+  state.archiveVersion = entries.archiveVersion;
   state.selection = savedSelection;
   for (auto *row : entries.Visible())
     if (entries.IsSelected(row->path))

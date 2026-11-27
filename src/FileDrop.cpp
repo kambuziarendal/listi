@@ -17,6 +17,7 @@
 #include <cstdlib>
 namespace Listi {
 namespace {
+constexpr const char *kArchiveSelection = "listi:archive-selection";
 constexpr const char *kRemoteSelection = "listi:remote-selection";
 constexpr const char *kSelection = "listi:drag-selection";
 void Require(status_t s) {
@@ -82,11 +83,14 @@ BMessage MakeFileDrag(const std::vector<std::string> &paths,
 BMessage MakePaneFileDrag(const PaneModel &model) {
   const auto paths = model.SelectedFiles();
   auto drag = MakeFileDrag(paths, model.SelectedLocalIdentities(kFileSelectionLimit));
-  if (!paths.empty() && IsVirtual(paths.front()) && !ParseLocation(paths.front()).Archive()) {
+  if (!paths.empty() && IsVirtual(paths.front())) {
     Job snapshot;
-    snapshot.expectedRemoteSources = model.SelectedRemoteEntries();
+    model.BindArchiveView(snapshot, paths.front());
+    const bool archive = !snapshot.expectedArchiveSets.empty();
+    if (!archive)
+      snapshot.expectedRemoteSources = model.SelectedRemoteEntries();
     const auto encoded = EncodeJob(snapshot, 0);
-    Require(drag.AddMessage(kRemoteSelection, &encoded));
+    Require(drag.AddMessage(archive ? kArchiveSelection : kRemoteSelection, &encoded));
   }
   return drag;
 }
@@ -101,11 +105,27 @@ Job PrepareFileDrop(const BMessage &message, const std::string &destination,
   if (message.HasString("listi:path")) {
     if (message.HasRef("refs"))
       throw std::runtime_error("Drag local and virtual selections separately.");
-    const char *path;
-    for (int32 i = 0; message.FindString("listi:path", i, &path) == B_OK; ++i) {
-      if (i >= 1024 || !IsVirtual(path))
+    type_code type;
+    int32 count;
+    Require(message.GetInfo("listi:path", &type, &count));
+    if (type != B_STRING_TYPE || count < 1 || count > 1024)
+      throw std::runtime_error("Invalid virtual drop selection.");
+    for (int32 i = 0; i < count; ++i) {
+      const char *path;
+      Require(message.FindString("listi:path", i, &path));
+      if (!IsVirtual(path))
         throw std::runtime_error("Invalid virtual drop selection.");
       job.sources.emplace_back(path);
+    }
+    if (std::any_of(job.sources.begin(), job.sources.end(),
+                    [](const auto &s) { return ParseLocation(s).Archive(); })) {
+      BMessage snapshot;
+      if (message.FindMessage(kArchiveSelection, &snapshot) != B_OK)
+        throw std::runtime_error("Missing archive version. Reload and drag the entries again.");
+      job.expectedArchiveSets = DecodeJob(snapshot).expectedArchiveSets;
+      for (const auto &source : job.sources)
+        if (!job.expectedArchiveSets.count(ParseLocation(source).archive))
+          throw std::runtime_error("Incomplete archive selection. Reload and select again.");
     }
     // Older drags carry URLs only. A drag with a snapshot must cover the
     // entire selection; never silently downgrade it to the old behaviour.
