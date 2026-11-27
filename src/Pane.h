@@ -3,6 +3,7 @@
 #include "Common.h"
 #include "IconCache.h"
 #include "PaneModel.h"
+#include "ScanRows.h"
 #include "PaneNavigationState.h"
 #include "SavedPlaces.h"
 #include "FileSearch.h"
@@ -42,7 +43,8 @@ public:
   void NavigateFromColumn(const std::string &folder,
                           const std::string &selection = {},
                           bool invoke = false, bool context = false,
-                          BPoint at = {}, const PaneEntry *clicked = nullptr);
+                          BPoint at = {}, const PaneEntry *clicked = nullptr,
+                          const std::string &archiveVersion = {});
   Listi::PaneNavigationState CaptureNavigation();
   void RestoreNavigation(const Listi::PaneNavigationState &);
   bool IsSearchList() const { return queries.count(path.String()) != 0; }
@@ -203,6 +205,7 @@ private:
   void ScheduleDirectoryRefresh();
   std::shared_ptr<std::atomic<int64>> generation;
   int64 serial = 0;
+  Listi::ScanRows receivedRows;
   bool scanning = false, refreshPending = false;
   std::map<std::string, std::pair<int64_t, int64_t>> savedSelection;
   BMessage columnAction;

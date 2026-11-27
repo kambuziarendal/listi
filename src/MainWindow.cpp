@@ -12,6 +12,7 @@
 #include <Screen.h>
 #include <NodeMonitor.h>
 #include "WorkingSets.h"
+#include "StoredFields.h"
 #include <atomic>
 #include <MenuItem.h>
 #include <PopUpMenu.h>
@@ -747,10 +748,14 @@ public:
       const auto &savedWindow = *request.workingSet;
       SetWorkingSetName(savedWindow.GetString("workingSetName", ""));
       SetAlias(savedWindow.GetString("alias", ""));
-      for (int side = 0; side < 2; ++side) {
-        BMessage panel;
-        if (savedWindow.FindMessage("panel", side, &panel) == B_OK)
-          split->Panel(side).FolderBar().RestoreTabs(panel);
+      try {
+        for (int side = 0; side < 2; ++side)
+          split->Panel(side).FolderBar().RestoreTabs(Listi::StoredItem(savedWindow, "panel", side));
+      } catch (const std::exception &error) {
+        const std::string notice = "Window " + std::to_string(savedWindow.GetInt32("setIndex", 1)) +
+            " of working set '" + savedWindow.GetString("workingSetName", "") +
+            "' opened with incomplete tabs: " + error.what();
+        (new BAlert("Working set", notice.c_str(), "Close"))->Go(nullptr);
       }
       split->SetSource(savedWindow.GetInt32("source", 0) == 1 ? 1 : 0);
       split->Focus();
@@ -956,19 +961,23 @@ public:
       return;
     }
     if (m->what == Listi::kCaptureWorkingWindow) {
-      BMessage snapshot(Listi::kCaptureWorkingWindow);
-      WorkspaceLayout savedLayout = prefs;
-      split->RememberWeights(savedLayout, split->QuickView());
-      savedLayout.Archive(snapshot);
-      snapshot.AddBool("visibleButtons", prefs.ActionButtonsVisible());
-      snapshot.AddInt32("source", split->Source());
-      snapshot.AddString("alias", Alias().c_str());
-      snapshot.AddRect("frame", Frame());
-      for (int side = 0; side < 2; ++side) {
-        auto panel = split->Panel(side).FolderBar().ArchiveTabs();
-        snapshot.AddMessage("panel", &panel);
+      try {
+        BMessage snapshot(Listi::kCaptureWorkingWindow);
+        WorkspaceLayout savedLayout = prefs;
+        split->RememberWeights(savedLayout, split->QuickView());
+        savedLayout.Archive(snapshot);
+        Listi::CheckStoredField(snapshot.AddBool("visibleButtons", prefs.ActionButtonsVisible()));
+        Listi::CheckStoredField(snapshot.AddInt32("source", split->Source()));
+        Listi::CheckStoredField(snapshot.AddString("alias", Alias().c_str()));
+        Listi::CheckStoredField(snapshot.AddRect("frame", Frame()));
+        for (int side = 0; side < 2; ++side) {
+          auto panel = split->Panel(side).FolderBar().ArchiveTabs();
+          Listi::CheckStoredField(snapshot.AddMessage("panel", &panel));
+        }
+        m->SendReply(&snapshot);
+      } catch (const std::exception &) {
+        m->SendReply(B_ERROR);
       }
-      m->SendReply(&snapshot);
       return;
     }
     if (m->what == Listi::kOpenWorkingSet || m->what == Listi::kSaveWorkingSet) {
@@ -1181,7 +1190,8 @@ public:
               throw std::runtime_error("Use Copy or Cut, then navigate and Paste.");
             auto job = Listi::FlatSelection(*flat);
             job.action = m->what == kCopy ? Listi::Action::Copy : Listi::Action::Move;
-            job.destination = panes[1 - source]->Path();
+            job.destination = destination.Path();
+            destination.ExportModel().BindArchiveView(job, job.destination);
             fileOperations.SubmitTransfer(std::move(job));
           } catch (const std::exception &e) {
             PostMainWindowNotice(e.what());

@@ -22,6 +22,17 @@ namespace {
 std::atomic_bool *cancelAfterWrite = nullptr;
 const struct stat *oversizedFixture = nullptr;
 bigtime_t historyClock = 0;
+const char *failItem = nullptr;
+}
+
+extern "C" status_t __real__ZNK8BMessage11FindMessageEPKciPS_(const BMessage *, const char *, int32, BMessage *);
+extern "C" status_t __wrap__ZNK8BMessage11FindMessageEPKciPS_(const BMessage *self, const char *name, int32 index, BMessage *item) {
+  if (failItem && index == 1 && strcmp(name, failItem) == 0 &&
+      (strcmp(name, "attr") != 0 || strcmp(self->GetString("name", ""), "note") == 0)) {
+    failItem = nullptr;
+    return B_NO_MEMORY;
+  }
+  return __real__ZNK8BMessage11FindMessageEPKciPS_(self, name, index, item);
 }
 
 extern "C" bigtime_t __real_real_time_clock_usecs();
@@ -213,6 +224,17 @@ int main() {
   auto initialRows = Listi::DescribeVersion(history, first, "", status, cancel);
   assert(initialRows.at("dir/note").change.empty() && !initialRows.count("dir/renamed"));
   std::cout << "PASS timeline compares adjacent saved versions, including removed and changed nested files" << std::endl;
+  for (const char *field : {"child", "attr"}) {
+    failItem = field;
+    const auto partial = base / (std::string("unreadable-") + field);
+    reject([&] { history.Restore(first, partial, cancel); }, "unreadable advertised history item",
+           "Could not read stored item");
+    assert(failItem == nullptr);
+    const int partialFd = open(partial.c_str(), O_RDONLY);
+    attr_info marker{};
+    assert(partialFd >= 0 && fs_stat_attr(partialFd, "Listi:RestoreIncomplete-1", &marker) == 0);
+    close(partialFd);
+  }
   history.Restore(first,base/"one",cancel);
   history.Restore(metadata,base/"two",cancel);
   history.Restore(renamed,base/"three",cancel);

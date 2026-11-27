@@ -9,7 +9,7 @@ struct SavedSearch {
   SearchRequest request;
   bool live = false;
 
-  void WriteTo(BMessage &message) const;
+  bool WriteTo(BMessage &message) const;
   static SavedSearch FromMessage(const BMessage &message);
 };
 class SavedSearches {

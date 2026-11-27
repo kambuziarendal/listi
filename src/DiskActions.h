@@ -22,7 +22,7 @@ struct DiskPartition {
   std::string contentName;
 
   bool operator==(const DiskPartition &other) const;
-  void WriteTo(BMessage &message) const;
+  [[nodiscard]] bool WriteTo(BMessage &message) const;
   static DiskPartition ReadFrom(const BMessage &message);
 };
 

@@ -48,6 +48,37 @@ def check_receipt_contract():
         else:
             raise RuntimeError(f"Invalid native receipts accepted: {reason}")
 
+    cases = ["archive-copy-inputs", "file-operation-faults"]
+    alias = "PASS mounted fixture contains both real hard-link pairs"
+    protected = "PASS protected both mounted archive aliases through replacement and retry"
+    tracker = "PASS Tracker original-path strings are present and distinct on the native Trash volume"
+    triple = "PASS three fixture names refer to one inode before Trash"
+    attribute = "PASS three-link volume: Tracker original-path attribute verified "
+    refusal = "PASS Trash preview and worker refuse a shared original-path attribute"
+    unchanged = "PASS both selected names and the outside link retain bytes and metadata"
+    link_log = ["TEST archive-copy-inputs", alias, protected, "PASS archive-copy-inputs",
+                "TEST file-operation-faults", tracker, triple, attribute + "absent", refusal, refusal,
+                unchanged, "PASS file-operation-faults", *valid[2:-1],
+                "PASS Listi --self-test; 2 selected native cases exited successfully"]
+    validate(link_log, cases)
+    present = link_log.copy()
+    present[present.index(attribute + "absent")] = attribute + "present"
+    validate(present, cases)
+    invalid = {}
+    for line in (alias, protected, tracker, triple, attribute + "absent", refusal, unchanged):
+        missing = link_log.copy()
+        missing.remove(line)
+        invalid["absent " + line] = missing
+    invalid["wrong case"] = [alias, *invalid["absent " + alias]]
+    invalid["contradictory attribute"] = [*link_log[:8], attribute + "present", *link_log[8:]]
+    for reason, lines in invalid.items():
+        try:
+            validate(lines, cases)
+        except RuntimeError:
+            continue
+        raise RuntimeError("Missing/ambiguous hard-link coverage accepted: " + reason)
+    print("PASS gate/hardlinks: both fixture receipts and explicit Tracker state required in their own cases")
+
 
 def main():
     check_receipt_contract()

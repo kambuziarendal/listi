@@ -37,6 +37,7 @@ PaneEntry *Pane::ScrollRow(const std::string *path, float &top) {
 
 Listi::VisitPosition Pane::CaptureVisit(size_t selectionLimit) {
   Listi::VisitPosition visit;
+  visit.archiveVersion = entries.archiveVersion;
   auto scroll = ScrollPosition();
   visit.x = scroll.x;
   visit.y = scroll.y;
@@ -66,6 +67,7 @@ void Pane::RestoreVisit() {
   std::vector<std::string> selection;
   std::string focus;
   for (auto *row : entries.Visible()) {
+    if (entries.archiveVersion != visit.archiveVersion) break;
     auto selected = visit.selected.find(row->path);
     if (selected != visit.selected.end() && selected->second == IdentityOf(*row))
       selection.push_back(row->path);
@@ -106,6 +108,7 @@ Listi::PaneNavigationState Pane::CaptureNavigation() {
   state.folderView = restoredView >= 0 ? restoredView : prefs.PaneMode(id);
   state.sorting = Sorting();
   state.scroll = ScrollPosition();
+  state.archiveVersion = entries.archiveVersion;
   state.selection = savedSelection;
   for (auto *row : entries.Visible())
     if (entries.IsSelected(row->path))
@@ -161,19 +164,19 @@ bool Pane::HandleQueryReply(BMessage &message) {
   if (!IsSearchList() || message.GetInt64("serial", -1) != serial || !queryWorker)
     return true;
   if (message.what == kSearchBegin) {
+    receivedRows = {};
     queryRows.clear();
     return true;
   }
   if (message.what == kSearchRows) {
-    BMessage hit;
-    for (int i = 0; message.FindMessage("hit", i, &hit) == B_OK; ++i) {
+    receivedRows.Read(message, "hit", [&](const BMessage &hit) {
       auto row = std::make_unique<PaneEntry>();
       row->path = hit.GetString("path", "");
       row->name = Leaf(row->path);
       row->device = hit.GetInt64("device", -1);
       if (Listi::InterruptedVolumes().ContainsDevice(row->device) ||
           Listi::InterruptedVolumes().Contains(row->path))
-        continue;
+        return;
       row->node = hit.GetInt64("node", -1);
       row->kind = hit.GetInt32("kind", 0);
       row->directory = hit.GetBool("directory", false);
@@ -182,12 +185,14 @@ bool Pane::HandleQueryReply(BMessage &message) {
       row->modified = hit.GetInt64("date", 0);
       row->attributeCells.push_back({Listi::ParentLocation(row->path), B_STRING_TYPE});
       queryRows.push_back(std::move(row));
-    }
+    });
     return true;
   }
   const bool initial = scanning;
   auto state = CaptureNavigation();
-  const std::string error = message.GetString("error", "");
+  std::string error = message.GetString("error", "");
+  if (error.empty() && !message.GetBool("cancelled", false) && !receivedRows.Complete(message))
+    error = "Incomplete search results. Reload to try again.";
   if (!error.empty() || message.GetBool("cancelled", false)) {
     Listi::RetireReadWorker(queryWorker);
     ClearRows();

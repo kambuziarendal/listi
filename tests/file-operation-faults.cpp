@@ -6,6 +6,7 @@
 #include "JobReportStore.h"
 #include "Trash.h"
 #include <Node.h>
+#include <String.h>
 #include <fcntl.h>
 #include <cstdarg>
 #include <fs_attr.h>
@@ -34,6 +35,7 @@ ino_t directoryForSync = -1;
 bool deviceGone = false, reportFat = false, synthesizeStageMode = false;
 std::string simulatedHardlink;
 int failures = 0;
+int exactNameScans = 0;
 
 void Check(bool ok, const char *label) {
   std::cout << (ok ? "PASS " : "FAIL ") << label << '\n';
@@ -55,6 +57,8 @@ bool Has(const Result &result, const fs::path &source, const fs::path &dest,
 
 extern "C" int __real_openat(int, const char *, int, ...);
 extern "C" int __wrap_openat(int directory, const char *path, int flags, ...) {
+  if ((flags & O_DIRECTORY) && !strcmp(path, "."))
+    ++exactNameScans;
   if (!(flags & O_CREAT))
     return __real_openat(directory, path, flags);
   va_list args;
@@ -166,6 +170,83 @@ extern "C" status_t __wrap__ZN5BNode10RemoveAttrEPKc(BNode *node, const char *na
 }
 
 namespace {
+// Real prelinked image on Haiku: the names exist even on drivers which
+// cannot create links or provide a native Tracker Trash directory.
+void TestSharedTrashPath(const fs::path &root) {
+  const auto one = root / "trash-one/note", two = root / "trash-two/note";
+  fs::create_directory(one.parent_path());
+  fs::create_directory(two.parent_path());
+  std::ofstream(one) << "first";
+  std::ofstream(two) << "second";
+  const auto trashedOne = MoveToTrash(one.string());
+  const auto trashedTwo = MoveToTrash(two.string());
+  BString pathOne, pathTwo;
+  Check(BNode(trashedOne.c_str()).ReadAttrString("_trk/original_path", &pathOne) == B_OK &&
+            BNode(trashedTwo.c_str()).ReadAttrString("_trk/original_path", &pathTwo) == B_OK &&
+            one.string() == pathOne.String() && two.string() == pathTwo.String(),
+        "Tracker original-path strings are present and distinct on the native Trash volume");
+  const auto restoredOne = RestoreFromTrash(trashedOne);
+  const auto restoredTwo = RestoreFromTrash(trashedTwo);
+  Check(restoredOne == one && restoredTwo == two && Read(one) == "first" && Read(two) == "second",
+        "two independent files of the same name restore to their own folders");
+  const char *fixture = getenv("LISTI_DELETE_HARDLINK_FIXTURE");
+  if (!fixture)
+    return;
+  const auto base = fs::path(fixture) / "complete";
+  const auto first = base / "selected/z", second = base / "selected/a", third = base / "outside";
+  struct stat before{}, after{}, a{}, b{};
+  const bool realLinks = !lstat(third.c_str(), &before) && S_ISREG(before.st_mode) && before.st_nlink == 3 &&
+      !lstat(first.c_str(), &a) && !lstat(second.c_str(), &b) &&
+      a.st_dev == before.st_dev && b.st_dev == before.st_dev &&
+      a.st_ino == before.st_ino && b.st_ino == before.st_ino;
+  Check(realLinks, "three fixture names refer to one inode before Trash");
+  if (!realLinks)
+    return;
+  const auto contents = Read(third);
+  BNode node(third.c_str());
+  const char *attribute = "_trk/original_path";
+  BString sentinel("/listi-test/previous-location"), originalPath, observedPath;
+  attr_info info{};
+  const auto initial = node.GetAttrInfo(attribute, &info);
+  // Retain an existing caller-supplied sentinel. On a fresh disposable fixture
+  // try to seed one, and observe whether this driver really stores the string.
+  const auto written = initial == B_ENTRY_NOT_FOUND ? node.WriteAttrString(attribute, &sentinel) : initial;
+  const auto found = node.GetAttrInfo(attribute, &info);
+  const auto previous = node.ReadAttrString(attribute, &originalPath);
+  if (found == B_OK) {
+    Check(written == B_OK && info.type == B_STRING_TYPE && previous == B_OK &&
+              (initial == B_OK || originalPath == sentinel),
+          "three-link volume: Tracker original-path attribute verified present");
+  } else {
+    Check(initial == B_ENTRY_NOT_FOUND && written != B_OK && found == B_ENTRY_NOT_FOUND &&
+              previous == B_ENTRY_NOT_FOUND,
+          "three-link volume: Tracker original-path attribute verified absent");
+  }
+  // Attribute setup can change ctime. Capture the baseline for the two refusals now.
+  if (lstat(third.c_str(), &before))
+    throw std::runtime_error("Cannot recapture three-link fixture after attribute probe");
+  for (const auto &path : {first, second}) {
+    bool refused = false;
+    try {
+      CheckTrashSource(path.string());
+    } catch (const std::runtime_error &error) {
+      refused = std::string(error.what()).find("hard links") != std::string::npos;
+    }
+    const auto result = Run({Action::Trash, {path.string()}, {}}, {});
+    Check(refused && !result.completed && !result.errors.empty() &&
+              result.errors.front().find("hard links") != std::string::npos,
+          "Trash preview and worker refuse a shared original-path attribute");
+  }
+  Check(!lstat(third.c_str(), &after) && before.st_ino == after.st_ino &&
+            before.st_nlink == after.st_nlink && before.st_mode == after.st_mode &&
+            before.st_ctim.tv_sec == after.st_ctim.tv_sec && before.st_ctim.tv_nsec == after.st_ctim.tv_nsec &&
+            fs::equivalent(first, third) && fs::equivalent(second, third) &&
+            Read(third) == contents && node.GetAttrInfo(attribute, &info) == found &&
+            node.ReadAttrString(attribute, &observedPath) == previous &&
+            (previous != B_OK || originalPath == observedPath),
+        "both selected names and the outside link retain bytes and metadata");
+}
+
 // The prepared image is disposable; validate the exact three links and do
 // not delete a caller's directory unless it contains only these fixture names.
 void TestDeleteHardlinks(const fs::path &root) {
@@ -511,12 +592,39 @@ int main() {
   const auto root = fs::canonical(temp);
   const auto out = root / "out", source = root / "file", target = out / "file";
   fs::create_directory(out);
+  TestSharedTrashPath(root);
   TestDeleteHardlinks(root);
   TestFileClaims(root, false);
   TestClaimedKeepBoth(root);
   TestDirectoryClaims(root, out);
   TestMovePermissions(root, out);
   TestNameFlush(root, out);
+  {
+    const auto inputs = root / "skip-inputs", outputs = root / "skip-outputs";
+    fs::create_directory(inputs);
+    fs::create_directory(outputs);
+    Job copy{Action::Copy, {}, outputs.string()};
+    for (int index = 0; index < 128; ++index) {
+      const auto name = std::to_string(index);
+      copy.sources.push_back((inputs / name).string());
+      std::ofstream(inputs / name) << "source";
+      std::ofstream(outputs / name) << "target";
+    }
+    int prompts = 0, scansAtChoice = 0;
+    Hooks hooks;
+    hooks.conflict = [&](const std::string &) {
+      ++prompts;
+      scansAtChoice = exactNameScans;
+      return Decision::SkipAll;
+    };
+    const auto skipped = Run(copy, hooks);
+    bool intact = true;
+    for (const auto &source : copy.sources)
+      intact &= Read(source) == "source" && Read(outputs / fs::path(source).filename()) == "target";
+    Check(skipped.skipped == 128 && !skipped.completed && skipped.errors.empty() &&
+              prompts == 1 && exactNameScans == scansAtChoice && intact,
+          "Skip All leaves all bytes intact without enumerating later conflict names");
+  }
   const std::string payload(1000, 'x');
   std::ofstream(source) << payload;
   std::ofstream(target) << "original";
@@ -980,12 +1088,46 @@ int main() {
   if (fs::exists(inTrash))
     fs::remove(inTrash);
 
+  // Swap a directory after preview, before execution of the confirmed snapshot.
+  {
+    const auto project = root / "project", original = root / "old-project", note = project / "note";
+    fs::create_directory(project);
+    std::ofstream(note) << payload;
+    const auto trashPath = MoveToTrash(note.string());
+    Job restore{Action::Restore, {trashPath}, {}};
+    FreezeLocalJob(restore);
+    const auto identity = restore.expectedSources.at(trashPath);
+    restore.restoreTargets[trashPath] = CaptureRestoreTarget(trashPath, identity);
+    auto encoded = EncodeJob(restore, 'test');
+    auto submitted = DecodeSubmittedJob(encoded, {Action::Restore});
+    BMessage incomplete;
+    encoded.FindMessage("restoreTarget", &incomplete);
+    incomplete.RemoveName("parentNode");
+    encoded.ReplaceMessage("restoreTarget", &incomplete);
+    Check(!DecodeSubmittedJob(encoded, {Action::Restore}),
+          "a restore confirmation without its parent identity is refused");
+    fs::rename(project, original);
+    fs::create_directory(project);
+    Check(submitted.has_value(), "restore confirmation includes the original directory identity");
+    const auto rejected = submitted ? Run(*submitted, {}) : Result{};
+    Check(!rejected.completed && !rejected.errors.empty() && Read(trashPath) == payload &&
+              !fs::exists(note) && !fs::exists(original / "note") &&
+              OriginalTrashPath(trashPath, identity) == note.string(),
+          "replaced project folder cannot receive a confirmed restore");
+    restore.restoreTargets[trashPath] = CaptureRestoreTarget(trashPath, identity);
+    const auto retry = Run(DecodeJob(EncodeJob(restore, 'test')), {});
+    Check(retry.completed == 1 && retry.errors.empty() && !fs::exists(trashPath) &&
+              Read(note) == payload && !fs::exists(original / "note"),
+          "a fresh restore confirmation can target the replacement folder");
+  }
+
   const auto trashed = MoveToTrash(source.string());
   Job guardedRestore{Action::Restore, {trashed}, {}};
   FreezeLocalJob(guardedRestore);
   const auto shown = OriginalTrashPath(trashed, guardedRestore.expectedSources.at(trashed));
   Check(shown == source.string(), "restore preview identifies exact original path");
-  guardedRestore.restoreTargets[trashed] = shown + "-different";
+  guardedRestore.restoreTargets[trashed] = CaptureRestoreTarget(trashed, guardedRestore.expectedSources.at(trashed));
+  guardedRestore.restoreTargets.at(trashed).path += "-different";
   result = Run(guardedRestore, {});
   Check(!result.completed && !result.errors.empty() && fs::exists(trashed) && !fs::exists(source),
         "restore refuses to repoint a user's destination after confirmation");

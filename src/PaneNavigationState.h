@@ -22,6 +22,7 @@ struct PaneNavigationState {
   int32 view = -1, folderView = -1;
   bool workingSetView = false;
   BPoint scroll{0, 0};
+  std::string archiveVersion;
 };
 constexpr uint32 kOpenSearchList = 'osli';
 }

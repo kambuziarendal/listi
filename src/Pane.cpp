@@ -554,8 +554,14 @@ void Pane::Navigate(const char *p) {
 }
 void Pane::NavigateFromColumn(const std::string &folder,
                               const std::string &selection, bool invoke,
-                              bool context, BPoint at, const PaneEntry *clicked) {
+                              bool context, BPoint at, const PaneEntry *clicked,
+                              const std::string &archiveVersion) {
   BMessage message(kColumnNavigate);
+  if (!archiveVersion.empty() && Listi::ParseLocation(folder).Archive() &&
+      message.AddString("archiveVersion", archiveVersion.c_str()) != B_OK) {
+    SetStatus("Cannot verify column entry. Reload and select again.");
+    return;
+  }
   if (clicked && !Listi::IsVirtual(clicked->path)) {
     message.AddString("clickedPath", clicked->path.c_str());
     message.AddInt64("device", clicked->device);
@@ -625,7 +631,10 @@ void Pane::StartNavigation(const std::string &request, int target, bool trash,
   savedSelection.clear();
   if (refresh && pendingVisit) {
     savedSelection = pendingVisit->selected;
-  } else if (target < 0 && !trash && path == request.c_str()) {
+  } else if (target < 0 && sameDirectory && request.rfind("archive://", 0) == 0) {
+    if (!restore && !entries.archiveVersion.empty())
+      pendingVisit = CaptureVisit(entries.Visible().size());
+  } else if (target < 0 && sameDirectory) {
     for (auto entry : entries.Visible())
       if (entries.IsSelected(entry->path))
         savedSelection.emplace(entry->path,
@@ -647,6 +656,7 @@ void Pane::StartNavigation(const std::string &request, int target, bool trash,
     Listi::RetireReadWorker(scanner);
   if (!scanner && !IsSearchList())
     StartDirectoryReader();
+  receivedRows = {};
   scanning = true;
   locationValid = false;
   folderIdentity = {-1, -1};
@@ -747,6 +757,7 @@ void Pane::Reload() {
     return;
   }
   StartNavigation(path.String(), -1, false, false, true);
+  if (mode == MillerMode) columns->ReloadArchiveColumns();
 }
 std::vector<std::string> Pane::Selected() const {
   return entries.SelectedFiles();
@@ -1349,9 +1360,8 @@ void Pane::MessageReceived(BMessage *m) {
     if (!scanning || m->GetInt64("serial", -1) != serial)
       break;
     scanDelivery->ReleaseBatch(serial);
-    BMessage e;
     const size_t first = entries.Visible().size();
-    for (int i = 0; m->FindMessage("entry", i, &e) == B_OK; i++) {
+    receivedRows.Read(*m, "entry", [&](const BMessage &e) {
       auto row = std::make_unique<PaneEntry>();
       row->name = e.GetString("name", "");
       row->path = e.GetString("path", "");
@@ -1367,13 +1377,18 @@ void Pane::MessageReceived(BMessage *m) {
       row->device = e.GetInt64("device", -1);
       if (Listi::InterruptedVolumes().ContainsDevice(row->device) ||
           Listi::InterruptedVolumes().Contains(row->path))
-        continue;
+        return;
       row->node = e.GetInt64("node", -1);
       if (path == "@disks") {
         row->unmountedDisk = e.GetBool("unmountedDisk", false);
-        if (e.HasInt32("partition"))
-          row->partition = std::make_unique<Listi::DiskPartition>(
-              Listi::DiskPartition::ReadFrom(e));
+        if (row->unmountedDisk || e.HasInt32("partition")) {
+          auto partition = Listi::DiskPartition::ReadFrom(e);
+          if (partition.id < 0) {
+            receivedRows.failed = true;
+            return;
+          }
+          row->partition = std::make_unique<Listi::DiskPartition>(std::move(partition));
+        }
       }
       // Virtual listings have no local node identity; retain their path-based
       // behavior. A replacement local entry must not inherit selection.
@@ -1400,7 +1415,7 @@ void Pane::MessageReceived(BMessage *m) {
         row->icon = icons.Get(bits, length, pixels);
       }
       entries.AddScanned(std::move(row), einn ? "" : filter->Text(), restore);
-    }
+    });
     if (mode == 0)
       list->Append(first);
     else if (mode == MillerMode)
@@ -1416,7 +1431,19 @@ void Pane::MessageReceived(BMessage *m) {
     savedSelection.clear();
     scanTimer.reset();
     path = m->GetString("path", path);
-    locationValid = !m->HasString("error");
+    const char *error = m->GetString("error", nullptr);
+    if (!error && !receivedRows.Complete(*m))
+      error = "Incomplete directory listing. Reload to try again.";
+    if (!error && Listi::ParseLocation(path.String()).Archive()) {
+      entries.archiveVersion = m->GetString("archiveVersion", "");
+      if (entries.archiveVersion.empty())
+        error = "Missing archive version. Reload and select again.";
+    }
+    if (!entries.archiveVersion.empty() && restoring && restoring->archiveVersion != entries.archiveVersion) {
+      entries.SetSelection({}, "");
+      restoring->focused.clear();
+    }
+    locationValid = error == nullptr;
     folderIdentity = {m->GetInt64("folderDevice", -1), m->GetInt64("folderNode", -1)};
     if (!locationValid) pendingVisit.reset();
     if (locationValid && mode != 0)
@@ -1429,8 +1456,7 @@ void Pane::MessageReceived(BMessage *m) {
     SetDisplayMode(finalMode, mode == 0 && finalMode == mode && locationValid);
     edit->SetText(LocationLabel().c_str());
     sidebar->UpdateLocation();
-    const char *error;
-    if (m->FindString("error", &error) == B_OK) {
+    if (error) {
       ClearRows();
       BString s("Cannot open: ");
       s << error;
@@ -1443,7 +1469,9 @@ void Pane::MessageReceived(BMessage *m) {
       std::string picked = action.GetString("selection", "");
       if (!picked.empty())
         entries.SetSelection({picked}, picked);
-      bool changedColumn = !ColumnEntryUnchanged(action);
+      bool changedColumn = !ColumnEntryUnchanged(action) ||
+          (action.HasString("archiveVersion") &&
+           entries.archiveVersion != action.GetString("archiveVersion", ""));
       if (!picked.empty() && action.HasString("clickedPath")) {
         const auto *row = entries.OnlySelected();
         changedColumn |= !row || row->device != action.GetInt64("device", -1) ||
@@ -1465,6 +1493,7 @@ void Pane::MessageReceived(BMessage *m) {
           entries.SetSelection({reveal.path}, reveal.path);
         reveal = {};
       }
+      if (changedColumn || !picked.empty()) pendingVisit.reset();
       if (pendingVisit && !restoring) RestoreVisit();
       else SendSelection();
       if (stale)

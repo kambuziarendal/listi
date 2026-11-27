@@ -475,12 +475,8 @@ public:
       pane->ShowStatus("A search list is not a destination folder.");
       return;
     }
-    BMessage drop(*message);
-    drop.what = kDrop;
-    drop.RemoveName("destination");
     const auto target = DetailsDropTarget(this, pane, point);
-    drop.AddString("destination", target.empty() ? pane->Path() : target.c_str());
-    Window()->PostMessage(&drop);
+    Listi::PostPaneFileDrop(*pane, *model, *message, target.empty() ? pane->Path() : target);
   }
 };
 class DetailsView : public FileDetails {

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+#include "StoredFields.h"
 #include "SavedPlaces.h"
 #include "MessageStore.h"
 #include "VirtualFile.h"
@@ -119,12 +120,12 @@ void SavedPlaces::ApplyEdit(const BMessage &request) {
 }
 BMessage SavedPlaces::Message() const {
   BMessage result;
-  result.AddInt32("version", 1);
+  CheckStoredField(result.AddInt32("version", 1));
   for (auto &item : items) {
     BMessage place;
-    place.AddString("name", item.name.c_str());
-    place.AddString("path", item.path.c_str());
-    result.AddMessage("place", &place);
+    CheckStoredField(place.AddString("name", item.name.c_str()));
+    CheckStoredField(place.AddString("path", item.path.c_str()));
+    CheckStoredField(result.AddMessage("place", &place));
   }
   return result;
 }
@@ -133,11 +134,7 @@ SavedPlaces SavedPlaces::FromMessage(const BMessage &m) {
     throw std::runtime_error("Unsupported saved-places format.");
   SavedPlaces result;
   BMessage place;
-  type_code type;
-  int32 count = 0;
-  if (m.GetInfo("place", &type, &count) == B_OK &&
-      (type != B_MESSAGE_TYPE || count > int32(Limit)))
-    throw std::runtime_error("Invalid saved-places list.");
+  const auto count = StoredCount(m, "place", Limit);
   for (int32 i = 0; i < count; ++i) {
     if (m.FindMessage("place", i, &place) != B_OK)
       throw std::runtime_error("Invalid saved place.");

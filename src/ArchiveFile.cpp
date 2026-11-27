@@ -152,9 +152,11 @@ std::vector<FileEntry> ReadListing(const Location &location,
   return Backend().list(location, control);
 }
 std::shared_ptr<const std::vector<FileEntry>>
-Listing(const Location &location, const TransferControl &control) {
+Listing(const Location &location, const TransferControl &control,
+        std::string *shown = nullptr) {
   control.Check();
   const auto fingerprint = FindArchiveVolumes(location.archive).Fingerprint();
+  if (shown) *shown = fingerprint;
   const auto passwordGeneration = ArchivePasswordGeneration();
   const auto key = location.URL();
   if (listingScopes) {
@@ -203,6 +205,10 @@ ArchiveListingScope::~ArchiveListingScope() {
 std::vector<FileEntry> ListArchive(const Location &location,
                                    const TransferControl &control) {
   return *Listing(location, control);
+}
+std::vector<FileEntry> ListArchiveView(const Location &location, const TransferControl &control,
+                                       std::string &fingerprint) {
+  return *Listing(location, control, &fingerprint);
 }
 bool StatArchive(const Location &location, FileEntry &entry,
                  const TransferControl &control) {

@@ -335,6 +335,33 @@ struct Runner {
     }
     return true;
   }
+  // Walk only projected paths which already exist. A missing directory
+  // cannot contain an alias; a later arrival is checked again at publication.
+  void CheckExistingOutputs(const std::string &src, const std::string &dst,
+                            const TransferControl &control, size_t &count, unsigned depth = 0) {
+    control.Check();
+    struct stat target;
+    if (lstat(dst.c_str(), &target)) {
+      if (errno == ENOENT)
+        return;
+      throw std::runtime_error("Cannot check destination: " + dst);
+    }
+    hooks.checkOverwrite(dst, target);
+    if (!S_ISDIR(target.st_mode))
+      return;
+    FileEntry from;
+    if (!StatFile(src, from, control))
+      throw std::runtime_error("Source is unavailable: " + src);
+    if (!from.directory || from.link)
+      return;
+    if (depth >= 128)
+      throw std::runtime_error("Folder tree exceeds the transfer limit");
+    for (const auto &child : ListFiles(src, control)) {
+      if (++count > 200000)
+        throw std::runtime_error("Folder tree exceeds the transfer limit");
+      CheckExistingOutputs(child.path, ChildLocation(dst, child.name), control, count, depth + 1);
+    }
+  }
   void Copy(const std::string &src, const std::string &dst, int depth = 0,
             const FileEntry *discovered = nullptr) {
     if (depth > 128 || ++visited > 200000)
@@ -418,6 +445,8 @@ struct Runner {
         if (fstatat(localParent->Descriptor(), leaf.c_str(), &named,
                     AT_SYMLINK_NOFOLLOW) || !S_ISDIR(named.st_mode))
           throw std::runtime_error(dst + ": destination directory changed.");
+        if (exists && hooks.checkOverwrite)
+          hooks.checkOverwrite(dst, named);
         // Do not populate a private source into a more accessible folder,
         // even on a retry or a filesystem that ignored the creation mode.
         if ((named.st_mode & 0077 & ~source.permissions) != 0)
@@ -516,6 +545,18 @@ struct Runner {
       struct stat before {};
       if (exists && lstat(dst.c_str(), &before))
         throw std::runtime_error("Destination changed before staging.");
+      // The first conflict still goes through the normal local publisher.
+      // Subsequent ordinary files need no scratch space for an already
+      // chosen Skip All. Never bypass name claims or protected inputs.
+      if (exists && skipAll && IsVirtual(src) && S_ISREG(before.st_mode)) {
+        control.Check();
+        if (hooks.checkOverwrite)
+          hooks.checkOverwrite(dst, before);
+        ++result.skipped;
+        if (!hooks.privateStaging)
+          RecordOutcome({src, dst, "skipped", ""});
+        return;
+      }
       TempFile temp(LocationLeaf(dst), src, dst);
       Stage(src, source, temp, control);
       control.Check();
@@ -816,6 +857,12 @@ Result RunVirtual(const Job &job, const Hooks &hooks) {
       MakeFolder(job.destination, runner.Control(job.destination));
       runner.result.completed = 1;
       return runner.result;
+    }
+    if (hooks.checkOverwrite && job.action == Action::Copy && !IsVirtual(job.destination)) {
+      size_t count = 0;
+      for (const auto &source : job.sources)
+        runner.CheckExistingOutputs(source, ChildLocation(job.destination, LocationLeaf(source)),
+                                    runner.Control(source), count);
     }
     for (auto &source : job.sources) {
       const size_t publishedBefore = runner.publishedEntries;

@@ -211,11 +211,11 @@ public:
     const bool doubleClick = message->GetInt32("clicks", 1) == 2;
     if (!Current()) {
       if (row && row->directory && !secondary)
-        pane->NavigateFromColumn(row->path, {}, false, false, {}, row);
+        pane->NavigateFromColumn(row->path, {}, false, false, {}, row, entries.archiveVersion);
       else
         pane->NavigateFromColumn(location, row ? row->path : "",
                                  row && doubleClick && !secondary, secondary,
-                                 ConvertToScreen(point), row);
+                                 ConvertToScreen(point), row, entries.archiveVersion);
       return;
     }
     MakeFocus();
@@ -313,7 +313,8 @@ public:
         auto parent =
             Listi::ParentLocation(location == "@disks" ? "/" : location);
         if (parent != location)
-          pane->NavigateFromColumn(parent, BranchRow(parent, location));
+          pane->NavigateFromColumn(parent, BranchRow(parent, location), false, false, {},
+                                   nullptr, model->archiveVersion);
       } catch (const std::exception &error) {
         pane->ShowStatus(error.what());
       }
@@ -356,13 +357,9 @@ public:
 
   void MessageReceived(BMessage *message) override {
     if (message->WasDropped()) {
-      BMessage dropped(*message);
-      dropped.what = kDrop;
-      dropped.RemoveName("destination");
       const auto target = DropTarget(ConvertFromScreen(message->DropPoint()));
       Listi::SetFolderHover(this, hoverPath, "");
-      dropped.AddString("destination", target.empty() ? location.c_str() : target.c_str());
-      Window()->PostMessage(&dropped);
+      Listi::PostPaneFileDrop(*pane, Current() ? *model : entries, *message, target.empty() ? location : target);
       return;
     }
     BView::MessageReceived(message);
@@ -417,6 +414,7 @@ struct MillerColumns::State {
   bool active = false, enabled = false, attached = false;
   std::string location, reading;
   PaneModel incoming;
+  Listi::ScanRows receivedRows;
   Listi::ReadWorker *scanner = nullptr;
   std::shared_ptr<std::atomic<int64>> generation =
       std::make_shared<std::atomic<int64>>(0);
@@ -473,6 +471,7 @@ struct MillerColumns::State {
             CreateDirectoryScanner(BMessenger(owner), generation, delivery);
         Listi::StartReadWorker(scanner);
       }
+      receivedRows = {};
       reading = rows->location;
       const auto serial = ++*generation;
       BMessage scan(kScan);
@@ -583,6 +582,19 @@ void MillerColumns::SetLocation(const std::string &path) {
   state->ReadNext(this);
   if (focus)
     MakeFocus();
+}
+
+void MillerColumns::ReloadArchiveColumns() {
+  const auto archive = Listi::ParseLocation(state->location).archive;
+  if (!state->enabled || archive.empty())
+    return;
+  state->CancelRead();
+  for (auto &column : state->columns) {
+    auto *rows = column.rows;
+    if (!rows->Current() && Listi::ParseLocation(rows->location).archive == archive)
+      rows->complete = false;
+  }
+  state->ReadNext(this);
 }
 
 void MillerColumns::Refresh() {
@@ -708,10 +720,9 @@ void MillerColumns::MessageReceived(BMessage *message) {
     return;
   auto rows = it->rows;
   if (message->what == kRows) {
-    BMessage item;
-    for (int i = 0; message->FindMessage("entry", i, &item) == B_OK; ++i) {
+    state->receivedRows.Read(*message, "entry", [&](const BMessage &item) {
       if (item.GetBool("parent", false))
-        continue;
+        return;
       auto row = std::make_unique<PaneEntry>();
       row->name = item.GetString("name", "");
       row->path = item.GetString("path", "");
@@ -720,12 +731,16 @@ void MillerColumns::MessageReceived(BMessage *message) {
       row->device = item.GetInt64("device", -1);
       row->node = item.GetInt64("node", -1);
       state->incoming.Add(std::move(row));
-    }
+    });
     return;
   }
   const bool deliveryFailed = state->delivery->failedSerial.load() == serial;
   if (message->what == kScanDone || deliveryFailed) {
-    const bool failed = deliveryFailed || message->HasString("error");
+    state->incoming.archiveVersion = message->GetString("archiveVersion", "");
+    const bool missingVersion = Listi::ParseLocation(rows->location).Archive() &&
+                                state->incoming.archiveVersion.empty();
+    const bool failed = missingVersion || deliveryFailed || message->HasString("error") ||
+                        !state->receivedRows.Complete(*message);
     rows->partial = !failed && message->HasString("inspectionWarning");
     rows->SetToolTip(rows->partial ? message->GetString("inspectionWarning", "") : "");
     state->Finish(rows, failed);

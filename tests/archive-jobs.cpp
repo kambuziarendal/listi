@@ -9,8 +9,18 @@
 #include "JobSnapshot.h"
 #include "JobReportStore.h"
 #include "VirtualFile.h"
+#include "FileOperationFlow.h"
+#include "InlineAction.h"
+#include "Pane.h"
+#include "ClipboardFlow.h"
+#include "OperationQueue.h"
+#include <LayoutBuilder.h>
+#include <Button.h>
+#include <atomic>
 #include <Application.h>
 #include <FindDirectory.h>
+#include <FilePanel.h>
+#include <set>
 #include <TextControl.h>
 #include <StringView.h>
 #include <Window.h>
@@ -101,10 +111,275 @@ void checkSuggestedNames(const std::string &root) {
   dialog->Quit();
 }
 
+// Scope the fault to Listi decoding the file panel's chosen message, not the
+// panel building its reply or an unrelated Tracker/clipboard read.
+static thread_local bool failMiddleRef = false;
+extern "C" status_t __real__ZNK8BMessage7FindRefEPKciP9entry_ref(
+    const BMessage *, const char *, int32, entry_ref *);
+extern "C" status_t __wrap__ZNK8BMessage7FindRefEPKciP9entry_ref(
+    const BMessage *message, const char *field, int32 index, entry_ref *ref) {
+  if (failMiddleRef && message->what == kArchiveAddChosen && !strcmp(field, "refs") && index == 1) {
+    failMiddleRef = false;
+    return B_NO_MEMORY;
+  }
+  return __real__ZNK8BMessage7FindRefEPKciP9entry_ref(message, field, index, ref);
+}
+
+class AdditionPanel : public BFilePanel {
+public:
+  using BFilePanel::BFilePanel;
+  BMessage chosen;
+  void SendMessage(const BMessenger *, BMessage *message) override {
+    if (message->what == kArchiveAddChosen)
+      chosen = *message;
+  }
+};
+
+void checkAddPicker(const std::string &root) {
+  const auto folder = root + "/picker";
+  check(mkdir(folder.c_str(), 0700) == 0, "create file picker fixture");
+  write(folder + "/original", "already archived");
+  auto create = PrepareArchiveJob(false, {folder + "/original"});
+  create.archiveFormat = "zip";
+  SetArchiveDestination(create, root, "picker.zip");
+  check(Run(create, {}).completed == 1, "create archive for file picker");
+  const auto original = read(create.destination);
+  BMessage selection(B_REFS_RECEIVED);
+  for (const char *leaf : {"A", "B", "C", "D"}) {
+    const auto path = folder + "/" + leaf;
+    write(path, std::string("data ") + leaf);
+    if (!strcmp(leaf, "D"))
+      continue;
+    entry_ref ref;
+    check(get_ref_for_path(path.c_str(), &ref) == B_OK && selection.AddRef("refs", &ref) == B_OK,
+          "select " + path);
+  }
+
+  // Invoke the native panel's normal multi-ref open entry point. It constructs
+  // the reply from its template, including both the frozen job and Tracker refs.
+  entry_ref directory;
+  check(get_ref_for_path(folder.c_str(), &directory) == B_OK, "resolve picker folder");
+  auto chosen = EncodeJob(PrepareArchiveEditTarget(create.destination), kArchiveAddChosen);
+  AdditionPanel panel(B_OPEN_PANEL, nullptr, &directory, B_FILE_NODE | B_DIRECTORY_NODE,
+                      true, &chosen, nullptr, false, false);
+  panel.Show();
+  auto choose = [&] {
+    check(panel.Window()->Lock(), "lock native file picker");
+    panel.chosen = BMessage();
+    panel.Window()->MessageReceived(&selection);
+    BMessage reply(panel.chosen);
+    panel.Window()->Unlock();
+    type_code type;
+    int32 count;
+    check(reply.GetInfo("refs", &type, &count) == B_OK && type == B_REF_TYPE && count == 3,
+          "native file picker returned all three refs");
+    return reply;
+  };
+  auto reply = choose();
+  bool rejected = false;
+  failMiddleRef = true;
+  try {
+    ArchiveActions::ReadAdditions(reply);
+  } catch (const std::exception &) {
+    rejected = true;
+  }
+  check(!failMiddleRef && rejected && read(create.destination) == original,
+        "failure on the middle ref rejects the selection before confirmation without editing the ZIP");
+  auto job = ArchiveActions::ReadAdditions(choose());
+  auto prompt = ArchiveActions::ConfirmAddition(job, {});
+  check(job.sources.size() == 3 && strstr(prompt.text.String(), "Add 3 selected entries"),
+        "complete retry can confirm all three sources");
+  const auto updated = Run(DecodeJob(prompt.accepted), {});
+  check(updated.errors.empty() && updated.completed == 1, "confirmed file picker retry updates ZIP");
+  auto archive = OpenArchive(create.destination);
+  std::set<std::string> names;
+  for (const auto &entry : ListFiles(archive))
+    names.insert(entry.name);
+  check(names == std::set<std::string>{"A", "B", "C", "original"} &&
+            vread(ChildLocation(archive, "original")) == "already archived",
+        "reopened ZIP contains exactly the chosen members plus the unchanged original");
+  for (const char *leaf : {"A", "B", "C", "D"}) {
+    const auto expected = std::string("data ") + leaf;
+    check(read(folder + "/" + leaf) == expected &&
+              (!strcmp(leaf, "D") || vread(ChildLocation(archive, leaf)) == expected),
+          std::string("preserved bytes for ") + leaf);
+  }
+}
+
+namespace {
+std::atomic<bool> pauseFormatRead{false};
+std::atomic<thread_id> watchUI{-1};
+std::atomic<int> uiReads{0};
+sem_id formatPaused, resumeFormat;
+
+class InspectionWindow : public BWindow {
+public:
+  InspectionWindow() : BWindow(BRect(10, 10, 660, 480), "Inspect archive",
+                                B_TITLED_WINDOW, 0) {}
+  FileOperationFlow *flow = nullptr;
+  Pane *pane = nullptr;
+  std::atomic<int> cancels{0}, nameSubmissions{0};
+  void MessageReceived(BMessage *message) override {
+    if (flow && flow->Handle(*message, *pane, *pane, true)) {
+      if (message->what == kInlineCancel) ++cancels;
+      if (message->what == kNameAccepted) ++nameSubmissions;
+      return;
+    }
+    BWindow::MessageReceived(message);
+  }
+};
+
+bool showingPicker() {
+  for (int32 i = 0; i < be_app->CountWindows(); ++i) {
+    auto *w = be_app->WindowAt(i);
+    if (w && w->Lock()) {
+      const bool picker = !w->IsHidden() && w->FindView("default button");
+      w->Unlock();
+      if (picker) return true;
+    }
+  }
+  return false;
+}
+}
+
+extern "C" ssize_t __real_pread(int, void *, size_t, off_t);
+extern "C" ssize_t __wrap_pread(int fd, void *data, size_t size, off_t offset) {
+  if (watchUI.load() >= 0 && find_thread(nullptr) == watchUI.load())
+    ++uiReads;
+  if (pauseFormatRead.load()) {
+    thread_info thread;
+    if (get_thread_info(find_thread(nullptr), &thread) == B_OK &&
+        !strcmp(thread.name, "archive format reader") && pauseFormatRead.exchange(false)) {
+      release_sem(formatPaused);
+      acquire_sem_etc(resumeFormat, 1, B_RELATIVE_TIMEOUT, 5000000);
+    }
+  }
+  return __real_pread(fd, data, size, offset);
+}
+
+void checkArchiveInspection(const std::string &root) {
+  auto ar = PrepareArchiveJob(false, {root + "/picker/A", root + "/picker/B"});
+  ar.archiveFormat = "ar";
+  SetArchiveDestination(ar, root, "inspect.ar");
+  check(Run(ar, {}).completed == 1, "create ar inspection fixture");
+  auto *window = new InspectionWindow();
+  Preferences prefs;
+  auto *pane = new Pane(0, prefs);
+  auto *question = new InlineAction(BMessenger(window));
+  window->pane = pane;
+  BLayoutBuilder::Group<>(window, B_VERTICAL).Add(pane).Add(question);
+  question->Hide();
+  window->Show();
+  window->Lock();
+  OperationQueue queue{BMessenger(window)};
+  ClipboardFlow clipboard(*question, queue);
+  FileOperationFlow operations(*question, queue, clipboard, BMessenger(window));
+  window->flow = &operations;
+  auto wait = [&](auto condition) {
+    const auto end = system_time() + 6000000;
+    while (!condition() && system_time() < end) {
+      window->Unlock();
+      snooze(10000);
+      window->Lock();
+    }
+    return condition();
+  };
+  auto navigate = [&](const std::string &path) {
+    pane->Navigate(path.c_str());
+    check(wait([&] { return !pane->IsScanning(); }) && pane->LocationValid(),
+          "inspection fixture pane is ready");
+  };
+  formatPaused = create_sem(0, "archive inspection paused");
+  resumeFormat = create_sem(0, "archive inspection released");
+  for (bool cancel : {true, false}) {
+    navigate(cancel ? root : OpenArchive(ar.destination));
+    if (cancel)
+      check(pane->MatchPattern("inspect.ar", true) == 1, "select the ar in the real pane");
+    pauseFormatRead = true;
+    window->PostMessage(cancel ? kAddArchive : kMkdir);
+    window->Unlock();
+    const auto held = acquire_sem_etc(formatPaused, 1, B_RELATIVE_TIMEOUT, 4000000);
+    check(held == B_OK && window->LockWithTimeout(500000) == B_OK,
+          "archive format reader can pause without holding the window");
+    check(question->Pending() && !question->FindView("Name:"),
+          "only the cancellable inspection is pending");
+    if (cancel) {
+      window->PostMessage(kInlineCancel);
+      check(wait([&] { return window->cancels.load() == 1; }) && !question->Pending(),
+            "window handles Cancel before paused read returns");
+    } else {
+      navigate(root);
+      check(wait([&] { return !question->Pending(); }),
+            "navigation revokes the inspection before paused read returns");
+    }
+    release_sem(resumeFormat);
+    window->Unlock();
+    snooze(200000);
+    window->Lock();
+    check(!question->Pending() && !showingPicker() && !queue.Busy(),
+          "late format result cannot open a name dialog, picker or enqueue a job");
+  }
+
+  const auto zip = root + "/picker.zip";
+  navigate(OpenArchive(zip));
+  auto createButton = [&]() -> BButton * {
+    if (!question->Pending() || !question->CountChildren()) return nullptr;
+    auto *buttons = question->ChildAt(question->CountChildren() - 1);
+    for (int i = 0; i < buttons->CountChildren(); ++i) {
+      auto *button = dynamic_cast<BButton *>(buttons->ChildAt(i));
+      if (button && !strcmp(button->Label(), "Create folder"))
+        return button;
+    }
+    return nullptr;
+  };
+  window->PostMessage(kMkdir);
+  check(wait([&] { return createButton() != nullptr; }),
+        "successful inspection opens the archive name dialog");
+  uiReads = 0;
+  watchUI = window->Thread();
+  queue.Start();
+  auto *accept = createButton();
+  check(accept && accept->Invoke() == B_OK, "accept inspected archive New Folder");
+  check(wait([&] {
+          if (question->Pending() || queue.Busy()) return false;
+          FileEntry entry;
+          return StatFile(ChildLocation(OpenArchive(zip), "New folder"), entry) && entry.directory;
+        }), "accepted archive folder was actually published");
+  watchUI = -1;
+  check(uiReads == 0, "name confirmation performed no archive format pread on the UI thread");
+
+  navigate(OpenArchive(zip));
+  window->PostMessage(kMkdir);
+  check(wait([&] { return createButton() != nullptr; }), "second inspected name dialog is ready");
+  const auto previous = read(zip), held = zip + ".held";
+  auto next = PrepareArchiveJob(false, {root + "/picker/D"});
+  next.archiveFormat = "zip";
+  SetArchiveDestination(next, root, "picker-next.zip");
+  check(Run(next, {}).completed == 1, "create independent valid replacement");
+  const auto replacement = read(next.destination);
+  check(rename(zip.c_str(), held.c_str()) == 0 && rename(next.destination.c_str(), zip.c_str()) == 0,
+        "swap archives after the name dialog opened");
+  const auto submitted = window->nameSubmissions.load();
+  check(createButton()->Invoke() == B_OK && wait([&] { return window->nameSubmissions > submitted; }) &&
+            !queue.Busy() && read(zip) == replacement && read(held) == previous,
+        "stale confirmation cannot create a folder in the replacement archive");
+
+  navigate(root);
+  check(pane->MatchPattern("picker.zip", true) == 1, "select refreshed ZIP for a new Add");
+  window->PostMessage(kAddArchive);
+  check(wait(showingPicker), "fresh explicit Add opens its file picker");
+  window->flow = nullptr;
+  window->Quit();
+  delete_sem(formatPaused);
+  delete_sem(resumeFormat);
+}
+
 void *run(void *) {
  try{
   char pattern[]="/tmp/Listi-archive-jobs-XXXXXX";std::string root=mkdtemp(pattern);
   checkSuggestedNames(root);
+  checkAddPicker(root);
+  checkArchiveInspection(root);
   Job moveRequest;
   moveRequest.action = Action::MoveArchive;
   moveRequest.sources = {root + "/local.txt"};
@@ -151,6 +426,15 @@ void *run(void *) {
     job=DecodeJob(EncodeJob(job,0));auto result=Run(job,{});
     if(!result.errors.empty())std::cerr<<result.errors.front()<<std::endl;
     check(result.completed==1 && result.errors.empty(),f.id+" creates archive");
+    if (f.id == "arj" || f.id == "rar5") {
+      int inspected = 0;
+      Hooks stopAtSecondHeader;
+      stopAtSecondHeader.proceed = [&] { return ++inspected < 2; };
+      bool stopped = false;
+      try { PrepareArchiveEditTarget(job.destination, "/", stopAtSecondHeader); }
+      catch (const Cancelled &) { stopped = true; }
+      check(stopped && inspected == 2, f.id + " inspection honours cancellation within its header scan");
+    }
     if (f.id == "zip") checkZipName(job.destination);
     auto extract=PrepareArchiveJob(true,{job.destination});SetArchiveDestination(extract,out,"extract-"+f.id);
     auto unpack=Run(extract,{});if(!unpack.errors.empty())std::cerr<<unpack.errors.front()<<std::endl;

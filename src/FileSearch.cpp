@@ -18,12 +18,12 @@
 #include <unistd.h>
 #include <vector>
 namespace Listi {
-void SearchRequest::WriteCriteria(BMessage &message) const {
-  message.AddString("root", root.c_str());
-  message.AddString("expression", expression.c_str());
-  message.AddBool("predicate", predicate);
-  message.AddBool("trash", includeTrash);
-  WriteSearchFilters(message, filters);
+bool SearchRequest::WriteCriteria(BMessage &message) const {
+  return message.AddString("root", root.c_str()) == B_OK &&
+         message.AddString("expression", expression.c_str()) == B_OK &&
+         message.AddBool("predicate", predicate) == B_OK &&
+         message.AddBool("trash", includeTrash) == B_OK &&
+         WriteSearchFilters(message, filters);
 }
 
 SearchRequest SearchRequest::ReadCriteria(const BMessage &message) {

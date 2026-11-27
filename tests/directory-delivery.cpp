@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "DirectoryScanner.h"
+#include "ScanRowFaults.h"
 #include "ArchiveJobs.h"
 #include "VirtualFile.h"
 #include "Common.h"
@@ -239,6 +240,31 @@ int main() {
    rowFailures=0;doneFailures=0;pane->Reload();window->Unlock();
    check(ready(),"native pane reload recovers");
    window->Lock();pane->Select(1);check(pane->Selected().size()==160,"recovered pane selects all 160 files");window->Unlock();
+ }
+ for (const auto &location : {archive, folder}) {
+   for (auto fault : {ScanFault::Append, ScanFault::Decode}) {
+     window->Lock();
+     ScanFault::Arm(fault, kRows);
+     pane->Navigate(location.c_str());
+     window->Unlock();
+     check(ready(), "middle row failure reaches a terminal state");
+     window->Lock();
+     auto *notice = dynamic_cast<BTextView *>(pane->FindView("status"));
+     pane->Select(1);
+     check(ScanFault::calls >= 2 && notice &&
+           std::string(notice->Text()).find("Reload") != std::string::npos &&
+           !pane->LocationValid() && pane->Selected().empty(),
+           "unreadable directory batch cannot authorize Select All");
+     ScanFault::Arm(ScanFault::None, 0);
+     pane->Reload();
+     window->Unlock();
+     check(ready(), "directory retry completes");
+     window->Lock();
+     pane->Select(1);
+     check(pane->LocationValid() && pane->Selected().size() == 160,
+           "new generation recovers every directory row");
+     window->Unlock();
+   }
  }
  window->Lock();
  auto replaced = folder + "/file-0";

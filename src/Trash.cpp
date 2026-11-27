@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "Trash.h"
+#include "VirtualFile.h"
 #include "FileOperation.h"
 #include <Directory.h>
 #include <Entry.h>
@@ -78,6 +79,14 @@ std::string CheckedTrash(const std::string &original, bool create) {
                                         "ancestors or an already trashed entry.");
   return trash;
 }
+// Tracker stores the original path on the inode, not on each directory entry.
+struct stat CheckTrashLinks(const BStatable &entry, const std::string &path) {
+  struct stat st;
+  Require(entry.GetStat(&st), path);
+  if (!S_ISDIR(st.st_mode) && st.st_nlink > 1)
+    throw std::runtime_error(path + ": hard links share one Trash restore path; entry left in place.");
+  return st;
+}
 void CheckIdentity(BEntry &entry, const NodeIdentity &expected) {
   node_ref actual;
   Require(entry.GetNodeRef(&actual), "Check source identity");
@@ -91,8 +100,7 @@ void CheckTrashSource(const std::string &path, const NodeIdentity *expected,
   Require(entry.InitCheck(), path);
   if (expected)
     CheckIdentity(entry, *expected);
-  struct stat st;
-  Require(entry.GetStat(&st), path);
+  const auto st = CheckTrashLinks(entry, path);
   if (S_ISDIR(st.st_mode)) {
     BDirectory directory(&entry);
     Require(directory.InitCheck(), path);
@@ -106,6 +114,7 @@ std::string MoveToTrash(const std::string &path, const NodeIdentity *expected) {
   Require(entry.InitCheck(), path);
   if (expected)
     CheckIdentity(entry, *expected);
+  CheckTrashLinks(entry, path);
   const std::string original = EntryPath(entry);
   const std::string trash = CheckedTrash(original, true);
   BDirectory directory(trash.c_str());
@@ -123,6 +132,7 @@ std::string MoveToTrash(const std::string &path, const NodeIdentity *expected) {
   BString previous;
   bool hadPrevious = node.ReadAttrString(kOriginalPath, &previous) == B_OK;
   BString saved(original.c_str());
+  CheckTrashLinks(node, original);
   Require(node.WriteAttrString(kOriginalPath, &saved), original);
   // MoveTo(false) checks for a conflict before renaming. Haiku does not
   // provide an atomic no-replace or identity-conditional rename.
@@ -180,9 +190,19 @@ std::string OriginalTrashPath(const std::string &path, const NodeIdentity &expec
     throw std::runtime_error("Not a top-level Trash entry");
   return ReadOriginalPath(node, path, trash);
 }
+RestoreTarget CaptureRestoreTarget(const std::string &path, const NodeIdentity &expected) {
+  RestoreTarget target;
+  target.path = OriginalTrashPath(path, expected);
+  BDirectory parent(ParentLocation(target.path).c_str());
+  Require(parent.InitCheck(), target.path + " (original folder must exist)");
+  node_ref identity;
+  Require(parent.GetNodeRef(&identity), target.path);
+  target.parent = {identity.device, identity.node};
+  return target;
+}
 std::string RestoreFromTrash(const std::string &path, std::string *warning,
                              const NodeIdentity *expected,
-                             const std::string *confirmedTarget) {
+                             const RestoreTarget *confirmedTarget) {
   BEntry entry(path.c_str(), false);
   if (expected)
     CheckIdentity(entry, *expected);
@@ -201,11 +221,9 @@ std::string RestoreFromTrash(const std::string &path, std::string *warning,
                    opened.inode != expected->inode))
     throw std::runtime_error(current + ": selected entry changed; not restored.");
   auto target = ReadOriginalPath(node, current, trash);
-  if (confirmedTarget && target != *confirmedTarget)
+  if (confirmedTarget && target != confirmedTarget->path)
     throw std::runtime_error(path + ": restore destination changed; select Restore again.");
-  std::string parentPath = target.substr(0, target.find_last_of('/'));
-  if (parentPath.empty())
-    parentPath = "/";
+  const auto parentPath = ParentLocation(target);
   BDirectory destination(parentPath.c_str());
   Require(destination.InitCheck(),
           parentPath + " (original folder must exist)");
@@ -218,11 +236,15 @@ std::string RestoreFromTrash(const std::string &path, std::string *warning,
         path + ": original folder now points into Trash; entry retained.");
   node_ref destinationIdentity;
   Require(destination.GetNodeRef(&destinationIdentity), parentPath);
+  if (confirmedTarget && (destinationIdentity.device != confirmedTarget->parent.device ||
+                          destinationIdentity.node != confirmedTarget->parent.inode))
+    throw std::runtime_error(path + ": original folder was replaced; retained in Trash. Select Restore again.");
   if (destinationIdentity.device != identity.device)
     throw std::runtime_error(path + ": original folder is now on another volume.");
   // No intentional replacement or recursive merge. The same check/rename
   // race described for Trash still applies.
   CheckIdentity(entry, opened);
+  CheckTrashLinks(node, current);
   Require(entry.MoveTo(&destination, Leaf(target).c_str(), false), target);
   const auto status = node.RemoveAttr(kOriginalPath);
   if (status != B_OK) {

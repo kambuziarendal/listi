@@ -2,6 +2,9 @@
 #include "Common.h"
 #include "FolderTabs.h"
 #include "MainWindow.h"
+#include "StoredFields.h"
+#include <atomic>
+#include <cstring>
 #include "WorkingSets.h"
 #include "PanelTools.h"
 #include "Pane.h"
@@ -18,6 +21,17 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+namespace {
+std::atomic<const char *> failAppend{nullptr};
+std::atomic_int matching{0};
+}
+extern "C" status_t __real__ZN8BMessage10AddMessageEPKcPKS_(BMessage *, const char *, const BMessage *);
+extern "C" status_t __wrap__ZN8BMessage10AddMessageEPKcPKS_(BMessage *self, const char *name, const BMessage *item) {
+  const auto *field = failAppend.load();
+  if (field && !strcmp(name, field) && ++matching == 2)
+    return B_NO_MEMORY;
+  return __real__ZN8BMessage10AddMessageEPKcPKS_(self, name, item);
+}
 using namespace Listi;
 namespace fs = std::filesystem;
 namespace {
@@ -209,6 +223,46 @@ int main() {
   BMessage capture(kCaptureWorkingWindow), snapshot;
   Check(BMessenger(window).SendMessage(&capture, &snapshot, 1000000, 1000000) == B_OK &&
         snapshot.what == kCaptureWorkingWindow, "capture working set window");
+  // Three separate window loopers, each with two tabs in the left pane.
+  std::vector<BWindow *> siblings;
+  std::vector<BMessenger> selected{BMessenger(window)};
+  for (int i = 0; i < 2; ++i) {
+    BrowserRequest seed;
+    seed.workingSet = snapshot;
+    auto *sibling = CreateMainWindow(prefs, {}, {}, false, {}, false, std::move(seed));
+    sibling->Show();
+    siblings.push_back(sibling);
+    selected.emplace_back(sibling);
+  }
+  for (const char *field : {"window", "tab"}) {
+    matching = 0;
+    failAppend = field;
+    bool refused = false;
+    try { CaptureWorkingSet("Test", selected); }
+    catch (const std::runtime_error &) { refused = true; }
+    failAppend = nullptr;
+    Check(refused && matching == 2, "middle append refuses incomplete working set");
+  }
+  const auto set = CaptureWorkingSet("Test", selected);
+  int queued = 0;
+  QueueWorkingSet(set, [&](BrowserRequest request) {
+    const auto panel = StoredItem(*request.workingSet, "panel", 0);
+    Check(StoredCount(panel, "tab") == 2, "complete working set preserves both tabs");
+    ++queued;
+    return true;
+  });
+  Check(queued == 3, "capture retry queues all three windows");
+  bool partialReported = false;
+  queued = 0;
+  try { QueueWorkingSet(set, [&](BrowserRequest) { return ++queued < 2; }); }
+  catch (const std::runtime_error &error) {
+    partialReported = std::string(error.what()).find("first 1 of 3") != std::string::npos;
+  }
+  Check(queued == 2 && partialReported, "queue failure identifies the already submitted window");
+  for (auto *sibling : siblings) {
+    sibling->Lock();
+    sibling->Quit();
+  }
   BrowserRequest restore;
   restore.localLayout = true;
   restore.workingSet = snapshot;

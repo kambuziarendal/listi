@@ -2,7 +2,8 @@
 #include "TransferCommand.h"
 #include "FileDrop.h"
 #include "JobSnapshot.h"
-#include "PaneModel.h"
+#include "Pane.h"
+#include <Window.h>
 #include "FileClipboard.h"
 #include "VirtualFile.h"
 #include <algorithm>
@@ -17,6 +18,8 @@
 #include <cstdlib>
 namespace Listi {
 namespace {
+constexpr const char *kDestinationVersion = "listi:destination-archive-version";
+constexpr const char *kArchiveSelection = "listi:archive-selection";
 constexpr const char *kRemoteSelection = "listi:remote-selection";
 constexpr const char *kSelection = "listi:drag-selection";
 void Require(status_t s) {
@@ -82,13 +85,34 @@ BMessage MakeFileDrag(const std::vector<std::string> &paths,
 BMessage MakePaneFileDrag(const PaneModel &model) {
   const auto paths = model.SelectedFiles();
   auto drag = MakeFileDrag(paths, model.SelectedLocalIdentities(kFileSelectionLimit));
-  if (!paths.empty() && IsVirtual(paths.front()) && !ParseLocation(paths.front()).Archive()) {
+  if (!paths.empty() && IsVirtual(paths.front())) {
     Job snapshot;
-    snapshot.expectedRemoteSources = model.SelectedRemoteEntries();
+    model.BindArchiveView(snapshot, paths.front());
+    const bool archive = !snapshot.expectedArchiveSets.empty();
+    if (!archive)
+      snapshot.expectedRemoteSources = model.SelectedRemoteEntries();
     const auto encoded = EncodeJob(snapshot, 0);
-    Require(drag.AddMessage(kRemoteSelection, &encoded));
+    Require(drag.AddMessage(archive ? kArchiveSelection : kRemoteSelection, &encoded));
   }
   return drag;
+}
+void PostPaneFileDrop(Pane &pane, const PaneModel &receiver, const BMessage &drag,
+                      const std::string &destination) {
+  try {
+    Job view;
+    receiver.BindArchiveView(view, destination);
+    BMessage drop(drag);
+    drop.what = kDrop;
+    // Destination fields belong to the receiver, never the drag source.
+    drop.RemoveName("destination");
+    drop.RemoveName(kDestinationVersion);
+    Require(drop.AddString("destination", destination.c_str()));
+    if (!view.expectedArchiveSets.empty())
+      Require(drop.AddString(kDestinationVersion, receiver.archiveVersion.c_str()));
+    Require(pane.Window()->PostMessage(&drop));
+  } catch (const std::exception &error) {
+    pane.ShowStatus(error.what());
+  }
 }
 Job PrepareFileDrop(const BMessage &message, const std::string &destination,
                     bool allowSameFolder, std::string *missingLeaf) {
@@ -101,11 +125,27 @@ Job PrepareFileDrop(const BMessage &message, const std::string &destination,
   if (message.HasString("listi:path")) {
     if (message.HasRef("refs"))
       throw std::runtime_error("Drag local and virtual selections separately.");
-    const char *path;
-    for (int32 i = 0; message.FindString("listi:path", i, &path) == B_OK; ++i) {
-      if (i >= 1024 || !IsVirtual(path))
+    type_code type;
+    int32 count;
+    Require(message.GetInfo("listi:path", &type, &count));
+    if (type != B_STRING_TYPE || count < 1 || count > 1024)
+      throw std::runtime_error("Invalid virtual drop selection.");
+    for (int32 i = 0; i < count; ++i) {
+      const char *path;
+      Require(message.FindString("listi:path", i, &path));
+      if (!IsVirtual(path))
         throw std::runtime_error("Invalid virtual drop selection.");
       job.sources.emplace_back(path);
+    }
+    if (std::any_of(job.sources.begin(), job.sources.end(),
+                    [](const auto &s) { return ParseLocation(s).Archive(); })) {
+      BMessage snapshot;
+      if (message.FindMessage(kArchiveSelection, &snapshot) != B_OK)
+        throw std::runtime_error("Missing archive version. Reload and drag the entries again.");
+      job.expectedArchiveSets = DecodeJob(snapshot).expectedArchiveSets;
+      for (const auto &source : job.sources)
+        if (!job.expectedArchiveSets.count(ParseLocation(source).archive))
+          throw std::runtime_error("Incomplete archive selection. Reload and select again.");
     }
     // Older drags carry URLs only. A drag with a snapshot must cover the
     // entire selection; never silently downgrade it to the old behaviour.
@@ -124,6 +164,13 @@ Job PrepareFileDrop(const BMessage &message, const std::string &destination,
       job.sources.push_back(item.path);
       job.expectedSources.emplace(item.path, item.node);
     }
+  }
+  const auto target = ParseLocation(destination);
+  if (target.Archive() && message.what == kDrop) {
+    const auto shown = message.GetString(kDestinationVersion, "");
+    if (!shown[0] ||
+        job.expectedArchiveSets.emplace(target.archive, shown).first->second != shown)
+      throw std::runtime_error("Archive destination changed or is incomplete. Reload and select again.");
   }
   if (!destination.empty() && destination[0] == '/') {
     char canonical[PATH_MAX];

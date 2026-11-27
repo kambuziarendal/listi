@@ -16,6 +16,7 @@ struct VisitPosition {
   std::string focus, anchor;
   Identity focusId{-1, -1}, anchorId{-1, -1};
   float x = 0, y = 0, offset = 0;
+  std::string archiveVersion;
 };
 
 // Only the latest successful scan may commit a visit. Addresses are normalized

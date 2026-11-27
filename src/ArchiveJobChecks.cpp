@@ -15,7 +15,14 @@ std::string LocalSource(const std::string &path) {
 void VerifyArchiveSets(const Job &job) {
   for (const auto &item : job.expectedArchiveSets)
     Require(FindArchiveVolumes(item.first).Fingerprint() == item.second,
-            "Archive parts changed after selection. Select the archive again.");
+            "Archive parts changed after selection. Reload and select again.");
+}
+void RequireArchiveVersions(const Job &shown, const Job &prepared) {
+  for (const auto &[path, version] : shown.expectedArchiveSets) {
+    const auto found = prepared.expectedArchiveSets.find(path);
+    Require(found != prepared.expectedArchiveSets.end() && found->second == version,
+            "Archive changed since selection. Reload and select again.");
+  }
 }
 void Guards(const Job &job) {
   for (const auto &item : job.expectedSources) {

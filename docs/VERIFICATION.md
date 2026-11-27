@@ -122,6 +122,84 @@ After building, `python3 tests/run-native-audit.py [case ...]` is equivalent
 to the audit step without the application rebuild. It asks the native build
 for its exact target, objects, compiler, include and link flags.
 
+For the archive-input and transfer-preflight regressions, run:
+
+```sh
+python3 tests/run-native-audit.py archive-copy-inputs transfer-preflight file-clipboard shelf
+```
+
+The archive test also exercises the separate Extract command. To include real
+hard-link aliases, point `LISTI_ARCHIVE_ALIAS_DIR` at a disposable directory
+on a mounted test image. Provide two pairs of empty files: `original.zip`
+hard-linked to `other.zip`, and `plain.7z.002` hard-linked to `payload.bin`.
+The test writes archive bytes through these names. The preflight test checks
+that a window can process Cancel while its worker is reading a merge tree.
+
+For the restore, search and partition-list checks, run
+`file-operation-faults`, `pane-search-list` and `disk-actions` with the
+same runner. The disk test uses a disposable filesystem image, not a USB device.
+
+The pre-merge candidate following `e0bd3b4` was tested locally on Haiku
+R1/beta6 x86_64 in QEMU. Nineteen selected native programs and all 58
+built-in checks passed. The observations below are from the build tree, not
+GitHub Actions, an installed package, or a physical USB device.
+
+| Workflow | Failure and recovery observed |
+| --- | --- |
+| Archive Copy and Extract | A collision on a later member stopped the first replacement too. The ZIP bytes and member list were unchanged. Real hard-link aliases on ext2, including a middle 7z part, were protected; a nested target swapped while queued was rejected with the source fingerprint unchanged. An independent replacement and extraction to a new folder succeeded. |
+| Pane search | On a transient I/O error, two of three hits were selectable and the pane reported partial results. A replaced or vanished hit was not selectable. Reload recovered all three. |
+| Trash restore | Swapping the parent for a different directory at the confirmed path left the payload and original-path metadata in Trash. A fresh confirmation restored the payload to the newly confirmed directory. |
+| Local transfer preflight | For 128 and 4,096 files, with and without an overlap, the window thread never opened the incoming merge tree for enumeration. It handled Cancel during a paused worker scan. Cancellation and overlap both left the first output unwritten; disjoint mixed paste succeeded in the clipboard case. |
+| Disk list | Dropping the partition offset on both mounted and unmounted fixture rows produced a visible reload message instead of a selectable disk. Reload returned the full identity; the normal mount and unmount checks passed. |
+
+The separate Linux portable run passed 89 transfer checks both normally and
+under ASan/UBSan, plus 25,000 seeded parser inputs. No physical disconnect or
+power-loss test is included.
+
+### Archive selection and transfer retries
+
+Run these native cases against the same build:
+
+```sh
+python3 tests/run-native-audit.py archive-panel-version archive-jobs archive-copy-inputs virtual-operation-faults file-operation-faults
+```
+
+- `archive-panel-version` replaces the ZIP behind a displayed root or subfolder, or just a middle part of a split archive. It checks the pane commands, clipboard, drag, absence of output, and both ZIPs' contents before and after an explicit reload and reselection.
+- `archive-jobs` makes the second of three references from a native file picker unreadable. It checks that the ZIP is unchanged and reopens it after a successful retry to verify all chosen files and the original member.
+- `archive-copy-inputs` and `virtual-operation-faults` count staging writes for a second, 1 MiB file after Skip All. The first uses a real ZIP; the second uses a simulated SFTP provider, not a live server. If the second target is free, the same tests require a real staging attempt, an explicit error on injected ENOSPC, and a complete copy on retry.
+
+The destination-view regressions use two ZIP archives with the same path and
+different contents. Flat View transfers and incoming drops must use the version
+shown by the receiving pane or Miller column. The external-editor tests check the
+file reference handed to a simulated editor and reopen the ZIP after an automatic
+save. The archive jobs tests cover cancelling format inspection before a picker
+or name dialog opens, and rejecting a changed archive on submission.
+
+Full package qualification builds a disposable ext2 image with real hard links
+on the Linux host. The Haiku runner mounts private copies for the archive alias
+and Trash tests. The gate requires receipts for both pairs, the outside third
+link, and the *observed* presence or absence of the Tracker attribute. An ext2
+test with no such attribute is not evidence that it was written there: genuine
+Tracker restore-path strings are checked separately on the native Trash volume.
+
+### Hard links and Tracker Trash
+
+Tracker stores the original path as a typed attribute on the inode. Two names
+of the same file cannot safely record two different paths there. Listi
+therefore refuses to trash or restore a multiply linked non-directory entry,
+rather than overwrite or clear a sibling's metadata. This does not prevent
+trashing a directory that contains hard links: the restore path belongs to
+the directory entry being moved, not its children.
+
+On a disposable Haiku R1/beta6 x86_64 VM, BFS supported the typed attribute
+and native Trash but did not create a hard link. On each of the ext2 and ext4
+images, three prelinked names shared one inode, but writing and reading back the Tracker string did
+not work and the native Trash lookup returned entry not found. On FAT, Trash
+lookup succeeded but typed attributes and hard-link creation did not. On NTFS,
+none of the three probes succeeded. We did not find the whole combination
+on these five volumes. Other drivers were not tested;
+the guard uses the observed link count, not a filesystem-name allowlist.
+
 For Shelf collections, run:
 
 ```sh

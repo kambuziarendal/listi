@@ -442,13 +442,9 @@ public:
       return;
     }
     if (m->WasDropped()) {
-      BMessage dropped(*m);
-      dropped.what = kDrop;
-      dropped.RemoveName("destination");
       const auto target = DropTarget(ConvertFromScreen(m->DropPoint()));
       Listi::SetFolderHover(this, hoverPath, "");
-      dropped.AddString("destination", target.empty() ? pane->Path() : target.c_str());
-      Window()->PostMessage(&dropped);
+      Listi::PostPaneFileDrop(*pane, *model, *m, target.empty() ? pane->Path() : target);
       return;
     }
     BView::MessageReceived(m);

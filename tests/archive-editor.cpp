@@ -5,6 +5,11 @@
 #include "ArchiveVolumes.h"
 #include "VirtualFile.h"
 #include <Application.h>
+#include "Pane.h"
+#include "MainWindowMenu.h"
+#include <Roster.h>
+#include <Window.h>
+#include <mutex>
 #include <Directory.h>
 #include <Entry.h>
 #include <Path.h>
@@ -77,7 +82,72 @@ std::string physical(const std::string &a) { return ParseLocation(a).archive; }
 std::string fingerprint(const std::string &a) {
   return FindArchiveVolumes(physical(a)).Fingerprint();
 }
+// Observe the exact B_REFS_RECEIVED file handed to the external editor,
+// without launching or closing an unrelated desktop application in the VM.
+std::mutex launchedMutex;
+std::string launchedFile;
+void EditFromRefreshedPane(const std::string &url, const std::string &savedArchive,
+                           const std::string &savedBytes) {
+  Preferences prefs;
+  auto *pane = new Pane(0, prefs);
+  auto *window = new BWindow(BRect(20, 30, 640, 480), "Archive editor test", B_TITLED_WINDOW, 0);
+  window->AddChild(pane);
+  window->Show();
+  window->Lock();
+  pane->Navigate(ChildLocation(url, "folder").c_str());
+  const auto timeout = system_time() + 10000000;
+  while (pane->IsScanning() && system_time() < timeout) {
+    window->Unlock();
+    snooze(20000);
+    window->Lock();
+  }
+  check(pane->LocationValid() && pane->MatchPattern("edit.txt", true) == 1 &&
+            pane->HandleOpenCommand(kEditExternally, "/boot/system/bin/true", {}, {}),
+        "open external editor from newly selected archive row");
+  window->Unlock();
+  std::string work;
+  const auto until = system_time() + 15000000;
+  while (work.empty() && system_time() < until) {
+    snooze(20000);
+    std::lock_guard<std::mutex> lock(launchedMutex);
+    work = launchedFile;
+  }
+  if (work.empty()) throw std::runtime_error("external editor never received its working file");
+  check(bytes(work) == "intentional edit", "external editor receives refreshed member");
+  writeFile(work, "external save");
+  const auto limit = system_time() + 20000000;
+  while (bytes(member(url)) != "external save" && system_time() < limit)
+    snooze(100000);
+  check(bytes(member(url)) == "external save" && bytes(ChildLocation(url, "keep")) == "keep" &&
+            bytes(savedArchive) == savedBytes, "automatic editor save updates only the chosen archive");
+  BMessenger editorWindow;
+  for (int32 i = 0; i < be_app->CountWindows(); ++i) {
+    auto *other = be_app->WindowAt(i);
+    if (other && other != window && !strcmp(other->Title(), "Listi: Edit archive file")) {
+      editorWindow = BMessenger(other);
+      break;
+    }
+  }
+  editorWindow.SendMessage(B_QUIT_REQUESTED);
+  const auto closing = system_time() + 5000000;
+  while (editorWindow.IsValid() && system_time() < closing) snooze(20000);
+  if (editorWindow.IsValid()) throw std::runtime_error("archive editor did not close");
+  clean(ParentLocation(ParentLocation(work)));
+  window->Lock();
+  window->Quit();
+}
 } // namespace
+extern "C" status_t __wrap__ZNK7BRoster6LaunchEPK9entry_refPK8BMessagePi(
+    const BRoster *, const entry_ref *, const BMessage *refs, team_id *) {
+  entry_ref ref;
+  if (!refs || refs->what != B_REFS_RECEIVED || refs->FindRef("refs", &ref) != B_OK)
+    return B_BAD_VALUE;
+  BPath path(&ref);
+  if (path.InitCheck() != B_OK) return path.InitCheck();
+  std::lock_guard<std::mutex> lock(launchedMutex);
+  launchedFile = path.Path();
+  return B_OK;
+}
 int main() {
   BApplication app("application/x-vnd.Listi-archive-editor-test");
   char pattern[] = "/tmp/Listi-editor-XXXXXX";
@@ -92,6 +162,35 @@ int main() {
   writeFile(root + "/in/keep", "keep");
   const auto sessions = root + "/sessions";
   try {
+    {
+      const auto displayed = archive("zip");
+      writeFile(root + "/in/folder/edit.txt", "replacement member");
+      const auto replacement = archive("zip");
+      writeFile(root + "/in/folder/edit.txt", "original");
+      const auto originalBytes = bytes(physical(displayed));
+      const auto replacementBytes = bytes(physical(replacement));
+      const auto saved = physical(displayed) + ".original";
+      Job shown;
+      shown.expectedArchiveSets[physical(displayed)] = fingerprint(displayed);
+      check(rename(physical(displayed).c_str(), saved.c_str()) == 0 &&
+                rename(physical(replacement).c_str(), physical(displayed).c_str()) == 0,
+            "replace the shown ZIP with a different version");
+      const auto path = member(displayed);
+      const auto editRoot = root + "/version-edits";
+      check(rejects([&] { ArchiveEditSession::Open(path, editRoot, {}, shown); }) &&
+                ListArchiveEdits(editRoot).empty() && bytes(saved) == originalBytes &&
+                bytes(physical(displayed)) == replacementBytes,
+            "stale panel edit leaves both archives untouched and creates no working copy");
+      shown.expectedArchiveSets[physical(displayed)] = fingerprint(displayed);
+      auto current = ArchiveEditSession::Open(path, editRoot, {}, shown);
+      check(bytes(current->WorkingFile()) == "replacement member",
+            "fresh panel edit opens the displayed replacement bytes");
+      writeFile(current->WorkingFile(), "intentional edit");
+      check(current->Save() && bytes(path) == "intentional edit" &&
+                bytes(ChildLocation(displayed, "keep")) == "keep" && bytes(saved) == originalBytes,
+            "refreshed edit saves only the selected replacement member");
+      EditFromRefreshedPane(displayed, saved, originalBytes);
+    }
     for (const auto &format : WritableArchiveFormats()) {
       const auto a = archive(format.id);
       const auto m = format.id == "ar" ? ChildLocation(a, "edit.txt") : member(a);

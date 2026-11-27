@@ -133,6 +133,60 @@ int main(int argc, char **argv) {
               ReadFileClipboard(Data(clip)).size()==2,
           "mixed copy and cut cannot queue two jobs for the same output");
 
+    const auto incoming = a + "/set", selected = b + "/set/doc";
+    mkdir(incoming.c_str(), 0755);
+    mkdir((incoming + "/doc").c_str(), 0755);
+    mkdir((b + "/set").c_str(), 0755);
+    mkdir(selected.c_str(), 0755);
+    Write(incoming + "/doc/content", "incoming");
+    Write(selected + "/content", "keep");
+    PutFileClipboard({incoming, selected}, true, &clip);
+    auto mixed = Data(clip);
+    for (const auto &item : ReadFileClipboard(mixed)) {
+      if (item.path == incoming) {
+        auto key = item.key;
+        key[0] = 'm';
+        Check(mixed.ReplaceInt32(key.c_str(), 'Tcsl') == B_OK,
+              "set incoming folder to Tracker Copy mode");
+      }
+    }
+    Set(clip, mixed);
+    paste = PrepareFilePaste(b, &clip);
+    Check(paste.jobs.size() == 2 && !paste.lease.empty(), "mixed paste reserved for queued checks");
+    const auto overlappingCopy = Run(paste.jobs.front(), replace);
+    const auto overlappingMove = Run(paste.jobs.back(), replace);
+    FinishFilePaste(paste, Moved(overlappingMove), &clip);
+    Check(!overlappingCopy.completed && !overlappingCopy.errors.empty() &&
+              !overlappingMove.completed && !overlappingMove.errors.empty() &&
+              !Data(clip).HasString("listi:paste-lease") &&
+              Read(incoming + "/doc/content") == "incoming" &&
+              Read(selected + "/content") == "keep" && !Exists(b + "/doc"),
+          "nested output overlapping a Cut root rejects the whole mixed paste");
+    // Same two roots, but the incoming merge now touches only a sibling of
+    // the selected directory. A shared ancestor alone is not a collision.
+    Check(rename((incoming + "/doc").c_str(), (incoming + "/other").c_str()) == 0,
+          "prepare a disjoint sibling under the same output tree");
+    paste = PrepareFilePaste(b, &clip);
+    Check(paste.jobs.size() == 2, "disjoint nested merge is accepted");
+    Check(rename((incoming + "/other").c_str(), (incoming + "/doc").c_str()) == 0,
+          "introduce overlap after both clipboard jobs were queued");
+    const auto stale = Run(paste.jobs.front(), replace);
+    FinishFilePaste(paste, {}, &clip);
+    Check(!stale.completed && !stale.errors.empty() && !Exists(b + "/doc") &&
+              Read(selected + "/content") == "keep" && Read(incoming + "/doc/content") == "incoming",
+          "queued Copy rechecks its Cut sibling even after paste preparation");
+    Check(rename((incoming + "/doc").c_str(), (incoming + "/other").c_str()) == 0,
+          "restore disjoint source before retrying the mixed selection");
+    paste = PrepareFilePaste(b, &clip);
+    Check(paste.jobs.size() == 2, "rejected mixed selection can retry the disjoint merge");
+    auto copyResult = Run(paste.jobs.front(), {});
+    auto moveResult = Run(paste.jobs.back(), {});
+    FinishFilePaste(paste, Moved(moveResult), &clip);
+    Check(copyResult.completed == 1 && moveResult.completed == 1 &&
+              !Exists(selected) && Read(incoming + "/other/content") == "incoming" &&
+              Read(b + "/set/other/content") == "incoming" && Read(b + "/doc/content") == "keep",
+          "nonoverlapping mixed paste delivers both versions and consumes only the cut root");
+
     // Mixed Tracker clipboard, success and failure must be independent.
     PutFileClipboard({a+"/one",a+"/two"},true,&clip);data=Data(clip);items=ReadFileClipboard(data);
     std::string mode=items[1].key;mode[0]='m';data.ReplaceInt32(mode.c_str(),'Tcsl');Set(clip,data);

@@ -20,11 +20,11 @@ OUTPUT = ROOT / "build/native-audit-tests"
 REQUIRED = """
 file-operation-faults directory-finalization copy-crash-recovery worker-lifecycle virtual-operation-faults archive-read-scope
 operation-queue removable-copy disk-actions archive-move-scaling directory-delivery terminal-delivery search-filters
-archive-local-move-faults archive-local-move tar-edit-ownership tar-move-ownership same-file-type folder-compare
+archive-local-move-faults archive-local-move archive-copy-inputs archive-panel-version tar-edit-ownership tar-move-ownership same-file-type folder-compare
 archive-editor-faults archive-editor archive-move-faults archive-move
-archive-folder-operations transfer-races archive-ambiguity archive-metadata archive-volumes
+archive-folder-operations transfer-races transfer-preflight archive-ambiguity archive-metadata archive-volumes
 sevenzip-backend archive-passwords archive-jobs ar-writer arj-writer rar-store
-cab-writer lha-writer preferences-state message-store-faults recovery-inventory main-window-routing working-windows folder-tabs application-services settings-window
+cab-writer lha-writer preferences-state stored-collection-faults message-store-faults recovery-inventory main-window-routing working-windows folder-tabs application-services settings-window
 workspace-layout workspace-editor miller-columns navigation-history selection-model type-to-select
 pane-filter pane-search-list file-list-export selection-summary selection-sort saved-places saved-searches saved-navigation-controller file-search
 live-search search-results-view flat-view file-clipboard clipboard-text-file file-drop image-convert
@@ -36,8 +36,18 @@ audit-io theme-text connection-defaults ssh-key-format folder-history
 """.split()
 
 WRAPS = {
+    "archive-editor": ["_ZNK7BRoster6LaunchEPK9entry_refPK8BMessagePi"],
+    "archive-panel-version": ["_ZNK8BMessage10WasDroppedEv", "opendir", "_Z20PostMainWindowNoticePKc"],
+    "archive-copy-inputs": ["openat", "write", "close"],
+    "virtual-operation-faults": ["openat", "write", "close"],
+    "archive-jobs": ["_ZNK8BMessage7FindRefEPKciP9entry_ref", "pread"],
+    "transfer-preflight": ["opendir", "readdir", "closedir"],
+    "disk-actions": ["_ZN8BMessage8AddInt64EPKcl"],
+    "pane-search-list": ["lstat"],
+    "stored-collection-faults": ["_ZN8BMessage10AddMessageEPKcPKS_"],
+    "folder-tabs": ["_ZN8BMessage10AddMessageEPKcPKS_"],
     "job-snapshot": ["_ZN8BMessage9AddStringEPKcS1_"],
-    "folder-history": ["write", "fstat", "real_time_clock_usecs"],
+    "folder-history": ["write", "fstat", "real_time_clock_usecs", "_ZNK8BMessage11FindMessageEPKciPS_"],
     "working-windows": ["stat", "_ZN10BPopUpMenu2GoE6BPointbbb"],
     "removable-copy": ["fsync", "write", "read"],
     "directory-finalization": ["fsync", "fs_stat_dev"],
@@ -56,12 +66,44 @@ WRAPS = {
     "terminal-delivery": ["_ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl",
                           "_ZN5BView10DrawBitmapEPK7BBitmap5BRectS3_"],
     "application-services": ['fsync', '_Z14find_directory15directory_whichP5BPathbP7BVolume'],
-    "directory-delivery": ['fstatat', 'opendir', 'readdir', '_ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl'],
+    "directory-delivery": ['_ZN8BMessage10AddMessageEPKcPKS_', '_ZNK8BMessage11FindMessageEPKciPS_', 'fstatat', 'opendir', 'readdir', '_ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl'],
     "operation-queue": ['_ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl', 'opendir'],
-    "flat-view": ['_ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl', 'opendir'],
+    "flat-view": ['_ZN8BMessage10AddMessageEPKcPKS_', '_ZNK8BMessage11FindMessageEPKciPS_', '_ZNK10BMessenger11SendMessageEP8BMessageP8BHandlerl', 'opendir'],
     "folder-compare": ['opendir'],
     "properties-faults": ['_ZN5BNode9WriteAttrEPKcjlPKvm', '_ZN5BNode4SyncEv', '_ZN8BMessage9AddStringEPKcS1_', 'fsync'],
 }
+
+
+def run_hardlink_case(binary, name, seed):
+    # Only mount a private copy; these tests deliberately rename/delete links.
+    # Never recursively remove a directory if unmount or unregister failed.
+    scratch = Path(tempfile.mkdtemp(prefix="listi-hardlinks-"))
+    mountpoint, image = scratch / "volume", scratch / "hardlinks.img"
+    mountpoint.mkdir()
+    shutil.copyfile(seed, image)
+    registration = subprocess.check_output(["diskimage", "register", image], text=True)
+    match = re.search(r'"(/dev/disk/virtual/files/[0-9]+/raw)"', registration)
+    try:
+        if not match:
+            raise RuntimeError(f"Cannot identify hard-link image device: {registration}")
+        subprocess.run(["mount", "-t", "ext2", match[1], mountpoint], check=True)
+        try:
+            env = os.environ.copy()
+            if name == "archive-copy-inputs":
+                env["LISTI_ARCHIVE_ALIAS_DIR"] = str(mountpoint / "archive-aliases")
+            else:
+                env["LISTI_DELETE_HARDLINK_FIXTURE"] = str(mountpoint / "deletion")
+                env["LISTI_HARDLINK_TEST_PAIR"] = str(mountpoint / "move-pair")
+            subprocess.run([binary], cwd=ROOT, check=True, timeout=90, env=env)
+        finally:
+            subprocess.run(["unmount", mountpoint], check=True)
+    finally:
+        if os.path.ismount(mountpoint):
+            raise RuntimeError(f"Hard-link image still mounted at {mountpoint}")
+        subprocess.run(["diskimage", "unregister", image], check=True)
+        mountpoint.rmdir()
+        image.unlink()
+        scratch.rmdir()
 
 
 def run_disk_actions(binary):
@@ -384,7 +426,9 @@ def run():
             *(f"-Wl,--wrap={symbol}" for symbol in WRAPS.get(name, [])),
             "-o", binary,
         ], cwd=SRC, check=True)
-        if name == "disk-actions" and not os.environ.get("LISTI_TEST_DISK_DEVICE"):
+        if name in ("archive-copy-inputs", "file-operation-faults") and os.getenv("LISTI_QUALIFICATION_LINK_IMAGE"):
+            run_hardlink_case(binary, name, os.environ["LISTI_QUALIFICATION_LINK_IMAGE"])
+        elif name == "disk-actions" and not os.environ.get("LISTI_TEST_DISK_DEVICE"):
             run_disk_actions(binary)
         elif name == "tar-edit-ownership":
             run_tar_edit_ownership(binary)

@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- Flat View transfers, drops into an archive, external edits and new folders now respect the archive version displayed in the pane. Opening the archive file picker or name prompt no longer waits for a full format inspection on the window thread.
+
+- Archive commands use the version shown by the file pane. If another application replaces the archive, reload it and select the entries again. Add to archive rejects incomplete file-picker selections.
+- After Skip All, archive and network downloads skip existing ordinary files without writing their contents to a temporary file.
+- Trash and Restore refuse multiply linked files instead of changing the shared Tracker restore-path attribute.
+- Copying archive members to disk protects the source archive and its parts from replacement. Local copy and move check overlapping output trees on the worker so the window stays responsive and the check can be cancelled before writing.
+- Restore from Trash checks that the original folder is still the one shown at confirmation. If it was replaced, the item stays in Trash.
+- A pane search marks results partial after a file identity read error. The disk list reports a failed scan instead of showing a partition it cannot identify.
+- Local copy and move check whether a target would overwrite another selected source, including across the copy and move parts of a Tracker paste. Skip All no longer rescans destination names for each skipped file.
+- Folder history reports unreadable saved children or attributes instead of restoring only a prefix. Shelf collections, saved places, searches and working sets reject incomplete saves.
+- Directory listings and Flat View check how many rows were delivered before reporting a complete scan.
+
 ## 0.38.0-48 (private alpha candidate)
 
 - Replace All cannot replace a result delivered earlier in the same transfer. A directory alias with a different spelling is not an implicit merge, including on a later attempt.

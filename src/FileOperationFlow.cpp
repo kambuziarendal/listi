@@ -40,10 +40,10 @@ std::string PreviewRestore(Job &job) {
     auto &target = job.restoreTargets[source];
     preview += "\n" + LocationLeaf(source) + " → ";
     try {
-      target = OriginalTrashPath(source, job.expectedSources.at(source));
-      preview += target;
+      target = CaptureRestoreTarget(source, job.expectedSources.at(source));
+      preview += target.path;
       struct stat st;
-      if (lstat(target.c_str(), &st) == 0)
+      if (lstat(target.path.c_str(), &st) == 0)
         preview += " (already exists)";
       else if (errno != ENOENT)
         preview += " (cannot check destination)";
@@ -138,9 +138,10 @@ void FileOperationFlow::ShowArchive(uint32 action, const Pane &source,
                                     const Pane &target) {
   if (!CanBegin())
     return;
-  if (action == kAddArchive)
+  if (action == kAddArchive) {
     archiveActions.ShowAddPicker(source, owner);
-  else if (action == kRemoveArchive) {
+    ShowInspectionProgress();
+  } else if (action == kRemoveArchive) {
     auto prompt = ArchiveActions::ConfirmRemoval(source);
     AskInline(prompt.text.String(), prompt.button, prompt.accepted);
   } else {
@@ -169,6 +170,53 @@ void FileOperationFlow::AskNamedEntry(Action action, const Pane &source,
   RequireJobField(accepted.AddString("newEntryIn", job.destination.c_str()));
   AskInline(text.c_str(), duplicate ? "Duplicate" : "Relative link", accepted,
             job.entryName.c_str(), duplicate ? nullptr : "Absolute link");
+}
+
+void FileOperationFlow::AskEntryName(const Job &job, const Job *inspectedArchive) {
+  const bool rename = job.action == Action::Rename, file = job.action == Action::MakeFile;
+  auto accepted = EncodeJob(job, kNameAccepted);
+  if (inspectedArchive) {
+    auto target = EncodeJob(*inspectedArchive, 0);
+    RequireJobField(accepted.AddMessage("inspectedArchive", &target));
+  }
+  if (file)
+    RequireJobField(accepted.AddString("newEntryIn", job.destination.c_str()));
+  const auto name = rename ? LocationLeaf(job.sources.front()) : file ? "New file" : "New folder";
+  const auto question = rename ? "Rename: " + job.sources.front() : "Create in: " + job.destination;
+  AskInline(question.c_str(), rename ? "Rename" : file ? "Create file" : "Create folder",
+            accepted, name.c_str());
+}
+
+void FileOperationFlow::ShowInspectionProgress() {
+  if (!actionArea.Ask("Checking archive format…", nullptr, BMessage())) {
+    archiveActions.CancelInspection();
+    throw std::runtime_error(kPendingQuestion);
+  }
+  inspectionQuestion = actionArea.Ticket();
+}
+
+void FileOperationFlow::FinishInspection(const Pane &source) {
+  if (!actionArea.Pending() || actionArea.Ticket() != inspectionQuestion) {
+    archiveActions.CancelInspection();
+    return;
+  }
+  Job command, target;
+  bool ready;
+  try {
+    ready = archiveActions.PollInspection(source, command, target);
+  } catch (...) {
+    actionArea.Close();
+    throw;
+  }
+  if (archiveActions.Inspecting())
+    return;
+  actionArea.Close();
+  if (!ready)
+    return;
+  if (command.action == Action::EditArchive)
+    archiveActions.OpenAddPicker(target, owner);
+  else
+    AskEntryName(command, &target);
 }
 
 void FileOperationFlow::ShowBulkRename(const Pane &source) {
@@ -206,13 +254,16 @@ void FileOperationFlow::BeginOperation(Action action, const Pane &source,
   const bool create = action == Action::MakeDirectory || action == Action::MakeFile;
   if (!create) {
     job.sources = source.Selected();
+    source.ExportModel().BindArchiveView(job, source.Path());
     job.expectedSources = source.SelectedLocalIdentities();
     if (!job.sources.empty() && IsVirtual(job.sources.front()) &&
         !ParseLocation(job.sources.front()).Archive())
       job.expectedRemoteSources = source.ExportModel().SelectedRemoteEntries();
   }
-  if (isTransfer)
+  if (isTransfer) {
     job.destination = target.Path();
+    target.ExportModel().BindArchiveView(job, target.Path());
+  }
   if ((action == Action::Trash || action == Action::Delete) &&
       !job.sources.empty() && ParseLocation(job.sources.front()).Archive()) {
     ShowArchive(kRemoveArchive, source, target);
@@ -235,19 +286,13 @@ void FileOperationFlow::BeginOperation(Action action, const Pane &source,
       return;
     }
     FreezeLocalJob(job, job.destination);
-    FreezeArchiveTargets(job);
-    const auto destination = ParseLocation(job.destination);
-    if (destination.Archive())
-      PrepareArchiveEditTarget(destination.archive);
-    auto accepted = EncodeJob(job, kNameAccepted);
-    const bool file = action == Action::MakeFile;
-    const auto name = rename ? LocationLeaf(job.sources.front()) : file ? "New file" : "New folder";
-    std::string question = rename ? "Rename: " + job.sources.front()
-                                  : "Create in: " + job.destination;
-    if (file)
-      RequireJobField(accepted.AddString("newEntryIn", job.destination.c_str()));
-    AskInline(question.c_str(), rename ? "Rename" : file ? "Create file" : "Create folder",
-              accepted, name.c_str());
+    if (ParseLocation(job.destination).Archive()) {
+      archiveActions.InspectNamedChange(source, owner, std::move(job));
+      ShowInspectionProgress();
+    } else {
+      FreezeArchiveTargets(job);
+      AskEntryName(job);
+    }
     return;
   }
   if (isTransfer) {
@@ -274,6 +319,21 @@ bool FileOperationFlow::Handle(const BMessage &message, const Pane &source,
   const Pane &target = singlePane ? source : other;
   try {
     switch (message.what) {
+    case kArchiveInspectionTick:
+      if (archiveActions.InspectionTick(message))
+        FinishInspection(source);
+      break;
+    case kInlineCancel:
+      if (!archiveActions.Inspecting() || actionArea.Ticket() != inspectionQuestion)
+        return false;
+      archiveActions.CancelInspection();
+      actionArea.Close();
+      owner.SendMessage(kInlineClosed);
+      break;
+    case kInlineClosed:
+      if (archiveActions.Inspecting() && actionArea.Ticket() != inspectionQuestion)
+        archiveActions.CancelInspection();
+      return false;
     case kCreateArchive:
     case kExtractArchive:
     case kAddArchive:
@@ -386,8 +446,11 @@ bool FileOperationFlow::Handle(const BMessage &message, const Pane &source,
         break;
       job->destination =
           ChildLocation(job->destination, message.GetString("name", ""));
-      if (ParseLocation(job->destination).Archive())
-        *job = PrepareArchiveMutation(*job);
+      if (ParseLocation(job->destination).Archive()) {
+        BMessage target;
+        RequireJobField(message.FindMessage("inspectedArchive", &target));
+        *job = PrepareArchiveMemberChange(*job, DecodeJob(target));
+      }
       queue.Enqueue(*job);
       break;
     }

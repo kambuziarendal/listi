@@ -15,7 +15,8 @@ void CheckTrashSource(const std::string &path, const NodeIdentity *expected = nu
 std::string MoveToTrash(const std::string &path,
                         const NodeIdentity *expected = nullptr);
 std::string OriginalTrashPath(const std::string &path, const NodeIdentity &expected);
+RestoreTarget CaptureRestoreTarget(const std::string &path, const NodeIdentity &expected);
 std::string RestoreFromTrash(const std::string &path, std::string *warning = nullptr,
                              const NodeIdentity *expected = nullptr,
-                             const std::string *confirmedTarget = nullptr);
+                             const RestoreTarget *confirmedTarget = nullptr);
 } // namespace Listi

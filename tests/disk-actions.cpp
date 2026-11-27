@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "DiskActions.h"
-#include "PaneModel.h"
+#include "Pane.h"
+#include "WrappedLabel.h"
 #include <Application.h>
 #include <Directory.h>
 #include <DiskDevice.h>
@@ -8,6 +9,9 @@
 #include <Entry.h>
 #include <Looper.h>
 #include <Message.h>
+#include <Window.h>
+#include <atomic>
+#include <cstring>
 #include <OS.h>
 #include <Path.h>
 #include <Volume.h>
@@ -20,6 +24,21 @@
 #include <unistd.h>
 
 using namespace Listi;
+
+namespace {
+std::atomic<int32> failOffsetFor{-1};
+std::atomic<bool> failedOffset{false};
+}
+
+extern "C" status_t __real__ZN8BMessage8AddInt64EPKcl(BMessage *, const char *, int64);
+extern "C" status_t __wrap__ZN8BMessage8AddInt64EPKcl(BMessage *m, const char *field, int64 value) {
+  const auto id = failOffsetFor.load();
+  if (id >= 0 && strcmp(field, "partitionOffset") == 0 && m->GetInt32("partition", -1) == id) {
+    failedOffset = true;
+    return B_NO_MEMORY;
+  }
+  return __real__ZN8BMessage8AddInt64EPKcl(m, field, value);
+}
 
 namespace {
 
@@ -92,9 +111,46 @@ private:
   sem_id mounted, unmounted;
 };
 
+void VerifyDiskListing(const DiskListing &fixture) {
+  Preferences prefs;
+  prefs.icons = false;
+  auto *window = new BWindow(BRect(10, 10, 650, 470), "Disk listing",
+                             B_TITLED_WINDOW, 0);
+  auto *pane = new Pane(0, prefs);
+  window->AddChild(pane);
+  window->Show();
+  assert(window->Lock());
+  auto waitForScan = [&] {
+    const auto deadline = system_time() + 5000000;
+    while (pane->IsScanning() && system_time() < deadline) {
+      window->Unlock();
+      snooze(10000);
+      assert(window->Lock());
+    }
+    assert(!pane->IsScanning());
+  };
+  failedOffset = false;
+  failOffsetFor = fixture.partition.id;
+  pane->Navigate("@disks");
+  waitForScan();
+  auto notice = dynamic_cast<WrappedLabel *>(pane->FindView("status"));
+  assert(failedOffset && notice && strstr(notice->Text(), "Reload"));
+  assert(!pane->LocationValid() && pane->MatchPattern("ListiMountQA*", false) == 0 &&
+         !pane->SelectedDisk());
+  failOffsetFor = -1;
+  pane->Reload();
+  waitForScan();
+  assert(pane->LocationValid() && pane->MatchPattern("ListiMountQA*", true) == 1);
+  const auto *row = pane->SelectedDisk();
+  assert(row && row->partition && *row->partition == fixture.partition &&
+         row->unmountedDisk == (fixture.mountedDevice < 0));
+  window->Quit();
+}
+
 void VerifyRoundTrip(const char *devicePath) {
   const auto first = FindFixture(devicePath);
   assert(first.mountedDevice < 0);
+  VerifyDiskListing(first);
   auto *updates = new DiskUpdates(first.partition.id);
   assert(updates->Run() >= 0);
   const BMessenger updateTarget(updates);
@@ -110,6 +166,7 @@ void VerifyRoundTrip(const char *devicePath) {
 
   const auto mounted = FindFixture(devicePath);
   assert(mounted.mountedDevice >= 0 && !mounted.protectedVolume);
+  VerifyDiskListing(mounted);
   BDirectory root;
   BEntry entry;
   BPath path;
@@ -162,8 +219,9 @@ int main() {
   BApplication app("application/x-vnd.Listi-DiskActionsTest");
   DiskPartition partition{42, "/dev/disk/test", "bfs", 100, 1024, "Label"};
   BMessage message;
-  partition.WriteTo(message);
+  assert(partition.WriteTo(message));
   assert(DiskPartition::ReadFrom(message) == partition);
+  assert(message.RemoveName("partitionOffset") == B_OK && DiskPartition::ReadFrom(message).id < 0);
   assert(MountDisk({}) == B_ENTRY_NOT_FOUND);
 
   BVolume boot;

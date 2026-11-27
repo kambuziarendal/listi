@@ -7,6 +7,7 @@
 #include <NodeMonitor.h>
 #include <Query.h>
 #include <sys/stat.h>
+#include <cerrno>
 #include <cstdlib>
 namespace Listi {
 namespace {
@@ -29,10 +30,10 @@ class SearchWorker : public Listi::ReadWorker {
     query.reset();
   }
   bool Send(BMessage &m) {
-    m.AddInt64("serial", serial);
-    m.AddInt64("revision", revision);
     if (!Alive()) return false;
-    if (target.SendMessage(&m, (BHandler *)nullptr, 500000) == B_OK) return true;
+    if (m.AddInt64("serial", serial) == B_OK &&
+        m.AddInt64("revision", revision) == B_OK &&
+        target.SendMessage(&m, (BHandler *)nullptr, 500000) == B_OK) return true;
     if (failedSerial) failedSerial->store(serial);
     return false;
   }
@@ -51,6 +52,8 @@ class SearchWorker : public Listi::ReadWorker {
     }
     BMessage batch(kSearchRows);
     int count = 0;
+    int64 total = 0;
+    bool buildFailed = false;
     auto flush = [&] {
       if (!count)
         return true;
@@ -61,7 +64,7 @@ class SearchWorker : public Listi::ReadWorker {
       return ok;
     };
     SearchSummary summary;
-    size_t blockedHits = 0;
+    size_t unverifiedHits = 0;
     if (Listi::InterruptedVolumes().Contains(request.root))
       summary.error = Listi::kUnavailableVolumeText;
     else if (!initial && !SameSearchEntry(root))
@@ -72,52 +75,70 @@ class SearchWorker : public Listi::ReadWorker {
           request, [&] { return Alive(); },
           [&](const SearchHit &hit) {
             if (Listi::InterruptedVolumes().Contains(hit.path)) {
-              ++blockedHits;
+              ++unverifiedHits;
               return true;
             }
             BMessage item;
             if (paneRows) {
               struct stat st;
-              if (lstat(hit.path.c_str(), &st) || st.st_dev != hit.device || st.st_ino != hit.node)
+              if (lstat(hit.path.c_str(), &st) != 0) {
+                // A vanished path no longer matches. Other errors leave an
+                // existing hit unverified and must mark this snapshot partial.
+                if (errno != ENOENT && errno != ENOTDIR)
+                  ++unverifiedHits;
                 return true;
-              item.AddInt64("size", st.st_size);
-              item.AddInt64("date", st.st_mtime);
-              item.AddInt32("kind", S_ISLNK(st.st_mode) ? 2 : S_ISDIR(st.st_mode) ? 1 : 0);
+              }
+              if (st.st_dev != hit.device || st.st_ino != hit.node)
+                return true;
               struct stat target;
-              item.AddBool("directory", S_ISDIR(st.st_mode) ||
+              const bool directory = S_ISDIR(st.st_mode) ||
                   (S_ISLNK(st.st_mode) && !Listi::InterruptedVolumes().ContainsResolved(hit.path) &&
-                   stat(hit.path.c_str(), &target) == 0 && S_ISDIR(target.st_mode)));
+                   stat(hit.path.c_str(), &target) == 0 && S_ISDIR(target.st_mode));
+              buildFailed = item.AddInt64("size", st.st_size) != B_OK ||
+                  item.AddInt64("date", st.st_mtime) != B_OK ||
+                  item.AddInt32("kind", S_ISLNK(st.st_mode) ? 2 : S_ISDIR(st.st_mode) ? 1 : 0) != B_OK ||
+                  item.AddBool("directory", directory) != B_OK;
             } else if (request.flat) {
-              item.AddInt64("size", hit.size);
-              item.AddInt64("date", hit.modified);
+              buildFailed = item.AddInt64("size", hit.size) != B_OK ||
+                            item.AddInt64("date", hit.modified) != B_OK;
             }
-            item.AddString("path", hit.path.c_str());
-            item.AddInt64("device", hit.device);
-            item.AddInt64("node", hit.node);
-            if (!hit.relativeFolder.empty())
-              item.AddString("folder", hit.relativeFolder.c_str());
-            batch.AddMessage("hit", &item);
+            if (buildFailed || item.AddString("path", hit.path.c_str()) != B_OK ||
+                item.AddInt64("device", hit.device) != B_OK ||
+                item.AddInt64("node", hit.node) != B_OK ||
+                (!hit.relativeFolder.empty() && item.AddString("folder", hit.relativeFolder.c_str()) != B_OK) ||
+                batch.AddMessage("hit", &item) != B_OK) {
+              buildFailed = true;
+              return false;
+            }
+            ++total;
             return ++count < 40 || flush();
           },
           initial ? query.get() : nullptr);
-    summary.skipped += blockedHits;
+    summary.skipped += unverifiedHits;
     if (!Alive()) {
       Stop();
       return;
     }
+    if (buildFailed)
+      summary.error = "Could not build the search result batch. Reload to retry.";
     if (!flush())
       summary.cancelled = true;
     if (!summary.error.empty() || summary.cancelled || summary.limited ||
         summary.skipped)
       Stop();
     BMessage done(kSearchDone);
-    done.AddInt64("events", events);
-    done.AddInt64("visited", summary.visited);
-    done.AddInt64("skipped", summary.skipped);
-    done.AddBool("limited", summary.limited);
-    done.AddBool("cancelled", summary.cancelled);
-    done.AddBool("live", query != nullptr);
-    done.AddString("error", summary.error.c_str());
+    if (done.AddInt64("events", events) != B_OK ||
+        done.AddInt64("visited", summary.visited) != B_OK ||
+        done.AddInt64("skipped", summary.skipped) != B_OK ||
+        done.AddBool("limited", summary.limited) != B_OK ||
+        done.AddBool("cancelled", summary.cancelled) != B_OK ||
+        done.AddBool("live", query != nullptr) != B_OK ||
+        done.AddString("error", summary.error.c_str()) != B_OK ||
+        done.AddInt64("rowTotal", total) != B_OK) {
+      if (failedSerial) failedSerial->store(serial);
+      Stop();
+      return;
+    }
     if (!Send(done))
       Stop();
   }

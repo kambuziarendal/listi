@@ -16,7 +16,8 @@ class ArchiveEditSession {
 public:
   enum Observation { Waiting, Unchanged, Changed };
   static std::shared_ptr<ArchiveEditSession>
-  Open(const std::string &member, const std::string &root, const Hooks & = {});
+  Open(const std::string &member, const std::string &root, const Hooks & = {},
+       const Job &shown = {});
   static std::shared_ptr<ArchiveEditSession>
   Resume(const std::string &directory);
   Observation Observe(const Hooks & = {});
@@ -24,6 +25,7 @@ public:
   StartFresh(const Hooks & = {}); // Explicit user choice; old copy is kept.
   bool Save(const Hooks & = {});  // false means the working copy is unchanged
   const std::string &Member() const { return member; }
+  const std::string &ArchiveVersion() const { return target.expectedArchiveSets.at(target.destination); }
   const std::string &WorkingFile() const { return working; }
   const std::string &Directory() const { return directory; }
 
@@ -31,7 +33,7 @@ private:
   std::string directory, member, working, predecessor;
   static std::shared_ptr<ArchiveEditSession>
   Create(const std::string &member, const std::string &root,
-         const std::string &predecessor, const Hooks &hooks);
+         const std::string &predecessor, const Hooks &hooks, const Job &shown = {});
   Job target;
   unsigned permissions = 0644;
   struct stat directoryIdentity {
@@ -47,6 +49,7 @@ private:
 };
 } // namespace Listi
 // These functions are called only from the application's UI thread.
-void OpenArchiveEditor(const std::string &member, const std::string &editor);
+void OpenArchiveEditor(const std::string &member, const std::string &editor,
+                       const Listi::Job &shown);
 void ResumeArchiveEditors(const std::string &editor);
 bool ArchiveEditorsAllowQuit();

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+#include "StoredFields.h"
 #include "ShelfCollections.h"
 #include "MessageStore.h"
 #include <StorageDefs.h>
@@ -9,30 +10,11 @@
 
 namespace Listi {
 namespace {
-int32 Count(const BMessage &message, const char *field, size_t limit) {
-  type_code type;
-  int32 count = 0;
-  auto status = message.GetInfo(field, &type, &count);
-  if (status == B_NAME_NOT_FOUND)
-    return 0;
-  if (status != B_OK || type != B_MESSAGE_TYPE || count < 0 ||
-      size_t(count) > limit)
-    throw std::runtime_error("Invalid saved Shelf collection.");
-  return count;
-}
-
-BMessage ReadChild(const BMessage &message, const char *field, int32 index) {
-  BMessage child;
-  if (message.FindMessage(field, index, &child) != B_OK)
-    throw std::runtime_error("Invalid saved Shelf collection.");
-  return child;
-}
-
 BMessage EncodeStamp(const ShelfNodeStamp &stamp) {
   BMessage message;
-  message.AddInt64("inode", stamp.inode);
-  message.AddInt64("seconds", stamp.seconds);
-  message.AddInt32("nanoseconds", stamp.nanoseconds);
+  CheckStoredField(message.AddInt64("inode", stamp.inode));
+  CheckStoredField(message.AddInt64("seconds", stamp.seconds));
+  CheckStoredField(message.AddInt32("nanoseconds", stamp.nanoseconds));
   return message;
 }
 
@@ -48,18 +30,18 @@ ShelfNodeStamp DecodeStamp(const BMessage &message) {
 
 BMessage EncodeEntry(const ShelfEntry &entry) {
   BMessage message;
-  message.AddString("path", entry.path.c_str());
+  CheckStoredField(message.AddString("path", entry.path.c_str()));
   if (entry.proof) {
     const auto &proof = *entry.proof;
     BMessage identity, root = EncodeStamp(proof.volumeRoot),
                        parent = EncodeStamp(proof.parent),
                        node = EncodeStamp(proof.entry);
-    identity.AddString("device", proof.device.c_str());
-    identity.AddMessage("root", &root);
-    identity.AddMessage("parent", &parent);
-    identity.AddMessage("node", &node);
-    identity.AddUInt32("kind", proof.kind);
-    message.AddMessage("identity", &identity);
+    CheckStoredField(identity.AddString("device", proof.device.c_str()));
+    CheckStoredField(identity.AddMessage("root", &root));
+    CheckStoredField(identity.AddMessage("parent", &parent));
+    CheckStoredField(identity.AddMessage("node", &node));
+    CheckStoredField(identity.AddUInt32("kind", proof.kind));
+    CheckStoredField(message.AddMessage("identity", &identity));
   }
   return message;
 }
@@ -68,8 +50,8 @@ ShelfEntry DecodeEntry(const BMessage &message) {
   ShelfEntry entry;
   entry.path = message.GetString("path", "");
   entry.restored = entry.unresolved = true;
-  if (Count(message, "identity", 1)) {
-    const auto identity = ReadChild(message, "identity", 0);
+  if (StoredCount(message, "identity", 1)) {
+    const auto identity = StoredItem(message, "identity", 0);
     const std::string device = identity.GetString("device", "");
     const auto kind = identity.GetUInt32("kind", 0);
     if (device.empty() || device.size() >= B_DEV_NAME_LENGTH ||
@@ -77,9 +59,9 @@ ShelfEntry DecodeEntry(const BMessage &message) {
       throw std::runtime_error("Invalid saved Shelf identity.");
     entry.directory = kind == S_IFDIR;
     entry.proof = ShelfProof{device,
-                             DecodeStamp(ReadChild(identity, "root", 0)),
-                             DecodeStamp(ReadChild(identity, "parent", 0)),
-                             DecodeStamp(ReadChild(identity, "node", 0)),
+                             DecodeStamp(StoredItem(identity, "root", 0)),
+                             DecodeStamp(StoredItem(identity, "parent", 0)),
+                             DecodeStamp(StoredItem(identity, "node", 0)),
                              kind};
   }
   return entry;
@@ -176,13 +158,13 @@ ShelfCollections ShelfCollections::Load(const std::string &file) {
     return result;
   if (root.GetInt32("version", 0) != 1)
     throw std::runtime_error("Unsupported saved Shelf collection format.");
-  const auto count = Count(root, "collection", kMaximumCollections);
+  const auto count = StoredCount(root, "collection", kMaximumCollections);
   for (int32 i = 0; i < count; ++i) {
-    const auto collection = ReadChild(root, "collection", i);
-    const auto entries = Count(collection, "entry", Shelf::kMaximumEntries);
+    const auto collection = StoredItem(root, "collection", i);
+    const auto entries = StoredCount(collection, "entry", Shelf::kMaximumEntries);
     ShelfSnapshot shelf;
     for (int32 j = 0; j < entries; ++j)
-      shelf.entries.push_back(DecodeEntry(ReadChild(collection, "entry", j)));
+      shelf.entries.push_back(DecodeEntry(StoredItem(collection, "entry", j)));
     result.Put(collection.GetString("name", ""), shelf, false);
   }
   return result;
@@ -192,15 +174,15 @@ void ShelfCollections::Save(const std::string &file) const {
   if (file.empty())
     throw std::runtime_error("The user settings folder is unavailable.");
   BMessage root;
-  root.AddInt32("version", 1);
+  CheckStoredField(root.AddInt32("version", 1));
   for (const auto &item : items) {
     BMessage collection;
-    collection.AddString("name", item.name.c_str());
+    CheckStoredField(collection.AddString("name", item.name.c_str()));
     for (const auto &entry : item.entries) {
       auto encoded = EncodeEntry(entry);
-      collection.AddMessage("entry", &encoded);
+      CheckStoredField(collection.AddMessage("entry", &encoded));
     }
-    root.AddMessage("collection", &collection);
+    CheckStoredField(root.AddMessage("collection", &collection));
   }
   SaveMessageStore(file, root);
 }

@@ -33,9 +33,11 @@ BMessage MakeFileSelection(const std::vector<std::string> &, bool cut = false,
                            const std::map<std::string, NodeIdentity> &expected = {});
 void PutFileClipboard(const std::vector<std::string> &, bool cut,
                       BClipboard *clipboard = be_clipboard,
-                      const std::map<std::string, NodeIdentity> &expected = {});
+                      const std::map<std::string, NodeIdentity> &expected = {},
+                      const std::map<std::string, std::string> &archiveVersions = {});
 ClipboardPaste PrepareFilePaste(const std::string &destination,
-                                BClipboard *clipboard = be_clipboard);
+                                BClipboard *clipboard = be_clipboard,
+                                const std::map<std::string, std::string> &destinationVersion = {});
 // Consume only successfully moved roots, and never a newer clipboard selection.
 void FinishFilePaste(const ClipboardPaste &,
                      const std::vector<std::string> &moved,

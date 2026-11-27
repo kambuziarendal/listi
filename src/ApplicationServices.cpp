@@ -5,6 +5,7 @@
 #include "ImageConvert.h"
 #include "JobSnapshot.h"
 #include "MessageStore.h"
+#include "StoredFields.h"
 #include "SavedPlaces.h"
 #include "SavedSearches.h"
 #include "VirtualFile.h"
@@ -33,19 +34,22 @@ void SaveNavigationEdit(const char *name, const BMessage &edit, BMessage &reply)
   try {
     auto current = Store::Load(path.String());
     current.ApplyEdit(edit);
-    current.Save(path.String());
     const auto snapshot = current.Message();
-    reply.AddMessage("snapshot", &snapshot);
+    Store::FromMessage(snapshot);
+    Listi::CheckStoredField(reply.AddMessage("snapshot", &snapshot));
+    Listi::SaveMessageStore(path.String(), snapshot);
   } catch (const Listi::SettingsReplacedError &e) {
+    reply.RemoveName("snapshot");
     std::string warning = e.what();
     try {
       const auto observed = Store::Load(path.String()).Message();
-      reply.AddMessage("snapshot", &observed);
+      Listi::CheckStoredField(reply.AddMessage("snapshot", &observed));
     } catch (const std::exception &readError) {
       warning += std::string(" Could not reload the current list: ") + readError.what();
     }
     reply.AddString("error", warning.c_str());
   } catch (const std::exception &e) {
+    reply.RemoveName("snapshot");
     reply.AddString("error", e.what());
   }
 }

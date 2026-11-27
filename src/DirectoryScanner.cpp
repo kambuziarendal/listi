@@ -48,6 +48,8 @@ class Scanner : public Listi::ReadWorker {
   std::shared_ptr<DirectoryWatch> watch;
 
   bool Send(BMessage &message, int64 serial) {
+    if (message.GetInt64("serial", -1) != serial)
+      return false;
     for (int attempt = 0; attempt < 3 && generation->load() == serial;
          ++attempt) {
       status_t status =
@@ -135,6 +137,7 @@ public:
     BMessage batch(kRows);
     batch.AddInt64("serial", serial);
     int count = 0;
+    int64 total = 0;
     // A small first batch lets the pane draw before another screenful of
     // Tracker icons is decoded. Keep later batches large to limit UI work.
     int batchLimit = (icons || m->GetBool("firstScreen", false)) ? 8 : 80;
@@ -156,6 +159,15 @@ public:
       count = 0;
       batchLimit = 80;
     };
+    auto append = [&](const BMessage &item) {
+      if (batch.AddMessage("entry", &item) != B_OK) {
+        deliveryFailed = true;
+        return;
+      }
+      ++total;
+      if (++count == batchLimit)
+        send();
+    };
     std::string inspectionWarning;
     auto row = [&](const char *full, const char *label, bool parent = false,
                    int directory = -1, const struct stat *opened = nullptr,
@@ -175,10 +187,13 @@ public:
       if (generation->load() != serial)
         return;
       BMessage item;
-      item.AddInt32("iconSize", iconPixels);
-      item.AddString("name", label);
-      item.AddString("path", full);
-      item.AddBool("parent", parent);
+      if (item.AddInt32("iconSize", iconPixels) != B_OK ||
+          item.AddString("name", label) != B_OK ||
+          item.AddString("path", full) != B_OK ||
+          item.AddBool("parent", parent) != B_OK) {
+        deliveryFailed = true;
+        return;
+      }
       bool link = S_ISLNK(st.st_mode);
       bool dir = S_ISDIR(st.st_mode);
       struct stat resolved;
@@ -188,15 +203,21 @@ public:
       if (resolvedLink)
         dir = S_ISDIR(resolved.st_mode);
       const mode_t targetMode = resolvedLink ? resolved.st_mode : st.st_mode;
-      item.AddInt32("kind", link ? 2 : dir ? 1 : 0);
-      item.AddBool("directory", dir);
-      item.AddInt64("device", st.st_dev);
-      item.AddInt64("node", st.st_ino);
-      item.AddInt64("size", st.st_size);
-      item.AddInt64("date", st.st_mtime);
-      item.AddBool("modifiedKnown", true);
-      if (disk && st.st_dev == disk->mountedDevice && !disk->protectedVolume)
-        disk->partition.WriteTo(item);
+      if (item.AddInt32("kind", link ? 2 : dir ? 1 : 0) != B_OK ||
+          item.AddBool("directory", dir) != B_OK ||
+          item.AddInt64("device", st.st_dev) != B_OK ||
+          item.AddInt64("node", st.st_ino) != B_OK ||
+          item.AddInt64("size", st.st_size) != B_OK ||
+          item.AddInt64("date", st.st_mtime) != B_OK ||
+          item.AddBool("modifiedKnown", true) != B_OK) {
+        deliveryFailed = true;
+        return;
+      }
+      if (disk && st.st_dev == disk->mountedDevice && !disk->protectedVolume &&
+          !disk->partition.WriteTo(item)) {
+        deliveryFailed = true;
+        return;
+      }
       const bool cells = !parent && (S_ISREG(st.st_mode) || S_ISDIR(st.st_mode)) &&
                          m->HasString("attribute");
       const bool localIcon = icons && (S_ISREG(targetMode) || S_ISDIR(targetMode));
@@ -227,8 +248,11 @@ public:
               cell.resize(end);
               cell += "…";
             }
-            item.AddString("cell", cell.c_str());
-            item.AddUInt32("cellType", type);
+            if (item.AddString("cell", cell.c_str()) != B_OK ||
+                item.AddUInt32("cellType", type) != B_OK) {
+              deliveryFailed = true;
+              return;
+            }
           }
         }
         // Tracker icon lookup may open the node. Never open a device, FIFO,
@@ -237,10 +261,9 @@ public:
           ReadLocalIcon(ref, iconPixels, item);
         }
       }
-      batch.AddMessage("entry", &item);
-      if (++count == batchLimit)
-        send();
+      append(item);
     };
+    std::string scanError;
     BMessage done(kScanDone);
     done.AddInt64("serial", serial);
     if (Listi::IsVirtual(path.String())) {
@@ -249,23 +272,24 @@ public:
       auto virtualRow = [&](const Listi::FileEntry &entry,
                             bool parent = false) {
         BMessage item;
-        item.AddInt32("iconSize", iconPixels);
-        item.AddString("name", parent ? ".." : entry.name.c_str());
-        item.AddString("path", entry.path.c_str());
-        item.AddBool("parent", parent);
-        item.AddBool("directory", entry.directory);
-        item.AddInt32("kind", entry.link ? 2 : entry.directory ? 1 : 0);
-        item.AddInt64("size", entry.size);
-        item.AddBool("sizeKnown", entry.sizeKnown);
-        item.AddInt64("date", entry.modified);
-        item.AddBool("modifiedKnown", entry.modifiedKnown);
-        item.AddString("modifiedFraction", entry.modifiedFraction.c_str());
-        item.AddString("providerIdentity", entry.providerIdentity.c_str());
+        if (item.AddInt32("iconSize", iconPixels) != B_OK ||
+            item.AddString("name", parent ? ".." : entry.name.c_str()) != B_OK ||
+            item.AddString("path", entry.path.c_str()) != B_OK ||
+            item.AddBool("parent", parent) != B_OK ||
+            item.AddBool("directory", entry.directory) != B_OK ||
+            item.AddInt32("kind", entry.link ? 2 : entry.directory ? 1 : 0) != B_OK ||
+            item.AddInt64("size", entry.size) != B_OK ||
+            item.AddBool("sizeKnown", entry.sizeKnown) != B_OK ||
+            item.AddInt64("date", entry.modified) != B_OK ||
+            item.AddBool("modifiedKnown", entry.modifiedKnown) != B_OK ||
+            item.AddString("modifiedFraction", entry.modifiedFraction.c_str()) != B_OK ||
+            item.AddString("providerIdentity", entry.providerIdentity.c_str()) != B_OK) {
+          deliveryFailed = true;
+          return;
+        }
         if (icons)
           ReadVirtualIcon(entry.name, entry.directory, iconPixels, item);
-        batch.AddMessage("entry", &item);
-        if (++count == batchLimit)
-          send();
+        append(item);
       };
       try {
         auto location = Listi::ParseLocation(path.String());
@@ -276,7 +300,14 @@ public:
             done.AddInt64("folderNode", file.st_ino);
           }
         }
-        auto entries = Listi::ListFiles(path.String(), control);
+        if (Listi::InterruptedVolumes().ContainsResolved(path.String()))
+          throw std::runtime_error(Listi::kUnavailableVolumeText);
+        std::string fingerprint;
+        auto entries = location.Archive() ? Listi::ListArchiveView(location, control, fingerprint)
+                                          : Listi::ListFiles(path.String(), control);
+        if (location.Archive() && (fingerprint.empty() ||
+            done.AddString("archiveVersion", fingerprint.c_str()) != B_OK))
+          throw std::runtime_error("Cannot identify the listed archive. Reload and select again.");
         auto parent = Listi::ParentLocation(path.String());
         if (parent != path.String()) {
           Listi::FileEntry entry;
@@ -293,7 +324,7 @@ public:
       } catch (const Listi::Cancelled &) {
         return;
       } catch (const std::exception &error) {
-        done.AddString("error", error.what());
+        scanError = error.what();
       }
     } else if (path == "@disks") {
       // Subscribe before enumerating so changes during the scan aren't lost.
@@ -309,14 +340,15 @@ public:
         }
         BMessage item;
         const auto key = "@partition/" + std::to_string(disk.partition.id);
-        item.AddString("name", (disk.name + " (unmounted)").c_str());
-        item.AddString("path", key.c_str());
-        item.AddBool("sizeKnown", false);
-        item.AddBool("unmountedDisk", true);
-        disk.partition.WriteTo(item);
-        batch.AddMessage("entry", &item);
-        if (++count == batchLimit)
-          send();
+        if (item.AddString("name", (disk.name + " (unmounted)").c_str()) != B_OK ||
+            item.AddString("path", key.c_str()) != B_OK ||
+            item.AddBool("sizeKnown", false) != B_OK ||
+            item.AddBool("unmountedDisk", true) != B_OK ||
+            !disk.partition.WriteTo(item)) {
+          deliveryFailed = true;
+          return true;
+        }
+        append(item);
         return false;
       });
       BVolumeRoster roster;
@@ -340,16 +372,16 @@ public:
     } else {
       char resolved[PATH_MAX];
       if (!realpath(path.String(), resolved)) {
-        done.AddString("error", strerror(errno));
+        scanError = strerror(errno);
       } else if (Listi::InterruptedVolumes().Contains(resolved)) {
-        done.AddString("error", Listi::kUnavailableVolumeText);
+        scanError = Listi::kUnavailableVolumeText;
       } else {
         if (generation->load() != serial)
           return;
         path = resolved;
         DIR *dir = opendir(path.String());
         if (!dir)
-          done.AddString("error", strerror(errno));
+          scanError = strerror(errno);
         else {
           struct stat opened;
           const bool identified = fstat(dirfd(dir), &opened) == 0;
@@ -388,7 +420,7 @@ public:
             auto e = readdir(dir);
             if (!e) {
               if (errno)
-                done.AddString("error", strerror(errno));
+                scanError = strerror(errno);
               break;
             }
             if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..") ||
@@ -403,12 +435,11 @@ public:
           struct stat named;
           if (blocked()) {
             count = 0;
-            done.RemoveName("error");
-            done.AddString("error", Listi::kUnavailableVolumeText);
+            scanError = Listi::kUnavailableVolumeText;
           } else if (identified && (stat(path.String(), &named) != 0 ||
               named.st_dev != opened.st_dev || named.st_ino != opened.st_ino) &&
-              !done.HasString("error"))
-            done.AddString("error", "Folder changed while reading. Reload to try again.");
+              scanError.empty())
+            scanError = "Folder changed while reading. Reload to try again.";
         }
       }
     }
@@ -416,10 +447,14 @@ public:
       if (count && !deliveryFailed)
         send();
       if (deliveryFailed)
-        done.AddString("error",
-                       "Directory delivery failed. Reload to try again.");
-      if (!inspectionWarning.empty())
-        done.AddString("inspectionWarning", inspectionWarning.c_str());
+        scanError = "Directory delivery failed. Reload to try again.";
+      if (!inspectionWarning.empty() &&
+          done.AddString("inspectionWarning", inspectionWarning.c_str()) != B_OK)
+        scanError = "Incomplete directory listing. Reload to try again.";
+      if (scanError.empty())
+        done.AddInt64("rowTotal", total);
+      else
+        done.AddString("error", scanError.c_str());
       done.AddString("path", path);
       Complete(done, serial);
     }

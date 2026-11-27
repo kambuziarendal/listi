@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+#include "StoredFields.h"
 #include "FolderTabs.h"
 #include "Pane.h"
 #include "PanelAppearance.h"
@@ -52,34 +53,37 @@ FolderTab FolderTabs::Snapshot() {
 BMessage FolderTabs::ArchiveTabs() {
   SaveActive();
   BMessage result;
-  result.AddInt32("active", active);
+  CheckStoredField(result.AddInt32("active", active));
   for (const auto &tab : tabs) {
     BMessage item;
     const auto &state = tab.state;
-    item.AddString("alias", tab.alias.c_str());
-    item.AddString("location", state.location.c_str());
-    item.AddString("label", state.displayLabel.c_str());
-    item.AddString("filter", state.filter.c_str());
-    item.AddPoint("scroll", state.scroll);
-    item.AddInt32("view", state.view);
-    item.AddInt32("folderView", state.folderView);
-    item.AddInt32("sort", state.sorting.column);
-    item.AddBool("ascending", state.sorting.ascending);
+    CheckStoredField(item.AddString("alias", tab.alias.c_str()));
+    CheckStoredField(item.AddString("location", state.location.c_str()));
+    CheckStoredField(item.AddString("label", state.displayLabel.c_str()));
+    CheckStoredField(item.AddString("filter", state.filter.c_str()));
+    CheckStoredField(item.AddPoint("scroll", state.scroll));
+    CheckStoredField(item.AddInt32("view", state.view));
+    CheckStoredField(item.AddInt32("folderView", state.folderView));
+    CheckStoredField(item.AddInt32("sort", state.sorting.column));
+    CheckStoredField(item.AddBool("ascending", state.sorting.ascending));
     auto found = state.queries.find(state.location);
     if (found != state.queries.end()) {
       BMessage query;
-      found->second.WriteTo(query);
-      item.AddMessage("query", &query);
+      if (!found->second.WriteTo(query))
+        throw std::runtime_error("Could not encode the complete saved search.");
+      CheckStoredField(item.AddMessage("query", &query));
     }
-    result.AddMessage("tab", &item);
+    CheckStoredField(result.AddMessage("tab", &item));
   }
   return result;
 }
 
 void FolderTabs::RestoreTabs(const BMessage &archive) {
   std::vector<FolderTab> restored;
-  BMessage item;
-  for (int32 i = 0; archive.FindMessage("tab", i, &item) == B_OK; ++i) {
+  const auto count = StoredCount(archive, "tab");
+  if (!count) throw std::runtime_error("Missing working set tabs.");
+  for (int32 i = 0; i < count; ++i) {
+    const auto item = StoredItem(archive, "tab", i);
     FolderTab tab{++nextTab, item.GetString("alias", ""), {}};
     auto &state = tab.state;
     state.location = item.GetString("location", "/boot/home");
@@ -90,8 +94,8 @@ void FolderTabs::RestoreTabs(const BMessage &archive) {
     state.folderView = item.GetInt32("folderView", -1);
     state.sorting = {item.GetInt32("sort", 0), item.GetBool("ascending", true)};
     item.FindPoint("scroll", &state.scroll);
-    BMessage query;
-    if (item.FindMessage("query", &query) == B_OK) {
+    if (StoredCount(item, "query", 1)) {
+      const auto query = StoredItem(item, "query", 0);
       state.location = "@set-query:" + std::to_string(tab.id);
       state.queries.emplace(state.location, SavedSearch::FromMessage(query));
     }

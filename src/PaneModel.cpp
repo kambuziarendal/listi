@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "PaneModel.h"
 #include "NameFilter.h"
+#include "VirtualFile.h"
 #include <algorithm>
 #include <fnmatch.h>
 #include <limits>
@@ -71,7 +72,16 @@ bool PaneModel::MatchesSnapshot(const std::vector<std::unique_ptr<PaneEntry>> &r
   }
   return true;
 }
+void PaneModel::BindArchiveView(Listi::Job &job, const std::string &location) const {
+  const auto from = Listi::ParseLocation(location);
+  if (!from.Archive())
+    return;
+  if (archiveVersion.empty() ||
+      job.expectedArchiveSets.emplace(from.archive, archiveVersion).first->second != archiveVersion)
+    throw std::runtime_error("Archive view is incomplete or changed. Reload and select again.");
+}
 void PaneModel::Clear() {
+  archiveVersion.clear();
   visible.clear();
   entries.clear();
   selection.clear();

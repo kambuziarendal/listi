@@ -23,7 +23,7 @@ explicitly classified as special/optional.
 
 ## Native (Haiku x86_64 in a disposable overlay)
 
-Use a clean checkout, Python 3, QEMU and OpenSSH on a disposable Linux host.
+Use a clean checkout, Python 3, QEMU, OpenSSH and e2fsprogs on a disposable Linux host.
 Never use an unreviewed checkout on a persistent workstation or runner: the
 orchestration scripts themselves run on the host. The public CI workflow uses
 GitHub-hosted throwaway runners only, never a persistent self-hosted runner,
@@ -80,6 +80,14 @@ A missing, incomplete, failed, focused or preflight result is not an installed
 package pass. Preserve the process exit status as well as those logs. A timed-out GitHub job is not green. For local automation wrap
 the command in an appropriate process-group timeout (e.g. GNU timeout 150m).
 Focused or preflight-only runs are not accepted for package qualification.
+Package qualification generates a prelinked ext2 image without mounting it on the
+host. The native runner mounts a fresh copy for each of `archive-copy-inputs`
+and `file-operation-faults`. Their logs must show that both archive aliases
+were tested and that refusing Trash for two linked names preserved the third.
+The test records whether the Tracker string actually exists on the three-link
+inode, separately from checking its value on the normal Trash volume. An absent
+attribute on ext2 does not prove that a present attribute was preserved there.
+
 Qualification artifacts are retained for 14 days and are not published as releases. Power-loss and physical USB behavior are not tested here.
 
 ## Extended (explicitly configured disposable environment only)

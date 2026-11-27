@@ -20,6 +20,6 @@ struct CompiledSearchFilters {
 // Throws on invalid criteria. Dates are local calendar days; upper bound is
 // exclusive midnight of the following day, including DST transitions.
 CompiledSearchFilters CompileSearchFilters(const SearchFilters &);
-void WriteSearchFilters(BMessage &, const SearchFilters &);
+bool WriteSearchFilters(BMessage &, const SearchFilters &);
 SearchFilters ReadSearchFilters(const BMessage &);
 }

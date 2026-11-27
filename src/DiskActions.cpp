@@ -48,22 +48,29 @@ bool DiskPartition::operator==(const DiskPartition &other) const {
                   other.contentName);
 }
 
-void DiskPartition::WriteTo(BMessage &message) const {
-  message.AddInt32("partition", id);
-  message.AddString("partitionPath", devicePath.c_str());
-  message.AddString("partitionType", type.c_str());
-  message.AddInt64("partitionOffset", offset);
-  message.AddInt64("partitionSize", size);
-  message.AddString("partitionContentName", contentName.c_str());
+bool DiskPartition::WriteTo(BMessage &message) const {
+  return message.AddInt32("partition", id) == B_OK &&
+         message.AddString("partitionPath", devicePath.c_str()) == B_OK &&
+         message.AddString("partitionType", type.c_str()) == B_OK &&
+         message.AddInt64("partitionOffset", offset) == B_OK &&
+         message.AddInt64("partitionSize", size) == B_OK &&
+         message.AddString("partitionContentName", contentName.c_str()) == B_OK;
 }
 
 DiskPartition DiskPartition::ReadFrom(const BMessage &message) {
-  return {message.GetInt32("partition", -1),
-          message.GetString("partitionPath", ""),
-          message.GetString("partitionType", ""),
-          message.GetInt64("partitionOffset", -1),
-          message.GetInt64("partitionSize", -1),
-          message.GetString("partitionContentName", "")};
+  DiskPartition partition;
+  const char *path, *type, *name;
+  if (message.FindInt32("partition", &partition.id) != B_OK ||
+      message.FindString("partitionPath", &path) != B_OK ||
+      message.FindString("partitionType", &type) != B_OK ||
+      message.FindInt64("partitionOffset", &partition.offset) != B_OK ||
+      message.FindInt64("partitionSize", &partition.size) != B_OK ||
+      message.FindString("partitionContentName", &name) != B_OK)
+    return {};
+  partition.devicePath = path;
+  partition.type = type;
+  partition.contentName = name;
+  return partition;
 }
 
 void VisitDiskPartitions(const std::function<bool(const DiskListing &)> &visit) {

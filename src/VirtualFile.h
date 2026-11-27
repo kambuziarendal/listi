@@ -104,6 +104,8 @@ void RenameFile(const std::string &, const std::string &,
 // Returns empty for ordinary files. Inspection is performed only by workers.
 std::string OpenArchive(const std::string &local, const TransferControl & = {});
 std::vector<FileEntry> ListArchive(const Location &, const TransferControl &);
+// Returns the fingerprint checked by the very listing which supplied these rows.
+std::vector<FileEntry> ListArchiveView(const Location &, const TransferControl &, std::string &fingerprint);
 bool StatArchive(const Location &, FileEntry &, const TransferControl &);
 void ReadArchive(const Location &, const DataSink &, const TransferControl &);
 bool ArchiveAvailable();
