@@ -245,13 +245,21 @@ void TestFileClaims(const fs::path &parent, bool insensitive) {
     std::ofstream(dest / old.filename()) << "old";
     std::ofstream(first) << "first report";
     std::ofstream(second) << "second report";
-    int prompts = 0;
+    int prompts = 0, metadataChoices = 0;
     Hooks repeat;
+    // Haiku exposes synthetic attributes even for these freshly created FAT
+    // sources. Consent to bytes-only Copy just as the normal UI requires.
+    repeat.confirmFatCopy = [&](const auto &, const auto &) {
+      ++metadataChoices;
+      return insensitive && action == Action::Copy;
+    };
     repeat.conflict = [&](const auto &) { ++prompts; return Decision::ReplaceAll; };
     const auto job = PrepareTransfer({action, {old.string(), first.string(), second.string()}, dest.string()});
     const auto r = Run(job, repeat);
     const bool move = action == Action::Move;
-    Check(prompts == 1 && r.completed == (insensitive ? 2 : 3) &&
+    const bool fatCopy = insensitive && !move;
+    Check(prompts == 1 && metadataChoices == int(fatCopy) && r.copyLimitations == fatCopy &&
+              r.completed == (insensitive ? 2 : 3) &&
               r.errors.empty() == !insensitive && Read(dest / old.filename()) == "replacement" &&
               Read(dest / first.filename()) == "first report" &&
               fs::exists(first) != move && (insensitive ? Read(second) == "second report" &&
@@ -264,11 +272,13 @@ void TestFileClaims(const fs::path &parent, bool insensitive) {
                 Read(dest / first.filename()) == "first report",
             "remaining-file retry cannot replace a differently spelled stored name");
       Hooks keep;
+      keep.confirmFatCopy = repeat.confirmFatCopy;
       keep.copyConflict = [](const CopyConflict &choice) {
         return choice.separateOnly ? Decision::KeepBoth : Decision::Abort;
       };
       const auto recovered = Run(PrepareTransfer({action, {second.string()}, dest.string()}), keep);
       Check(recovered.completed == 1 && recovered.errors.empty() &&
+                metadataChoices == (fatCopy ? 2 : 0) && recovered.copyLimitations == fatCopy &&
                 Read(dest / "report (2).tmp") == "second report" &&
                 Read(dest / first.filename()) == "first report",
             "retry under a separate name delivers the remaining file without losing the first");
