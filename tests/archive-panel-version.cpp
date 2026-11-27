@@ -97,7 +97,12 @@ class BrowserReplies : public BMessageFilter {
 public:
   BrowserReplies() : BMessageFilter(B_ANY_DELIVERY, B_ANY_SOURCE) {}
   std::map<std::string, int> miller;
+  std::function<void()> tryLocalMove;
   filter_result Filter(BMessage *message, BHandler **recipient) override {
+    if (message->what == 'tMov') {
+      if (tryLocalMove) tryLocalMove();
+      return B_SKIP_MESSAGE;
+    }
     if (message->what == kInlineNotice)
       notice = message->GetString("error", "");
     if (message->what == kScanDone && message->HasString("archiveVersion") &&
@@ -126,7 +131,8 @@ BButton *PromptButton(BWindow *window, const std::string &label) {
   }
   return nullptr;
 }
-void LocalDestinationCases(BWindow *window, WorkspaceSplit &split, const fs::path &root) {
+void LocalDestinationCases(BWindow *window, WorkspaceSplit &split, BrowserReplies &replies,
+                           const fs::path &root) {
   for (bool flat : {false, true}) {
     auto &source = split.Panel(0);
     auto &destination = split.Panel(1).Files();
@@ -150,23 +156,51 @@ void LocalDestinationCases(BWindow *window, WorkspaceSplit &split, const fs::pat
         return rows && rows->CountRows() == 1;
       }), "flat local source loaded");
       auto *rows = static_cast<BColumnListView *>(source.FindView("flat results"));
+      rows->MakeFocus(true);
       rows->SetFocusRow(rows->RowAt(0), true);
+      Check(FlatSelection(*source.Page(PanelPage::Flat)).sources ==
+                std::vector<std::string>{input.string()}, "flat Move selects the intended local file");
     } else {
       Check(source.Files().MatchPattern("incoming.txt", true) == 1, "local source selected");
     }
+    auto submit = [&](bool replace) {
+      // Run on the window looper: inspect the displayed identity, swap the
+      // folder and dispatch the real command before a refresh can intervene.
+      bool dispatched = false;
+      struct stat expected;
+      Check(stat(shown.c_str(), &expected) == 0, "read intended local target identity");
+      replies.tryLocalMove = [&] {
+        if (dispatched || destination.IsScanning() || !destination.LocationValid()) return;
+        const auto [device, node] = destination.FolderIdentity();
+        if (device != expected.st_dev || node != expected.st_ino) return;
+        dispatched = true;
+        split.SetSource(0);
+        if (replace) {
+          fs::rename(shown, held);
+          fs::create_directory(shown);
+        }
+        BMessage move(kMove);
+        window->MessageReceived(&move);
+      };
+      const bool delivered = Until(window, [&] {
+        if (!dispatched) window->PostMessage('tMov');
+        return dispatched;
+      });
+      replies.tryLocalMove = {};
+      Check(delivered, "dispatch Move from a completed destination listing");
+    };
     notice.clear();
-    // The window is locked. Queue the real command before the replacement
-    // generates any refresh notices, then let the looper process it.
-    window->PostMessage(kMove);
-    fs::rename(shown, held);
-    fs::create_directory(shown);
-    Check(Until(window, [&] { return notice.find("destination folder was replaced") != std::string::npos; }) &&
-              Bytes(input) == "original bytes" && fs::is_empty(shown) && fs::is_empty(held),
+    submit(true);
+    const bool refused = Until(window, [&] { return !notice.empty(); });
+    if (!refused || notice.find("destination folder was replaced") == std::string::npos)
+      throw std::runtime_error("Missing stale-target refusal. Notice: " + notice +
+                               "; source panel " + std::to_string(split.Source()) +
+                               "; destination " + destination.Path());
+    Check(Bytes(input) == "original bytes" && fs::is_empty(shown) && fs::is_empty(held),
           "Move refuses the replacement and leaves original and both destinations untouched");
     destination.Reload();
     Check(WaitForPane(window, &destination, shown.string()), "explicitly reload local destination");
-    split.SetSource(0);
-    window->PostMessage(kMove);
+    submit(false);
     Check(Until(window, [&] { return !fs::exists(input) && fs::exists(shown / "incoming.txt"); }) &&
               Bytes(shown / "incoming.txt") == "original bytes" && fs::is_empty(held),
           "Move after reload delivers only to the newly displayed destination");
@@ -184,7 +218,7 @@ void InboundCases(const fs::path &root) {
   auto *panel = dynamic_cast<PanelTools *>(window->FindView("first panel tools"));
   auto *split = panel ? dynamic_cast<WorkspaceSplit *>(panel->Parent()) : nullptr;
   Check(split, "dual-pane browser opened");
-  LocalDestinationCases(window, *split, root);
+  LocalDestinationCases(window, *split, *replies, root);
   enum Route { FlatCopy, FlatMove, Details, Grid, MillerAncestor };
   for (auto route : {FlatCopy, FlatMove, Details, Grid, MillerAncestor}) {
     const auto work = root / ("inbound-" + std::to_string(route)), inputs = work / "inputs";
@@ -361,9 +395,10 @@ int main() {
       }
       for (auto cmd : {kCopy, kMove, kRemoveArchive, kMkdir}) {
         notice.clear();
-        Check(operations.Handle(BMessage(cmd), *source, *dest, false) &&
-                  notice.find("Reload") != std::string::npos && !queue.Busy() && !question->Pending(),
-              "stale pane command rejected before confirmation or queueing");
+        const bool handled = operations.Handle(BMessage(cmd), *source, *dest, false);
+        Check(handled && notice.find("Reload") != std::string::npos && !queue.Busy() && !question->Pending(),
+              "stale pane command rejected before confirmation or queueing (" +
+                  std::to_string(cmd) + ": " + notice + ")");
       }
     };
     for (bool nested : {false, true}) {
@@ -381,6 +416,9 @@ int main() {
       source->ExportModel().BindArchiveView(shown, source->Path());
       PutFileClipboard(source->Selected(), false, &privateClip, {}, shown.expectedArchiveSets);
       const auto drag = MakePaneFileDrag(source->ExportModel());
+      // The preceding iteration wrote to this pane. Let its watched-folder
+      // reload finish before testing rejection of a stale *source*.
+      Check(WaitForPane(window, dest, out.string()), "local destination ready for stale source check");
       fs::rename(archive, held);
       fs::rename(fresh, archive);
       rejectCommands();
