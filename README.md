@@ -44,7 +44,7 @@ The developer uses large language models (LLMs) to help write code and design an
 On Haiku x86_64:
 
 ```sh
-pkgman install haiku_devel python3 libarchive_devel zlib_devel curl_devel samba4_devel sqlite_devel
+pkgman install haiku_devel python3 libarchive_devel zlib_devel curl_devel libssh2_devel samba4_devel sqlite_devel
 make
 ```
 

@@ -4,6 +4,8 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <map>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <sys/types.h>
@@ -32,6 +34,10 @@ struct NetworkCleanupBudget {
     remaining -= n;
   }
 };
+class SftpSession;
+// Only the worker for this job can use its authenticated sessions. The account
+// bound to a canonical authority cannot change during the process.
+using SftpSessions = std::map<std::string, std::shared_ptr<SftpSession>>;
 struct TransferControl {
   std::function<bool()> proceed;
   std::function<void(uint64_t)> progress;
@@ -40,6 +46,10 @@ struct TransferControl {
   const std::string *archiveVersion = nullptr;
   // Set immediately before handing a mutation to the transport library.
   bool *mutationSubmitted = nullptr;
+  SftpSessions *sftpSessions = nullptr;
+  // Browsers may omit unsupported entries with a visible warning. Workers cannot.
+  std::string *listingWarning = nullptr;
+  bool requireExactName = false; // SFTP mutation guards also need exact spelling.
   void RequireArchiveVersion(const std::string &actual) const {
     if (archiveVersion && *archiveVersion != actual)
       throw std::runtime_error("Archive changed after selection. Reload and select again.");
@@ -99,7 +109,7 @@ std::vector<FileEntry> ListFiles(const std::string &,
                                  ListingMethod *method = nullptr);
 // False means the provider reports absence; a directory listing alone does
 // not establish absence on FTP. Ambiguous replies throw.
-// Only a copy's initial FTP/SFTP lookup may reuse an entry from its traversal.
+// Only a copy's initial FTP lookup may reuse an entry from its traversal.
 // Leave discovered unset when checking the current revision.
 bool StatFile(const std::string &, FileEntry &, const TransferControl & = {},
               const FileEntry *discovered = nullptr);

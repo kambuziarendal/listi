@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "DynamicLibrary.h"
-#include "SshPaths.h"
+#include "CurlLibrary.h"
+#include "SftpFile.h"
 #include "VirtualFile.h"
 #include <algorithm>
 #include <cerrno>
@@ -21,10 +22,6 @@ namespace Listi {
 namespace {
 DynamicLibrary &SMB() {
   static DynamicLibrary lib({"libsmbclient.so", "libsmbclient.so.0"});
-  return lib;
-}
-DynamicLibrary &Curl() {
-  static DynamicLibrary lib({"libcurl.so", "libcurl.so.4"});
   return lib;
 }
 // Contexts own their handles, but Samba also has process-wide state. Serialize
@@ -215,7 +212,6 @@ struct CurlSession {
   DynamicLibrary &lib = Curl();
   CURL *curl = nullptr;
   Connection auth;
-  Location location;
   const TransferControl &control;
   DataSink sink;
   FILE *input = nullptr;
@@ -223,17 +219,8 @@ struct CurlSession {
   char error[CURL_ERROR_SIZE] = {};
   curl_slist *commands = nullptr;
   explicit CurlSession(const Location &l, const TransferControl &c)
-      : auth(GetConnection(l.URL())), location(l), control(c) {
-    if (!lib.Available())
-      throw std::runtime_error("Install curl from HaikuDepot for FTP and SFTP");
-    static std::once_flag init;
-    std::call_once(init, [&] {
-      if (LIBCALL(lib, curl_global_init)(CURL_GLOBAL_DEFAULT) != CURLE_OK)
-        throw std::runtime_error("curl initialization failed");
-    });
-    curl = LIBCALL(lib, curl_easy_init)();
-    if (!curl)
-      throw std::runtime_error("Could not allocate network connection");
+      : auth(GetConnection(l.URL())), control(c) {
+    curl = NewCurlHandle();
     try {
       Set(CURLOPT_URL, l.URL().c_str());
       Set(CURLOPT_USERNAME, auth.username.c_str());
@@ -244,22 +231,12 @@ struct CurlSession {
       Set(CURLOPT_LOW_SPEED_LIMIT, 1L);
       Set(CURLOPT_LOW_SPEED_TIME, 20L);
       Set(CURLOPT_FOLLOWLOCATION, 0L);
-      Set(CURLOPT_PROTOCOLS_STR, "ftp,ftps,sftp");
+      Set(CURLOPT_PROTOCOLS_STR, "ftp,ftps");
       Set(CURLOPT_WRITEFUNCTION, &Write);
       Set(CURLOPT_WRITEDATA, this);
       Set(CURLOPT_XFERINFOFUNCTION, &Progress);
       Set(CURLOPT_XFERINFODATA, this);
       Set(CURLOPT_NOPROGRESS, 0L);
-      if (l.scheme == "sftp") {
-        if (auth.knownHosts.empty())
-          auth.knownHosts = DefaultSshPath(SshFile::KnownHosts);
-        Set(CURLOPT_SSH_KNOWNHOSTS, auth.knownHosts.c_str());
-        if (!auth.privateKey.empty()) {
-          Set(CURLOPT_SSH_PRIVATE_KEYFILE, auth.privateKey.c_str());
-          if (!auth.keyPassphrase.empty())
-            Set(CURLOPT_KEYPASSWD, auth.keyPassphrase.c_str());
-        }
-      }
     } catch (...) {
       LIBCALL(lib, curl_easy_cleanup)(curl);
       curl = nullptr;
@@ -337,11 +314,6 @@ struct CurlSession {
     auto r = LIBCALL(lib, curl_easy_perform)(curl);
     if (failure)
       std::rethrow_exception(failure);
-    if (location.scheme == "sftp" && r == CURLE_PEER_FAILED_VERIFICATION)
-      throw std::runtime_error(
-          "SSH host key is unknown or changed. Verify this server with ssh in "
-          "Terminal, or select a trusted known_hosts file in Connect / "
-          "Advanced.");
     if (r != CURLE_OK && !(missingOK && r == CURLE_REMOTE_FILE_NOT_FOUND) &&
         !(accessDeniedOK && r == CURLE_REMOTE_ACCESS_DENIED) &&
         !(quoteErrorOK && r == CURLE_QUOTE_ERROR))
@@ -350,17 +322,6 @@ struct CurlSession {
     return r;
   }
 };
-std::string QuoteSFTP(const std::string &s) {
-  if (s.find_first_of("\r\n") != std::string::npos)
-    throw std::runtime_error("Invalid remote path");
-  std::string out = "\"";
-  for (char c : s) {
-    if (c == '\\' || c == '\"')
-      out += '\\';
-    out += c;
-  }
-  return out + '"';
-}
 // RFC 3659 uses UTC Gregorian dates, regardless of the client's time zone.
 void ParseModify(const std::string &value, FileEntry &entry) {
   constexpr size_t dateLength = 14;
@@ -562,6 +523,7 @@ bool RecheckFtpListingEntry(const Location &location, FileEntry &current,
 }
 
 bool NetworkAvailable(const std::string &s) {
+  // libssh2 is a linked package dependency; SFTP additionally needs curl for TCP.
   return s == "smb" ? SMB().Available() : Curl().Available();
 }
 std::vector<FileEntry> ListNetwork(const Location &l,
@@ -570,6 +532,8 @@ std::vector<FileEntry> ListNetwork(const Location &l,
   if (method)
     *method = ListingMethod::Provider;
   c.Check();
+  if (l.scheme == "sftp")
+    return ListSftp(l, c);
   std::vector<FileEntry> out;
   if (l.scheme == "smb") {
     SMBSession s(l, c);
@@ -639,24 +603,17 @@ std::vector<FileEntry> ListNetwork(const Location &l,
       throw;
     }
     // libcurl can accept a 450 list rejection as an empty directory.
-    if (l.scheme != "sftp") {
-      long reply = 0;
-      LIBCALL(s.lib, curl_easy_getinfo)(s.curl, CURLINFO_RESPONSE_CODE, &reply);
-      if (reply >= 400)
-        throw std::runtime_error("FTP listing failed (reply " +
-                                 std::to_string(reply) + ").");
-    }
+    long reply = 0;
+    LIBCALL(s.lib, curl_easy_getinfo)(s.curl, CURLINFO_RESPONSE_CODE, &reply);
+    if (reply >= 400)
+      throw std::runtime_error("FTP listing failed (reply " + std::to_string(reply) + ").");
     return true;
   };
-  if (l.scheme == "sftp") {
+  mlsd = fetch("MLSD");
+  if (!mlsd && !fetch("LIST -a"))
     fetch(nullptr);
-  } else {
-    mlsd = fetch("MLSD");
-    if (!mlsd && !fetch("LIST -a"))
-      fetch(nullptr);
-    if (method)
-      *method = mlsd ? ListingMethod::FtpMlsd : ListingMethod::FtpList;
-  }
+  if (method)
+    *method = mlsd ? ListingMethod::FtpMlsd : ListingMethod::FtpList;
   std::istringstream lines(listing);
   std::string line;
   while (std::getline(lines, line)) {
@@ -674,6 +631,8 @@ std::vector<FileEntry> ListNetwork(const Location &l,
 bool StatNetwork(const Location &l, FileEntry &e, const TransferControl &c,
                  const FileEntry *discovered) {
   c.Check();
+  if (l.scheme == "sftp")
+    return StatSftp(l, e, c);
   if (l.scheme == "smb") {
     SMBSession s(l, c);
     return s.Stat(l, e);
@@ -705,42 +664,21 @@ bool StatNetwork(const Location &l, FileEntry &e, const TransferControl &c,
           throw std::runtime_error("FTP server did not confirm the state of this name: " + url);
         return result == FtpLookup::Found;
       }
-      // SFTP listing names may differ from the spelling the server resolves.
-      // A successful NOBODY request proves the name resolves, but cannot
-      // supply its directory/link type. Do not invent that metadata.
       CurlSession probe(l, c);
       probe.Set(CURLOPT_NOBODY, 1L);
       if (probe.Perform(true) == CURLE_REMOTE_FILE_NOT_FOUND)
         return false;
-      throw std::runtime_error("SFTP name resolves but its entry type is not verified: " + url);
+      throw std::runtime_error("Remote name resolves but its entry type is not verified: " + url);
     }
     entry = std::move(*item);
-  }
-  if (l.scheme == "sftp" && !entry.directory && !entry.link) {
-    // Curl derives this from SFTP STAT; NOBODY avoids transferring the
-    // file. It may still open it for reading, so a denied probe can
-    // leave metadata unknown without invalidating the listing.
-    CurlSession s(l, c);
-    s.Set(CURLOPT_NOBODY, 1L);
-    s.Set(CURLOPT_FILETIME, 1L);
-    auto result = s.Perform(true, true);
-    if (result == CURLE_REMOTE_FILE_NOT_FOUND)
-      return false;
-    curl_off_t modified = -1;
-    // Some curl SSH backends expose an absent SFTP time as zero, like
-    // an explicit epoch. Do not guess which applies.
-    if (result == CURLE_OK &&
-        LIBCALL(s.lib, curl_easy_getinfo)(s.curl, CURLINFO_FILETIME_T,
-                                          &modified) == CURLE_OK &&
-        modified > 0) {
-      entry.SetModification(modified, 0);
-    }
   }
   e = std::move(entry);
   return true;
 }
 void ReadNetwork(const Location &l, const DataSink &sink,
                  const TransferControl &c) {
+  if (l.scheme == "sftp")
+    return ReadSftp(l, sink, c);
   if (l.scheme == "smb") {
     SMBSession s(l, c);
     SMBHandle f(s, l, false, O_RDONLY);
@@ -771,6 +709,8 @@ void ReadNetwork(const Location &l, const DataSink &sink,
 }
 void UploadNetwork(const std::string &local, const Location &l,
                    const TransferControl &c) {
+  if (l.scheme == "sftp")
+    return UploadSftp(local, l, c);
   int fd = open(local.c_str(), O_RDONLY | O_NOFOLLOW);
   if (fd < 0)
     Error("Open upload source");
@@ -823,6 +763,8 @@ void UploadNetwork(const std::string &local, const Location &l,
 void ChangeNetwork(const Location &l, const char *action,
                    const std::string &destination, const TransferControl &c) {
   c.Check();
+  if (l.scheme == "sftp")
+    return ChangeSftp(l, action, destination, c);
   std::string a = action;
   if (l.scheme == "smb") {
     SMBSession s(l, c);
@@ -853,16 +795,7 @@ void ChangeNetwork(const Location &l, const char *action,
   root.path = "/";
   s.Set(CURLOPT_URL, root.URL().c_str());
   s.Set(CURLOPT_NOBODY, 1L);
-  if (l.scheme == "sftp") {
-    std::string verb = a == "mkdir"    ? "mkdir"
-                       : a == "rmdir"  ? "rmdir"
-                       : a == "remove" ? "rm"
-                                       : "rename";
-    auto command = verb + " " + QuoteSFTP(l.path);
-    if (a == "rename")
-      command += " " + QuoteSFTP(ParseLocation(destination).path);
-    s.Command(command);
-  } else {
+  {
     // A single slash after the FTP authority in a curl URL denotes the
     // login directory, not the server's filesystem root. QUOTE commands
     // must address the same entry that listing and transfer showed.

@@ -178,6 +178,16 @@ class MetadataFTP(FTPHandler):
 
 
 class Auth(paramiko.ServerInterface):
+    def __init__(self, client_key):
+        self.client_key = client_key
+
+    def get_allowed_auths(self, username):
+        return "publickey" if username == "key-test" else "password"
+
+    def check_auth_publickey(self, username, key):
+        return (paramiko.AUTH_SUCCESSFUL if username == "key-test" and key == self.client_key
+                else paramiko.AUTH_FAILED)
+
     def check_auth_password(self, username, password):
         return (paramiko.AUTH_SUCCESSFUL if (username, password) == (USER, PASSWORD)
                 else paramiko.AUTH_FAILED)
@@ -200,11 +210,15 @@ class MetadataSFTP(paramiko.SFTPServerInterface):
         super().__init__(server)
         self.root = root
 
-    def resolve(self, path):
-        candidate = (self.root / path.lstrip("/")).resolve()
+    def resolve(self, path, *, follow=True):
+        candidate = self.root / path.lstrip("/")
+        if follow or candidate == self.root:
+            candidate = candidate.resolve()
+        else:
+            candidate = candidate.parent.resolve() / candidate.name
         if candidate.parent.name == "aliases" and candidate.name == "report":
             candidate = candidate.with_name("Report")
-        if not candidate.is_relative_to(self.root):
+        if candidate.name == ".." or not candidate.is_relative_to(self.root):
             raise PermissionError(13, "Outside fixture")
         return candidate
 
@@ -213,16 +227,22 @@ class MetadataSFTP(paramiko.SFTPServerInterface):
         try:
             entries = []
             for child in self.resolve(path).iterdir():
-                entries.append(ListAttributes.from_stat(child.stat(), child.name))
+                entries.append(ListAttributes.from_stat(child.lstat(), child.name))
             return entries
         except OSError as error:
             return paramiko.SFTPServer.convert_errno(error.errno)
 
     def stat(self, path):
-        count_probe("SFTP-STAT", path)
+        return self.attributes(path, follow=True)
+
+    def lstat(self, path):
+        return self.attributes(path, follow=False)
+
+    def attributes(self, path, *, follow):
+        count_probe("SFTP-STAT" if follow else "SFTP-LSTAT", path)
         try:
-            local = self.resolve(path)
-            item = paramiko.SFTPAttributes.from_stat(local.stat())
+            local = self.resolve(path, follow=follow)
+            item = paramiko.SFTPAttributes.from_stat(local.stat(follow_symlinks=follow))
             if local.name == "unknown":
                 item.st_mtime = None
                 item.st_atime = None
@@ -328,6 +348,14 @@ def main():
 
     sftp_root = staging / "sftp"
     (sftp_root / "signals").mkdir(parents=True)
+    scope = sftp_root / "scope"
+    selected = scope / "top"
+    selected.mkdir(parents=True)
+    for i in range(8):
+        name = f"entry-{i}"
+        (selected / name).write_text(name)
+    os.mkfifo(scope / "unselected-pipe")
+    (scope / "link").symlink_to("top/entry-0")
     MetadataFTP.cancel_signal = sftp_root / "signals" / "checking-upload"
     private = sftp_root / "Private"
     private.mkdir(mode=0o700)
@@ -365,13 +393,21 @@ def main():
     key = paramiko.RSAKey.generate(2048)
     (staging / "known_hosts").write_text(f"[{ADDRESS}]:2227 {key.get_name()} {key.get_base64()}\n")
 
+    wrong_key = paramiko.RSAKey.generate(2048)
+    (staging / "wrong_known_hosts").write_text(
+        f"[{ADDRESS}]:2227 {wrong_key.get_name()} {wrong_key.get_base64()}\n")
+
+    client_key = paramiko.RSAKey.generate(2048)
+    client_key.write_private_key_file(str(staging / "client.pem"), password="fixture-passphrase")
+    (staging / "client.pem.pub").write_text(f"{client_key.get_name()} {client_key.get_base64()}\n")
+
     class SFTPConnection(socketserver.BaseRequestHandler):
         def handle(self):
             with paramiko.Transport(self.request) as transport:
                 transport.add_server_key(key)
                 transport.set_subsystem_handler("sftp", paramiko.SFTPServer,
                                                 MetadataSFTP, root=sftp_root)
-                transport.start_server(server=Auth())
+                transport.start_server(server=Auth(client_key))
                 while transport.is_active():
                     transport.join(timeout=0.1)
 

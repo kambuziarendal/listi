@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+#include "SftpCopyTest.h"
 #include "ReadWorker.h"
 #include "ApplicationServices.h"
 #include "FolderHistory.h"
@@ -365,6 +366,8 @@ namespace Listi {
 int VirtualTest(const std::string &, const std::string &);
 }
 int main(int argc, char **argv) {
+  if (argc == 5 && !strcmp(argv[1], "--sftp-copy-test"))
+    return Listi::SftpCopyTest(argv[2], argv[3], argv[4]);
   if (argc == 4 && !strcmp(argv[1], "--virtual-test"))
     return Listi::VirtualTest(argv[2], argv[3]);
   if (argc > 1 && !strcmp(argv[1], "--self-test"))

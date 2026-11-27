@@ -643,6 +643,12 @@ by path, not by identity: a receipt confirms the request, not that a concurrent
 replacement was impossible. Direct FTP/FTPS Rename and Move are
 refused because those protocols cannot safely preserve a competing target.
 
+An SFTP transfer reuses its authenticated connection for the job, not the
+metadata returned by earlier requests. It checks the named entry without
+following its final symlink. It still enumerates a selected directory to
+verify its contents; a special file outside that directory is not part of
+the copy.
+
 For SFTP, open **Connect** and enter the address and username. Under **Advanced**,
 **SSH private key** defaults to the first readable `id_ed25519`, `id_ecdsa` or
 `id_rsa` in Haiku’s `~/config/settings/ssh/` directory, then `~/.ssh/`. For a custom login key, enter

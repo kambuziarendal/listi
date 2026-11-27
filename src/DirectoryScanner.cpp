@@ -315,6 +315,7 @@ public:
             throw;
           } catch (const std::exception &) {}
         }
+        control.listingWarning = &inspectionWarning;
         std::string fingerprint;
         auto entries = location.Archive() ? Listi::ListArchiveView(location, control, fingerprint)
                                           : Listi::ListFiles(path.String(), control);

@@ -18,6 +18,7 @@ requires {
  lib:libstdc++
  lib:libgcc_s
  lib:libcurl
+ lib:libssh2
  lib:libsmbclient
  lib:libsqlite3
  cmd:pdftoppm

@@ -69,6 +69,57 @@ Result Copy(const std::string &source, const std::string &destination,
   FreezeLocalJob(job, destination);
   return Run(job, hooks);
 }
+// Run in a fresh process per account. Credentials cannot be rebound for an
+// authority already used in this process, including between queued jobs.
+void CheckSftpAuthentication(const std::string &server, const std::string &local,
+                             const std::string &mode, Connection auth) {
+  const bool key = mode == "key" || mode == "wrong-passphrase";
+  const bool success = mode == "password" || mode == "key" || mode == "change-pin";
+  if (!success && mode != "wrong-password" && mode != "wrong-host" && mode != "wrong-passphrase")
+    throw std::runtime_error("Invalid SFTP authentication test case");
+  if (key) {
+    auth.username = "key-test";
+    auth.password.clear();
+    const char *path = getenv("LISTI_METADATA_CLIENT_KEY");
+    Expect(path && *path, "provided disposable encrypted client key");
+    auth.privateKey = path;
+    auth.keyPassphrase = mode == "key" ? "fixture-passphrase" : "incorrect";
+  }
+  if (mode == "wrong-password")
+    auth.password = "incorrect";
+  const std::string validHosts = auth.knownHosts;
+  if (mode == "change-pin") {
+    auth.knownHosts = local + "/known_hosts";
+    std::filesystem::copy_file(validHosts, auth.knownHosts);
+  }
+  Expect(SetConnection(server, auth), "configured fixture authority");
+  auto other = auth;
+  other.username = "other-account";
+  Expect(!SetConnection(server, other), "existing authority rejects a different account");
+  const auto selected = ChildLocation(server, "known");
+  const auto destination = local + "/known";
+  auto verify = [&](bool expected) {
+    const auto copied = Copy(selected, local);
+    if (expected)
+      Expect(copied.completed == 1 && copied.errors.empty() &&
+                 Read(destination) == "fixture contents\n", "verified and authenticated SFTP delivery");
+    else
+      Expect(!copied.completed && !copied.errors.empty() && !std::filesystem::exists(destination),
+             "rejected credentials or host key did not publish or report success");
+  };
+  verify(success);
+  if (mode == "change-pin") {
+    const char *wrongHosts = getenv("LISTI_METADATA_WRONG_HOSTS");
+    Expect(wrongHosts && *wrongHosts, "provided a different fixture host key");
+    std::filesystem::remove(destination);
+    std::filesystem::copy_file(wrongHosts, auth.knownHosts,
+                               std::filesystem::copy_options::overwrite_existing);
+    verify(false);
+    std::filesystem::copy_file(validHosts, auth.knownHosts,
+                               std::filesystem::copy_options::overwrite_existing);
+    verify(true);
+  }
+}
 void CheckVisibleOnlyWindow(const std::string &remote, const std::string &local) {
   auto window = OpenFolderCompare(remote, local);
   Expect(window != nullptr, "opened the FTP comparison window");
@@ -208,6 +259,33 @@ void CheckPrivateDownload(const std::string &sftp, const std::string &local) {
   Expect(!blocked.completed && !blocked.errors.empty() && mode(root) == 0755 &&
              Read(root + "/original") == "unrelated" && mode(root + "/inner") < 0,
          "a pre-existing more accessible target is neither populated nor chmodded");
+}
+void CheckRecursiveRevision(const std::string &server, const std::string &local) {
+  const auto target = local + "/recursive";
+  std::filesystem::create_directory(target);
+  chmod(target.c_str(), 0700);
+  const auto destination = target + "/changed";
+  std::ofstream(destination) << "original destination";
+  const auto folder = ChildLocation(server, "recursive");
+  const auto before = Stat(folder, "changed");
+  int delivered = 0;
+  Hooks hooks;
+  hooks.conflict = [](const auto &) { return Decision::Replace; };
+  hooks.fileDone = [&](const auto &, const auto &) { ++delivered; };
+  const auto result = Copy(folder, local, hooks);
+  const auto after = Stat(folder, "changed");
+  Expect(before.modifiedKnown && after.modifiedKnown && before.size == after.size &&
+             !before.SameModification(after) && !result.completed && !delivered &&
+             std::any_of(result.errors.begin(), result.errors.end(), [](const auto &message) {
+               return message.find("Source changed") != std::string::npos;
+             }) && Read(destination) == "original destination",
+         server + " recursive copy uses fresh post-read metadata");
+  if (ParseLocation(server).scheme == "sftp") {
+    auto retry = Copy(folder, local, hooks);
+    const std::string expected = std::string(2 * 1024 * 1024 - 1, 'd') + 'x';
+    Expect(retry.completed == 1 && retry.errors.empty() && Read(destination) == expected,
+           "retry after source revision change delivers the current file bytes");
+  }
 }
 void CheckSftpAlias(const std::string &sftp) {
   const auto folder = ChildLocation(sftp, "aliases");
@@ -371,14 +449,27 @@ int main() {
   auth.username = "listitest";
   auth.password = "fixture-only";
   auth.knownHosts = knownHosts;
-  SetConnection(ftp, auth);
-  SetConnection(sftp, auth);
   char pattern[] = "/tmp/Listi-network-metadata-XXXXXX";
   if (!mkdtemp(pattern))
     return 2;
   const std::string local = pattern;
   int status = 0;
   try {
+    if (const char *mode = std::getenv("LISTI_SFTP_AUTH_CASE")) {
+      CheckSftpAuthentication(sftp, local, mode, auth);
+      std::filesystem::remove_all(local);
+      return 0;
+    }
+    SetConnection(ftp, auth);
+    SetConnection(sftp, auth);
+    if (std::getenv("LISTI_SFTP_TRANSFER_ONLY")) {
+      CheckSftpAlias(sftp);
+      CheckPrivateDownload(sftp, local);
+      CheckRecursiveRevision(sftp, local);
+      Expect(!Stat(sftp, "unknown").modifiedKnown, "absent SFTP mtime is not an epoch");
+      std::filesystem::remove_all(local);
+      return 0;
+    }
     if (const auto size = std::getenv("LISTI_NETWORK_SCALING")) {
       const int n = std::stoi(size);
       Expect(n == 4 || n == 8 || n == 16 || n == 32, "known scaling fixture size");
@@ -496,7 +587,7 @@ int main() {
 
     const auto sftpKnown = Stat(sftp, "known");
     Expect(sftpKnown.modifiedKnown && sftpKnown.modified == modified,
-           "SFTP curl STAT reports the server timestamp");
+           "SFTP lookup reports the server timestamp");
     Expect(!Stat(sftp, "unknown").modifiedKnown,
            "SFTP missing STAT timestamp stays unknown");
     std::ofstream(local + "/tightens") << "original";
@@ -525,26 +616,8 @@ int main() {
     Expect(compare.complete && compare.different == 0 && compare.verified == 1,
            "SFTP folder comparison verifies content with before/after STAT");
 
-    std::filesystem::create_directory(local + "/recursive");
-    chmod((local + "/recursive").c_str(), 0700);
-    const auto destination = local + "/recursive/changed";
-    for (const auto &server : {ftp, sftp}) {
-      std::ofstream(destination) << "original destination";
-      const auto folder = ChildLocation(server, "recursive");
-      const auto beforeChild = Stat(folder, "changed");
-      const auto result = copy(server, "recursive");
-      const auto afterChild = Stat(folder, "changed");
-      Expect(beforeChild.modifiedKnown && afterChild.modifiedKnown &&
-                 beforeChild.size == afterChild.size &&
-                 !beforeChild.SameModification(afterChild) &&
-                 !result.errors.empty() &&
-                 std::any_of(result.errors.begin(), result.errors.end(), [](const auto &message) {
-                   return message.find("Source changed") != std::string::npos;
-                 }) &&
-                 completed == 3 && notified == 3 &&
-                 Read(destination) == "original destination",
-             server + " recursive copy uses fresh post-read metadata");
-    }
+    for (const auto &server : {ftp, sftp})
+      CheckRecursiveRevision(server, local);
   } catch (const std::exception &error) {
     std::cerr << "FAIL " << error.what() << std::endl;
     status = 1;

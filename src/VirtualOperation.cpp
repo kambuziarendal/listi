@@ -160,7 +160,8 @@ struct Runner {
   // while traversing that subtree. Never cache a listing without an identity.
   std::map<std::string, RemoteDirectory> remoteDirectories;
   std::string unverifiedDirectory;
-  void VerifyRemoteDirectories(const TransferControl &control) {
+  void VerifyRemoteDirectories(TransferControl control) {
+    control.requireExactName = true;
     for (auto &[path, expected] : remoteDirectories) {
       FileEntry current;
       if (!StatFile(path, current, control) || !current.directory || current.link ||
@@ -338,6 +339,7 @@ struct Runner {
     if (!hooks.privateStaging)
       RecordOutcome({selectedSource, dst, "partial", detail});
   }
+  SftpSessions sftpSessions;
   TransferControl Control(const std::string &p, bool bytes = true) {
     const auto version = job.expectedArchiveSets.empty() ? job.expectedArchiveSets.end()
         : job.expectedArchiveSets.find(ParseLocation(p).archive);
@@ -348,7 +350,7 @@ struct Runner {
             [&, p, bytes](uint64_t n) {
               if (hooks.progress)
                 hooks.progress(p, bytes ? n : 0);
-            }, nullptr, version == job.expectedArchiveSets.end() ? nullptr : &version->second};
+            }, nullptr, version == job.expectedArchiveSets.end() ? nullptr : &version->second, nullptr, &sftpSessions};
   }
   uint64_t Stage(const std::string &src, const FileEntry &expected, TempFile &temp,
              const TransferControl &control, Sha256 *digest = nullptr) {
@@ -842,7 +844,7 @@ struct Runner {
         if (hooks.proceed && !hooks.proceed())
           result.cancelled = true;
         return !result.cancelled;
-      }, {}, &budget};
+      }, {}, &budget, nullptr, nullptr, &sftpSessions};
       // No network work after explicit cancellation. SMB's synchronous library
       // and session lock have no total deadline; defer its recovery on error.
       const auto provider = ParseLocation(dst);
@@ -1036,6 +1038,7 @@ struct Runner {
     if (depth > 128 || ++visited > 200000)
       throw std::runtime_error("Folder tree exceeds deletion limit");
     auto c = Control(p);
+    c.requireExactName = true;
     c.Check();
     FileEntry e;
     if (!StatFile(p, e, c))

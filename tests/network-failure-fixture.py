@@ -160,7 +160,14 @@ class SFTP(paramiko.SFTPServerInterface):
  def stat(self,path):
   try:return paramiko.SFTPAttributes.from_stat(os.stat(self.local(path)))
   except OSError as e:return paramiko.SFTPServer.convert_errno(e.errno)
- lstat=stat
+ def lstat(self,path):
+  try:
+   # Resolve the parent inside the fixture, but inspect the named leaf itself.
+   entry=pathlib.PurePosixPath(path)
+   if entry.name == '..':return paramiko.SFTP_PERMISSION_DENIED
+   local=pathlib.Path(self.local(str(entry.parent)))/entry.name
+   return paramiko.SFTPAttributes.from_stat(local.lstat())
+  except OSError as e:return paramiko.SFTPServer.convert_errno(e.errno)
  def open(self,path,flags,attr):
   try:
    fd=os.open(self.local(path),flags,0o600);f=os.fdopen(fd,'r+b' if flags&os.O_RDWR else 'wb' if flags&os.O_WRONLY else 'rb');h=paramiko.SFTPHandle(flags);h.readfile=f;h.writefile=f

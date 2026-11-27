@@ -12,6 +12,7 @@
 #include <Node.h>
 #include <String.h>
 #include <TypeConstants.h>
+#include <cerrno>
 #include <cstdlib>
 #include <cstring>
 #include <fs_attr.h>
@@ -161,6 +162,46 @@ bool TestSftpFolderAccess(const std::string &root, bool existing) {
          !stat(delivered.c_str(), &file) && (file.st_mode & 0777) == 0644 && bytes == first &&
          access(missing.c_str(), F_OK) != 0 && (!existing || prior == "unrelated");
 }
+void TestSftpSelectionScope(const std::string &root) {
+  const auto base = std::string("sftp://127.0.0.1:2227/scope");
+  const auto source = ChildLocation(base, "top");
+  const auto dest = Join(root, "top");
+  const Job job{Action::Copy, {source}, root};
+  std::string first;
+  Hooks hooks;
+  hooks.fileDone = [&](const auto &from, const auto &) { first = LocationLeaf(from); };
+  hooks.proceed = [&] { return first.empty(); };
+  auto result = Run(job, hooks);
+  if (!result.cancelled || result.completed || result.partialCopies != 1 || first.empty())
+    throw std::runtime_error("Expected a cancelled tree after its first delivered file");
+  const auto children = ListFiles(dest);
+  auto bytes = [](const std::string &path) {
+    std::ifstream f(path, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(f), {});
+  };
+  if (children.size() != 1 || children.front().name != first ||
+      bytes(children.front().path) != first)
+    throw std::runtime_error("Cancelled tree differs from the first delivery");
+  Hooks retry;
+  retry.conflict = [](const auto &) { return Decision::Replace; };
+  result = Run(job, retry);
+  if (result.completed != 1 || !result.errors.empty() || ListFiles(dest).size() != 8)
+    throw std::runtime_error("Unselected sibling affected the copied tree or its retry");
+  for (int i = 0; i != 8; ++i) {
+    const auto name = "entry-" + std::to_string(i);
+    if (bytes(Join(dest, name)) != name)
+      throw std::runtime_error("Wrong bytes after SFTP retry: " + name);
+  }
+  FileEntry link;
+  const auto linkPath = ChildLocation(base, "link");
+  if (!StatFile(linkPath, link) || !link.link)
+    throw std::runtime_error("SFTP lookup did not identify a symbolic link");
+  result = Run({Action::Copy, {linkPath}, root}, {});
+  struct stat st{};
+  if (result.completed || result.errors.empty() ||
+      lstat(Join(root, "link").c_str(), &st) == 0 || errno != ENOENT)
+    throw std::runtime_error("SFTP link was followed or reported as copied");
+}
 } // namespace
 int SelfTest() {
   char pattern[] = "/boot/home/Listi-test-XXXXXX";
@@ -180,9 +221,11 @@ int SelfTest() {
       check(TestLoopbackSftpMode(root, hosts), "loopback SFTP chmod during download and private retry");
       check(TestSftpFolderAccess(root, true), "SFTP access change stops existing-folder merge after first receipt");
       check(TestSftpFolderAccess(root, false), "SFTP access change leaves a new partial folder private");
+      TestSftpSelectionScope(root);
+      check(true, "SFTP cancellation, retry, unselected FIFO and non-followed link");
     } catch (const std::exception &e) {
       std::cerr << e.what() << std::endl;
-      check(false, "loopback SFTP chmod during download and private retry");
+      check(false, "loopback SFTP acceptance");
     }
   }
   if (getenv("LISTI_TEST_FTP_AUDIT")) {
