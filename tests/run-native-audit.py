@@ -36,10 +36,11 @@ audit-io theme-text connection-defaults ssh-key-format folder-history
 """.split()
 
 WRAPS = {
-    "archive-panel-version": ["opendir", "_Z20PostMainWindowNoticePKc"],
+    "archive-editor": ["_ZNK7BRoster6LaunchEPK9entry_refPK8BMessagePi"],
+    "archive-panel-version": ["_ZNK8BMessage10WasDroppedEv", "opendir", "_Z20PostMainWindowNoticePKc"],
     "archive-copy-inputs": ["openat", "write", "close"],
     "virtual-operation-faults": ["openat", "write", "close"],
-    "archive-jobs": ["_ZNK8BMessage7FindRefEPKciP9entry_ref"],
+    "archive-jobs": ["_ZNK8BMessage7FindRefEPKciP9entry_ref", "pread"],
     "transfer-preflight": ["opendir", "readdir", "closedir"],
     "disk-actions": ["_ZN8BMessage8AddInt64EPKcl"],
     "pane-search-list": ["lstat"],
@@ -71,6 +72,38 @@ WRAPS = {
     "folder-compare": ['opendir'],
     "properties-faults": ['_ZN5BNode9WriteAttrEPKcjlPKvm', '_ZN5BNode4SyncEv', '_ZN8BMessage9AddStringEPKcS1_', 'fsync'],
 }
+
+
+def run_hardlink_case(binary, name, seed):
+    # Only mount a private copy; these tests deliberately rename/delete links.
+    # Never recursively remove a directory if unmount or unregister failed.
+    scratch = Path(tempfile.mkdtemp(prefix="listi-hardlinks-"))
+    mountpoint, image = scratch / "volume", scratch / "hardlinks.img"
+    mountpoint.mkdir()
+    shutil.copyfile(seed, image)
+    registration = subprocess.check_output(["diskimage", "register", image], text=True)
+    match = re.search(r'"(/dev/disk/virtual/files/[0-9]+/raw)"', registration)
+    try:
+        if not match:
+            raise RuntimeError(f"Cannot identify hard-link image device: {registration}")
+        subprocess.run(["mount", "-t", "ext2", match[1], mountpoint], check=True)
+        try:
+            env = os.environ.copy()
+            if name == "archive-copy-inputs":
+                env["LISTI_ARCHIVE_ALIAS_DIR"] = str(mountpoint / "archive-aliases")
+            else:
+                env["LISTI_DELETE_HARDLINK_FIXTURE"] = str(mountpoint / "deletion")
+                env["LISTI_HARDLINK_TEST_PAIR"] = str(mountpoint / "move-pair")
+            subprocess.run([binary], cwd=ROOT, check=True, timeout=90, env=env)
+        finally:
+            subprocess.run(["unmount", mountpoint], check=True)
+    finally:
+        if os.path.ismount(mountpoint):
+            raise RuntimeError(f"Hard-link image still mounted at {mountpoint}")
+        subprocess.run(["diskimage", "unregister", image], check=True)
+        mountpoint.rmdir()
+        image.unlink()
+        scratch.rmdir()
 
 
 def run_disk_actions(binary):
@@ -393,7 +426,9 @@ def run():
             *(f"-Wl,--wrap={symbol}" for symbol in WRAPS.get(name, [])),
             "-o", binary,
         ], cwd=SRC, check=True)
-        if name == "disk-actions" and not os.environ.get("LISTI_TEST_DISK_DEVICE"):
+        if name in ("archive-copy-inputs", "file-operation-faults") and os.getenv("LISTI_QUALIFICATION_LINK_IMAGE"):
+            run_hardlink_case(binary, name, os.environ["LISTI_QUALIFICATION_LINK_IMAGE"])
+        elif name == "disk-actions" and not os.environ.get("LISTI_TEST_DISK_DEVICE"):
             run_disk_actions(binary)
         elif name == "tar-edit-ownership":
             run_tar_edit_ownership(binary)

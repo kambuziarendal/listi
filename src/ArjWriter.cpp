@@ -347,7 +347,7 @@ void ArjWrite(int output, const std::vector<std::string> &sources,
   frozen.Verify();
 }
 
-void ArjValidateEdit(int input) {
+void ArjValidateEdit(int input, const Hooks &hooks) {
   struct stat st;
   Require(fstat(input, &st) == 0 && S_ISREG(st.st_mode),
           "Cannot inspect the ARJ archive for editing.");
@@ -355,6 +355,8 @@ void ArjValidateEdit(int input) {
       "Only single-volume ARJ archives with the portable headers written by Listi can be edited.";
   off_t at = 0;
   while (at < st.st_size) {
+    if (hooks.proceed && !hooks.proceed())
+      throw Cancelled();
     unsigned char prefix[4];
     ReadAt(input, prefix, sizeof(prefix), at);
     const auto basic = Get(prefix + 2, 2);

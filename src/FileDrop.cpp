@@ -2,7 +2,8 @@
 #include "TransferCommand.h"
 #include "FileDrop.h"
 #include "JobSnapshot.h"
-#include "PaneModel.h"
+#include "Pane.h"
+#include <Window.h>
 #include "FileClipboard.h"
 #include "VirtualFile.h"
 #include <algorithm>
@@ -17,6 +18,7 @@
 #include <cstdlib>
 namespace Listi {
 namespace {
+constexpr const char *kDestinationVersion = "listi:destination-archive-version";
 constexpr const char *kArchiveSelection = "listi:archive-selection";
 constexpr const char *kRemoteSelection = "listi:remote-selection";
 constexpr const char *kSelection = "listi:drag-selection";
@@ -94,6 +96,24 @@ BMessage MakePaneFileDrag(const PaneModel &model) {
   }
   return drag;
 }
+void PostPaneFileDrop(Pane &pane, const PaneModel &receiver, const BMessage &drag,
+                      const std::string &destination) {
+  try {
+    Job view;
+    receiver.BindArchiveView(view, destination);
+    BMessage drop(drag);
+    drop.what = kDrop;
+    // Destination fields belong to the receiver, never the drag source.
+    drop.RemoveName("destination");
+    drop.RemoveName(kDestinationVersion);
+    Require(drop.AddString("destination", destination.c_str()));
+    if (!view.expectedArchiveSets.empty())
+      Require(drop.AddString(kDestinationVersion, receiver.archiveVersion.c_str()));
+    Require(pane.Window()->PostMessage(&drop));
+  } catch (const std::exception &error) {
+    pane.ShowStatus(error.what());
+  }
+}
 Job PrepareFileDrop(const BMessage &message, const std::string &destination,
                     bool allowSameFolder, std::string *missingLeaf) {
   if (missingLeaf)
@@ -144,6 +164,13 @@ Job PrepareFileDrop(const BMessage &message, const std::string &destination,
       job.sources.push_back(item.path);
       job.expectedSources.emplace(item.path, item.node);
     }
+  }
+  const auto target = ParseLocation(destination);
+  if (target.Archive() && message.what == kDrop) {
+    const auto shown = message.GetString(kDestinationVersion, "");
+    if (!shown[0] ||
+        job.expectedArchiveSets.emplace(target.archive, shown).first->second != shown)
+      throw std::runtime_error("Archive destination changed or is incomplete. Reload and select again.");
   }
   if (!destination.empty() && destination[0] == '/') {
     char canonical[PATH_MAX];

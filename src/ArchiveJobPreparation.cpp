@@ -52,13 +52,12 @@ Job PrepareArchiveJob(bool extract, const std::vector<std::string> &sources) {
   return job;
 }
 Job PrepareArchiveEditTarget(const std::string &archive,
-                             const std::string &internalFolder) {
+                             const std::string &internalFolder, const Hooks &hooks) {
   Require(!archive.empty() && archive[0] == '/' && !IsVirtual(archive),
           "Choose one local writable archive.");
   Job job;
   job.action = Action::EditArchive;
   job.destination = archive;
-  job.archiveFormat = DetectArchiveEditFormat(archive, {});
   struct stat archiveStat;
   Require(!lstat(archive.c_str(), &archiveStat) && S_ISREG(archiveStat.st_mode),
           "Archive is unavailable.");
@@ -74,6 +73,8 @@ Job PrepareArchiveEditTarget(const std::string &archive,
           "Archive folder is unavailable.");
   job.expectedDestination = {int32_t(parent.st_dev), int64_t(parent.st_ino)};
   job.archivePath = MemberPath(internalFolder);
+  job.archiveFormat = DetectArchiveEditFormat(archive, hooks);
+  VerifyArchiveSets(job);
   return job;
 }
 void SetArchiveEditAdditions(Job &job, const std::vector<std::string> &add) {
@@ -178,7 +179,15 @@ Job PrepareArchiveMutation(const Job &transfer) {
   if (transfer.action == Action::Move && !transfer.sources.empty() &&
       ParseLocation(transfer.sources.front()).archive != location.archive)
     return PrepareArchiveMove(transfer);
-  auto edit = PrepareArchiveEditTarget(location.archive);
+  return PrepareArchiveMemberChange(transfer, PrepareArchiveEditTarget(location.archive));
+}
+Job PrepareArchiveMemberChange(const Job &transfer, Job edit) {
+  const auto location = ParseLocation(transfer.destination);
+  Require(location.Archive() && edit.action == Action::EditArchive &&
+              edit.destination == location.archive &&
+              edit.expectedArchiveSets.count(location.archive),
+          "The inspected archive target is missing. Reload and try again.");
+  VerifyArchiveSets(edit);
   if (transfer.action == Action::MakeDirectory) {
     edit.archiveFolders.push_back(MemberPath(location.path));
   } else {

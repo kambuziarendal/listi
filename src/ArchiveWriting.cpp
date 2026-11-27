@@ -377,7 +377,7 @@ std::string DetectArchiveEditFormat(const std::string &path,
   }
   if (sevenZipFormat == "arj") {
     Require(ArjCanCreate(), "Install p7zip from HaikuDepot to edit ARJ archives.");
-    ArjValidateEdit(fd.n);
+    ArjValidateEdit(fd.n, hooks);
     return "arj";
   }
   auto arFormat = ArEditFormat(fd.n, path, hooks);

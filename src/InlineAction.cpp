@@ -107,12 +107,15 @@ bool InlineAction::Ask(const char *text, const char *button,
     AddChild(new BMenuField("output format", "Format:", options));
   }
   auto cancel = new BButton("Cancel", "Cancel", new BMessage(Event(kCancel)));
-  auto accept = new BButton(button, new BMessage(Event(kAccept)));
   auto buttons = new BGroupView(B_HORIZONTAL, 8);
   BLayoutBuilder::Group<>(buttons, B_HORIZONTAL, 8)
       .AddGlue()
-      .Add(cancel)
-      .Add(accept);
+      .Add(cancel);
+  if (button) {
+    auto accept = new BButton(button, new BMessage(Event(kAccept)));
+    buttons->AddChild(accept);
+    accept->SetTarget(this);
+  }
   if (alternative) {
     auto alternate = new BButton(alternative, new BMessage(Event(kAlternate)));
     buttons->AddChild(alternate);
@@ -125,7 +128,6 @@ bool InlineAction::Ask(const char *text, const char *button,
   }
   AddChild(buttons);
   cancel->SetTarget(this);
-  accept->SetTarget(this);
   pending = true;
   Show();
   if (name) {

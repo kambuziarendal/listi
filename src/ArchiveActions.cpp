@@ -6,6 +6,8 @@
 #include "JobSnapshot.h"
 #include "Pane.h"
 #include "VirtualFile.h"
+#include "ReadWorker.h"
+#include <MessageRunner.h>
 #include <Entry.h>
 #include <FilePanel.h>
 #include <Path.h>
@@ -15,7 +17,40 @@
 
 namespace Listi {
 
+// Only the reader writes target/error, published by done. It owns no views;
+// retiring a blocked device read only revokes its ticket.
+struct ArchiveInspection {
+  Job command, target;
+  BMessenger pane;
+  int64 revision;
+  std::string archive, folder, error;
+  std::atomic<bool> cancelled{false}, done{false};
+};
 namespace {
+constexpr uint32 kReadArchiveFormat = 'arif';
+class FormatReader : public ReadWorker {
+  std::shared_ptr<ArchiveInspection> task;
+public:
+  explicit FormatReader(std::shared_ptr<ArchiveInspection> task)
+      : ReadWorker("archive format reader"), task(std::move(task)) {}
+  void MessageReceived(BMessage *message) override {
+    if (message->what != kReadArchiveFormat) {
+      ReadWorker::MessageReceived(message);
+      return;
+    }
+    try {
+      Hooks hooks;
+      hooks.proceed = [this] { return !task->cancelled.load(); };
+      task->target = PrepareArchiveEditTarget(task->archive, task->folder, hooks);
+      ArchiveJobChecks::RequireArchiveVersions(task->command, task->target);
+      ArchiveJobChecks::Guards(task->command);
+    } catch (const std::exception &e) {
+      task->error = e.what();
+    }
+    task->done = true;
+  }
+};
+
 void RequireScannedSources(const Pane &pane, const Job &job) {
   Job view;
   pane.ExportModel().BindArchiveView(view, pane.Path());
@@ -33,7 +68,69 @@ void RequireScannedSources(const Pane &pane, const Job &job) {
 } // namespace
 
 ArchiveActions::ArchiveActions() = default;
-ArchiveActions::~ArchiveActions() = default;
+ArchiveActions::~ArchiveActions() { CancelInspection(); }
+
+void ArchiveActions::CancelInspection() {
+  if (inspection) inspection->cancelled = true;
+  inspection.reset();
+  timer.reset();
+  RetireReadWorker(reader);
+}
+
+void ArchiveActions::Inspect(const Pane &source, BMessenger owner, Job command,
+                             const std::string &archive, const std::string &folder) {
+  CancelInspection();
+  if (source.SelectionRevision() < 0)
+    throw std::runtime_error("Wait for the folder to load and try again.");
+  source.ExportModel().BindArchiveView(command, source.Path());
+  ArchiveJobChecks::VerifyArchiveSets(command);
+  auto task = std::make_shared<ArchiveInspection>();
+  task->pane = BMessenger(&source);
+  task->revision = source.SelectionRevision();
+  task->command = std::move(command);
+  task->archive = archive;
+  task->folder = folder;
+  BMessage tick(kArchiveInspectionTick);
+  RequireJobField(tick.AddInt64("request", ++requestId));
+  inspection = task;
+  timer = std::make_unique<BMessageRunner>(owner, &tick, 75000);
+  reader = new FormatReader(task);
+  if (!StartReadWorker(reader) || timer->InitCheck() != B_OK ||
+      reader->PostMessage(kReadArchiveFormat) != B_OK) {
+    CancelInspection();
+    throw std::runtime_error("Could not inspect the archive. Try again.");
+  }
+}
+
+bool ArchiveActions::InspectionTick(const BMessage &message) const {
+  return inspection && message.GetInt64("request", -1) == requestId;
+}
+
+bool ArchiveActions::PollInspection(const Pane &source, Job &command, Job &target) {
+  auto task = inspection;
+  if (source.IsHidden() || task->pane != BMessenger(&source) ||
+      source.SelectionRevision() != task->revision) {
+    CancelInspection();
+    return false;
+  }
+  if (!task->done)
+    return false;
+  CancelInspection();
+  if (!task->command.sources.empty() && source.Selected() != task->command.sources)
+    return false;
+  if (!task->error.empty())
+    throw std::runtime_error(task->error);
+  ArchiveJobChecks::VerifyArchiveSets(task->target);
+  ArchiveJobChecks::Guards(task->target);
+  command = std::move(task->command);
+  target = std::move(task->target);
+  return true;
+}
+
+void ArchiveActions::InspectNamedChange(const Pane &source, BMessenger owner, Job command) {
+  const auto location = ParseLocation(command.destination);
+  Inspect(source, owner, std::move(command), location.archive, "/");
+}
 
 void ArchiveActions::ShowJobWindow(bool extract, const Pane &source,
                                    const Pane &destination, BMessenger owner) {
@@ -52,6 +149,8 @@ void ArchiveActions::ShowJobWindow(bool extract, const Pane &source,
 }
 
 void ArchiveActions::ShowAddPicker(const Pane &source, BMessenger owner) {
+  Job command;
+  command.action = Action::EditArchive;
   std::string archiveAddTarget, archiveAddFolder;
   const auto folder = source.Path();
   auto location = ParseLocation(folder);
@@ -63,19 +162,24 @@ void ArchiveActions::ShowAddPicker(const Pane &source, BMessenger owner) {
     if (selected.size() != 1 || IsVirtual(selected[0]))
       throw std::runtime_error(
           "Select one local writable archive, or open a folder inside it.");
+    command.sources = selected;
+    command.expectedSources = source.SelectedLocalIdentities();
+    FreezeLocalJob(command);
     archiveAddTarget = selected[0];
     archiveAddFolder = "/";
   }
   struct stat st;
   if (lstat(archiveAddTarget.c_str(), &st) || !S_ISREG(st.st_mode))
     throw std::runtime_error("Choose one local writable archive.");
-  auto target = PrepareArchiveEditTarget(archiveAddTarget, archiveAddFolder);
-  RequireScannedSources(source, target);
+  Inspect(source, owner, std::move(command), archiveAddTarget, archiveAddFolder);
+}
+
+void ArchiveActions::OpenAddPicker(const Job &target, BMessenger owner) {
   auto chosen = EncodeJob(target, kArchiveAddChosen);
   archiveAddPicker.reset(new BFilePanel(
       B_OPEN_PANEL, &owner, nullptr,
       node_flavor(B_FILE_NODE | B_DIRECTORY_NODE), true, &chosen));
-  archiveAddPicker->SetPanelDirectory(ParentLocation(archiveAddTarget).c_str());
+  archiveAddPicker->SetPanelDirectory(target.destinationFolder.c_str());
   archiveAddPicker->Show();
 }
 

@@ -30,9 +30,28 @@ constexpr uint32 kLoaded = 'aeld', kDone = 'aedn', kTick = 'aetk',
 struct WindowRecord {
   std::string member;
   BMessenger window;
+  std::string archiveVersion;
 };
 std::mutex registryMutex;
 std::vector<WindowRecord> windows;
+bool FocusExisting(const std::string &member, const std::string *shownVersion = nullptr) {
+  BMessenger target;
+  {
+    std::lock_guard<std::mutex> lock(registryMutex);
+    for (const auto &r : windows) {
+      if (r.member != member)
+        continue;
+      if (shownVersion && *shownVersion != r.archiveVersion)
+        throw std::runtime_error("Another working copy is open for this path. Use the existing editor window.");
+      target = r.window;
+      break;
+    }
+  }
+  if (!target.IsValid())
+    return false;
+  target.SendMessage(kFocus);
+  return true;
+}
 std::string Root() {
   BPath p;
   if (find_directory(B_USER_SETTINGS_DIRECTORY, &p) != B_OK)
@@ -73,7 +92,8 @@ class EditorWindow : public BWindow {
   std::unique_ptr<BMessageRunner> timer;
   BStringView *status, *copy;
   BButton *open, *save, *folder, *cancel, *restart;
-  std::string editor;
+  std::string editor, member, recoveryDirectory;
+  Listi::Job shown;
   bool busy = false, paused = false, closing = false;
   void Status(const std::string &s) {
     status->SetText(s.c_str());
@@ -114,10 +134,11 @@ class EditorWindow : public BWindow {
   }
 
 public:
-  EditorWindow(const std::string &member, const std::string &application)
+  EditorWindow(const std::string &member, const std::string &application,
+               const Listi::Job &view, const std::string &recovery = {})
       : BWindow(BRect(150, 150, 970, 430), "Listi: Edit archive file",
                 B_TITLED_WINDOW, B_AUTO_UPDATE_SIZE_LIMITS),
-        editor(application) {
+        editor(application), member(member), recoveryDirectory(recovery), shown(view) {
     status = Line("archive edit status", "Preparing private working copy...");
     copy = Line("archive edit copy", "");
     restart =
@@ -152,14 +173,13 @@ public:
     AddShortcut('W', B_COMMAND_KEY, new BMessage(B_QUIT_REQUESTED));
     {
       std::lock_guard<std::mutex> lock(registryMutex);
-      windows.push_back({member, BMessenger(this)});
+      windows.push_back({member, BMessenger(this), view.expectedArchiveSets.empty()
+          ? std::string() : view.expectedArchiveSets.begin()->second});
     }
     Controls();
     BMessage tick(kTick);
     timer = std::make_unique<BMessageRunner>(BMessenger(this), &tick, 1000000);
-    BMessage begin(kBegin);
-    begin.AddString("member", member.c_str());
-    PostMessage(&begin);
+    PostMessage(kBegin);
     Show();
   }
   ~EditorWindow() override {
@@ -183,9 +203,10 @@ public:
   }
   void MessageReceived(BMessage *m) override {
     if (m->what == kBegin) {
-      std::string member = m->GetString("member", ""), application = editor;
-      Work(kLoaded, [member, application](auto &d, const auto &hooks) {
-        d.session = Listi::ArchiveEditSession::Open(member, Root(), hooks);
+      Work(kLoaded, [member = member, application = editor, view = shown,
+                     recovery = recoveryDirectory](auto &d, const auto &hooks) {
+        d.session = recovery.empty() ? Listi::ArchiveEditSession::Open(member, Root(), hooks, view)
+                                     : Listi::ArchiveEditSession::Resume(recovery);
         Launch(d.session->WorkingFile(), application);
         d.status =
             "Editor opened. Saved changes will be written back automatically.";
@@ -268,6 +289,11 @@ public:
       busy = false;
       if (delivery->session) {
         session = delivery->session;
+        {
+          std::lock_guard<std::mutex> guard(registryMutex);
+          for (auto &record : windows)
+            if (record.window == BMessenger(this)) record.archiveVersion = session->ArchiveVersion();
+        }
         copy->SetText(session->WorkingFile().c_str());
         copy->SetToolTip(session->WorkingFile().c_str());
       }
@@ -398,24 +424,18 @@ public:
     }
     if (m->what == kOpen) {
       auto row = static_cast<EditRow *>(list->CurrentSelection());
-      if (row && row->record.error.empty())
-        OpenArchiveEditor(row->record.member, editor);
+      if (row && row->record.error.empty() && !FocusExisting(row->record.member))
+        new EditorWindow(row->record.member, editor, {}, row->record.directory);
       return;
     }
     BWindow::MessageReceived(m);
   }
 };
 } // namespace
-void OpenArchiveEditor(const std::string &member, const std::string &editor) {
-  {
-    std::lock_guard<std::mutex> lock(registryMutex);
-    for (const auto &r : windows)
-      if (r.member == member) {
-        r.window.SendMessage(kFocus);
-        return;
-      }
-  }
-  new EditorWindow(member, editor);
+void OpenArchiveEditor(const std::string &member, const std::string &editor, const Listi::Job &shown) {
+  const auto &version = shown.expectedArchiveSets.at(Listi::ParseLocation(member).archive);
+  if (!FocusExisting(member, &version))
+    new EditorWindow(member, editor, shown);
 }
 void ResumeArchiveEditors(const std::string &editor) {
   new RecoveryWindow(editor);

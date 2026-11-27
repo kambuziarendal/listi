@@ -168,6 +168,20 @@ python3 tests/run-native-audit.py archive-panel-version archive-jobs archive-cop
 - `archive-jobs` makes the second of three references from a native file picker unreadable. It checks that the ZIP is unchanged and reopens it after a successful retry to verify all chosen files and the original member.
 - `archive-copy-inputs` and `virtual-operation-faults` count staging writes for a second, 1 MiB file after Skip All. The first uses a real ZIP; the second uses a simulated SFTP provider, not a live server. If the second target is free, the same tests require a real staging attempt, an explicit error on injected ENOSPC, and a complete copy on retry.
 
+The destination-view regressions use two ZIP archives with the same path and
+different contents. Flat View transfers and incoming drops must use the version
+shown by the receiving pane or Miller column. The external-editor tests check the
+file reference handed to a simulated editor and reopen the ZIP after an automatic
+save. The archive jobs tests cover cancelling format inspection before a picker
+or name dialog opens, and rejecting a changed archive on submission.
+
+Full package qualification builds a disposable ext2 image with real hard links
+on the Linux host. The Haiku runner mounts private copies for the archive alias
+and Trash tests. The gate requires receipts for both pairs, the outside third
+link, and the *observed* presence or absence of the Tracker attribute. An ext2
+test with no such attribute is not evidence that it was written there: genuine
+Tracker restore-path strings are checked separately on the native Trash volume.
+
 ### Hard links and Tracker Trash
 
 Tracker stores the original path as a typed attribute on the inode. Two names

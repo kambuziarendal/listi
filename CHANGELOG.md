@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Flat View transfers, drops into an archive, external edits and new folders now respect the archive version displayed in the pane. Opening the archive file picker or name prompt no longer waits for a full format inspection on the window thread.
+
 - Archive commands use the version shown by the file pane. If another application replaces the archive, reload it and select the entries again. Add to archive rejects incomplete file-picker selections.
 - After Skip All, archive and network downloads skip existing ordinary files without writing their contents to a temporary file.
 - Trash and Restore refuse multiply linked files instead of changing the shared Tracker restore-path attribute.

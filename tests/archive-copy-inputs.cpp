@@ -12,6 +12,7 @@
 #include <iostream>
 #include <set>
 #include <stdexcept>
+#include <sys/stat.h>
 
 using namespace Listi;
 namespace fs = std::filesystem;
@@ -187,7 +188,13 @@ void SplitCase(const fs::path &target, bool alias) {
 }
 void AliasCases(const fs::path &folder, const fs::path &outer, const std::string &bytes) {
   const auto source = folder / "original.zip", alias = folder / "other.zip";
-  Check(fs::equivalent(source, alias) && fs::equivalent(folder / "plain.7z.002", folder / "payload.bin"),
+  const auto hardlinkPair = [](const fs::path &left, const fs::path &right) {
+    struct stat a{}, b{};
+    return !lstat(left.c_str(), &a) && !lstat(right.c_str(), &b) &&
+           S_ISREG(a.st_mode) && S_ISREG(b.st_mode) && a.st_nlink == 2 && b.st_nlink == 2 &&
+           a.st_dev == b.st_dev && a.st_ino == b.st_ino;
+  };
+  Check(hardlinkPair(source, alias) && hardlinkPair(folder / "plain.7z.002", folder / "payload.bin"),
         "mounted fixture contains both real hard-link pairs");
   Write(source, bytes);
   const auto expected = Members(outer);
@@ -239,6 +246,7 @@ void AliasCases(const fs::path &folder, const fs::path &outer, const std::string
   fs::remove(nested);
   fs::remove_all(late / "earlier-nested");
   SplitCase(folder, true);
+  std::cout << "PASS protected both mounted archive aliases through replacement and retry" << std::endl;
 }
 }
 int main() {

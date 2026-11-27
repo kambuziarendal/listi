@@ -5,6 +5,7 @@
 #include <Entry.h>
 #include <Roster.h>
 #include "ArchiveEditor.h"
+#include "ArchiveJobChecks.h"
 #include "ImagePreview.h"
 #include "InlineAction.h"
 #include "MainWindow.h"
@@ -158,7 +159,14 @@ bool Pane::HandleOpenCommand(
   } else {
     const bool externalEdit = action != kOpenSystem;
     if (externalEdit && Listi::ParseLocation(path).Archive()) {
-      OpenArchiveEditor(path, editor.String());
+      try {
+        Listi::Job shown;
+        entries.BindArchiveView(shown, path);
+        Listi::ArchiveJobChecks::VerifyArchiveSets(shown);
+        OpenArchiveEditor(path, editor.String(), shown);
+      } catch (const std::exception &error) {
+        PostMainWindowNotice(error.what());
+      }
     } else {
       BMessage open(kOpenPaths);
       open.AddMessenger("origin", BMessenger(Window()));

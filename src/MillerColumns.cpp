@@ -357,13 +357,9 @@ public:
 
   void MessageReceived(BMessage *message) override {
     if (message->WasDropped()) {
-      BMessage dropped(*message);
-      dropped.what = kDrop;
-      dropped.RemoveName("destination");
       const auto target = DropTarget(ConvertFromScreen(message->DropPoint()));
       Listi::SetFolderHover(this, hoverPath, "");
-      dropped.AddString("destination", target.empty() ? location.c_str() : target.c_str());
-      Window()->PostMessage(&dropped);
+      Listi::PostPaneFileDrop(*pane, Current() ? *model : entries, *message, target.empty() ? location : target);
       return;
     }
     BView::MessageReceived(message);
@@ -586,6 +582,19 @@ void MillerColumns::SetLocation(const std::string &path) {
   state->ReadNext(this);
   if (focus)
     MakeFocus();
+}
+
+void MillerColumns::ReloadArchiveColumns() {
+  const auto archive = Listi::ParseLocation(state->location).archive;
+  if (!state->enabled || archive.empty())
+    return;
+  state->CancelRead();
+  for (auto &column : state->columns) {
+    auto *rows = column.rows;
+    if (!rows->Current() && Listi::ParseLocation(rows->location).archive == archive)
+      rows->complete = false;
+  }
+  state->ReadNext(this);
 }
 
 void MillerColumns::Refresh() {

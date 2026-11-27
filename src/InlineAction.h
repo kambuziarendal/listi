@@ -14,6 +14,7 @@ constexpr uint32 kInlineClosed = 'icls';
 class InlineAction : public BGroupView {
 public:
   explicit InlineAction(BMessenger target, std::function<void()> beforeOpen = {});
+  int64 Ticket() const { return serial; }
   bool Pending() const { return pending; }
   bool Ask(const char *text, const char *button, const BMessage &result,
            const char *initial = nullptr, const char *alternative = nullptr,

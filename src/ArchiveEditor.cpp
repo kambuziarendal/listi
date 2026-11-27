@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "ArchiveEditor.h"
 #include "ArchiveJobs.h"
+#include "ArchiveJobChecks.h"
 #include "ArchiveVolumes.h"
 #include "JobSnapshot.h"
 #include "MessageStore.h"
@@ -270,8 +271,9 @@ ArchiveEditSession::Resume(const std::string &directory) {
 }
 std::shared_ptr<ArchiveEditSession>
 ArchiveEditSession::Open(const std::string &member, const std::string &root,
-                         const Hooks &hooks) {
+                         const Hooks &hooks, const Job &shown) {
   const auto location = ParseLocation(member);
+  ArchiveJobChecks::VerifyArchiveSets(shown);
   Require(location.Archive() && location.path != "/",
           "Choose one regular member inside a writable local archive.");
   if (mkdir(root.c_str(), 0700))
@@ -279,20 +281,25 @@ ArchiveEditSession::Open(const std::string &member, const std::string &root,
   PrivateDirectory(root);
   const auto records = ListArchiveEdits(root);
   for (const auto &record : records)
-    if (record.member == member)
-      return Resume(record.directory);
+    if (record.member == member) {
+      auto retained = Resume(record.directory);
+      ArchiveJobChecks::RequireArchiveVersions(shown, retained->target);
+      ArchiveJobChecks::VerifyArchiveSets(shown);
+      return retained;
+    }
   Require(records.size() < 256, "Too many retained archive edits. Keep needed files and remove old edit folders.");
-  return Create(member, root, {}, hooks);
+  return Create(member, root, {}, hooks, shown);
 }
 std::shared_ptr<ArchiveEditSession>
 ArchiveEditSession::Create(const std::string &member, const std::string &root,
-                           const std::string &predecessor, const Hooks &hooks) {
+                           const std::string &predecessor, const Hooks &hooks, const Job &shown) {
   const auto location = ParseLocation(member);
   auto s = std::shared_ptr<ArchiveEditSession>(new ArchiveEditSession);
   s->member = member;
   s->predecessor = predecessor;
   s->target = PrepareArchiveEditTarget(
-      location.archive, ParseLocation(ParentLocation(member)).path);
+      location.archive, ParseLocation(ParentLocation(member)).path, hooks);
+  ArchiveJobChecks::RequireArchiveVersions(shown, s->target);
   TransferControl control;
   control.proceed = [&] {
     Check(hooks);

@@ -180,6 +180,11 @@ void TestSharedTrashPath(const fs::path &root) {
   std::ofstream(two) << "second";
   const auto trashedOne = MoveToTrash(one.string());
   const auto trashedTwo = MoveToTrash(two.string());
+  BString pathOne, pathTwo;
+  Check(BNode(trashedOne.c_str()).ReadAttrString("_trk/original_path", &pathOne) == B_OK &&
+            BNode(trashedTwo.c_str()).ReadAttrString("_trk/original_path", &pathTwo) == B_OK &&
+            one.string() == pathOne.String() && two.string() == pathTwo.String(),
+        "Tracker original-path strings are present and distinct on the native Trash volume");
   const auto restoredOne = RestoreFromTrash(trashedOne);
   const auto restoredTwo = RestoreFromTrash(trashedTwo);
   Check(restoredOne == one && restoredTwo == two && Read(one) == "first" && Read(two) == "second",
@@ -189,14 +194,37 @@ void TestSharedTrashPath(const fs::path &root) {
     return;
   const auto base = fs::path(fixture) / "complete";
   const auto first = base / "selected/z", second = base / "selected/a", third = base / "outside";
-  struct stat before{}, after{};
-  Check(!lstat(third.c_str(), &before) && before.st_nlink == 3 &&
-            fs::equivalent(first, third) && fs::equivalent(second, third),
-        "three fixture names refer to one inode before Trash");
+  struct stat before{}, after{}, a{}, b{};
+  const bool realLinks = !lstat(third.c_str(), &before) && S_ISREG(before.st_mode) && before.st_nlink == 3 &&
+      !lstat(first.c_str(), &a) && !lstat(second.c_str(), &b) &&
+      a.st_dev == before.st_dev && b.st_dev == before.st_dev &&
+      a.st_ino == before.st_ino && b.st_ino == before.st_ino;
+  Check(realLinks, "three fixture names refer to one inode before Trash");
+  if (!realLinks)
+    return;
   const auto contents = Read(third);
   BNode node(third.c_str());
-  BString originalPath, observedPath;
-  const auto previous = node.ReadAttrString("_trk/original_path", &originalPath);
+  const char *attribute = "_trk/original_path";
+  BString sentinel("/listi-test/previous-location"), originalPath, observedPath;
+  attr_info info{};
+  const auto initial = node.GetAttrInfo(attribute, &info);
+  // Retain an existing caller-supplied sentinel. On a fresh disposable fixture
+  // try to seed one, and observe whether this driver really stores the string.
+  const auto written = initial == B_ENTRY_NOT_FOUND ? node.WriteAttrString(attribute, &sentinel) : initial;
+  const auto found = node.GetAttrInfo(attribute, &info);
+  const auto previous = node.ReadAttrString(attribute, &originalPath);
+  if (found == B_OK) {
+    Check(written == B_OK && info.type == B_STRING_TYPE && previous == B_OK &&
+              (initial == B_OK || originalPath == sentinel),
+          "three-link volume: Tracker original-path attribute verified present");
+  } else {
+    Check(initial == B_ENTRY_NOT_FOUND && written != B_OK && found == B_ENTRY_NOT_FOUND &&
+              previous == B_ENTRY_NOT_FOUND,
+          "three-link volume: Tracker original-path attribute verified absent");
+  }
+  // Attribute setup can change ctime. Capture the baseline for the two refusals now.
+  if (lstat(third.c_str(), &before))
+    throw std::runtime_error("Cannot recapture three-link fixture after attribute probe");
   for (const auto &path : {first, second}) {
     bool refused = false;
     try {
@@ -213,7 +241,8 @@ void TestSharedTrashPath(const fs::path &root) {
             before.st_nlink == after.st_nlink && before.st_mode == after.st_mode &&
             before.st_ctim.tv_sec == after.st_ctim.tv_sec && before.st_ctim.tv_nsec == after.st_ctim.tv_nsec &&
             fs::equivalent(first, third) && fs::equivalent(second, third) &&
-            Read(third) == contents && node.ReadAttrString("_trk/original_path", &observedPath) == previous &&
+            Read(third) == contents && node.GetAttrInfo(attribute, &info) == found &&
+            node.ReadAttrString(attribute, &observedPath) == previous &&
             (previous != B_OK || originalPath == observedPath),
         "both selected names and the outside link retain bytes and metadata");
 }

@@ -24,6 +24,7 @@ public:
   void RestoreScroll(BPoint);
   void SetLocation(const std::string &);
   void Refresh();
+  void ReloadArchiveColumns();
   void RedrawRows();
   void SyncSelection();
   void SetActive(bool);

@@ -10,5 +10,5 @@ bool ArjCanCompress();
 void ArjWrite(int output, const std::vector<std::string> &sources,
               const Hooks &hooks, int level = 0);
 // Only the metadata subset emitted by ArjWrite can be safely rebuilt.
-void ArjValidateEdit(int input);
+void ArjValidateEdit(int input, const Hooks &hooks = {});
 } // namespace Listi

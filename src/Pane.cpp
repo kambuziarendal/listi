@@ -757,6 +757,7 @@ void Pane::Reload() {
     return;
   }
   StartNavigation(path.String(), -1, false, false, true);
+  if (mode == MillerMode) columns->ReloadArchiveColumns();
 }
 std::vector<std::string> Pane::Selected() const {
   return entries.SelectedFiles();

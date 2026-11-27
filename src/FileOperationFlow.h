@@ -34,6 +34,9 @@ private:
   void ShowArchive(uint32 action, const Pane &source, const Pane &target);
   void ConfirmArchiveAddition(const Job &job);
   void AskNamedEntry(Action action, const Pane &source, const Pane &target);
+  void AskEntryName(const Job &command, const Job *inspectedArchive = nullptr);
+  void ShowInspectionProgress();
+  void FinishInspection(const Pane &source);
   void ShowBulkRename(const Pane &source);
   void BeginOperation(Action action, const Pane &source, const Pane &target,
                       bool singlePane);
@@ -45,7 +48,7 @@ private:
   ArchiveActions archiveActions;
   BMessenger bulkRenameWindow;
   ReadWorker *trashProbe = nullptr;
-  int64 trashRequest = 0;
+  int64 trashRequest = 0, inspectionQuestion = -1;
 };
 
 } // namespace Listi

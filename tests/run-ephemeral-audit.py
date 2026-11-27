@@ -171,6 +171,14 @@ def audit(args, output, ssh, archive):
         subprocess.run([*ssh, "cd ~/listi-ephemeral && sha256sum -c -"],
                        stdin=hashes, stdout=log, stderr=subprocess.STDOUT, check=True)
     remote = "set -e; cd ~/listi-ephemeral; uname -a"
+    if args.qualify_package:
+        image = archive.parent / "hardlinks.img"
+        helper = Path(__file__).resolve().parents[1] / "ci/make-hardlink-image.py"
+        subprocess.run([sys.executable, helper, image], check=True)
+        with image.open("rb") as data:
+            subprocess.run([*ssh, "set -eC; cd ~/listi-ephemeral; mkdir -p build; "
+                                   "cat > build/qualification-links.img"], stdin=data, check=True)
+        remote += '; export LISTI_QUALIFICATION_LINK_IMAGE="$PWD/build/qualification-links.img"'
     if not args.preflight:
         remote += "; " + shlex.join(["make", f"-j{args.jobs}", "audit",
                                      "TESTS=" + " ".join(args.tests)])
