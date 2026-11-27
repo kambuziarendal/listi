@@ -16,6 +16,7 @@ std::optional<ClipboardContent>
 DetectClipboardSaveContent(BClipboard *clipboard = be_clipboard);
 ClipboardFile PrepareClipboardFile(const std::string &folder,
                                    ClipboardContent content,
-                                   BClipboard *clipboard = be_clipboard);
+                                   BClipboard *clipboard = be_clipboard,
+                                   NodeIdentity expectedDestination = {});
 void SaveClipboardFile(const ClipboardFile &, const std::string &name);
 }

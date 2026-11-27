@@ -287,7 +287,8 @@ void PutFileClipboard(const std::vector<std::string> &paths, bool cut,
 
 ClipboardPaste PrepareFilePaste(const std::string &destination,
                                 BClipboard *clipboard,
-                                const std::map<std::string, std::string> &destinationVersion) {
+                                const std::map<std::string, std::string> &destinationVersion,
+                                NodeIdentity expectedDestination) {
   {
     ClipboardLock lock(clipboard);
     BMessage encoded;
@@ -303,6 +304,7 @@ ClipboardPaste PrepareFilePaste(const std::string &destination,
       if (!cut && job.action != Action::Copy)
         throw std::runtime_error("Invalid archive clipboard action.");
       job.destination = destination;
+      job.expectedDestination = expectedDestination;
       if (job.sources.empty() || job.sources.size() > 1024)
         throw std::runtime_error("Invalid archive clipboard selection.");
       for (const auto &path : job.sources) {
@@ -374,7 +376,9 @@ ClipboardPaste PrepareFilePaste(const std::string &destination,
   char canonical[PATH_MAX];
   if (!realpath(destination.c_str(), canonical))
     throw std::runtime_error("The destination folder is unavailable.");
-  auto destinationNode = Identity(canonical, true);
+  // Non-pane callers also need one shared identity for both Tracker jobs.
+  if (expectedDestination.device < 0)
+    expectedDestination = Identity(canonical, true);
   ClipboardLock lock(clipboard);
   ClipboardPaste paste;
   if (clipboard->Data()->HasString(kLease))
@@ -385,7 +389,7 @@ ClipboardPaste PrepareFilePaste(const std::string &destination,
   copy.action = Action::Copy;
   move.action = Action::Move;
   copy.destination = move.destination = canonical;
-  copy.expectedDestination = move.expectedDestination = destinationNode;
+  copy.expectedDestination = move.expectedDestination = expectedDestination;
   // Check the entire Tracker selection before splitting mixed copy/cut modes.
   // Two source names must never compete for one output in separate jobs.
   std::set<std::string> names;

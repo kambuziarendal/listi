@@ -116,6 +116,7 @@ std::string RemoteDigest(const std::string &path, const TransferControl &control
 }
 bool MatchesRemoteSelection(const FileEntry &selected, const FileEntry &current) {
   return selected.directory == current.directory && selected.link == current.link &&
+         (!selected.permissionsKnown || (current.permissionsKnown && selected.permissions == current.permissions)) &&
          (!selected.sizeKnown || (current.sizeKnown && selected.size == current.size)) &&
          (!selected.modifiedKnown || selected.SameModification(current)) &&
          (selected.providerIdentity.empty() || selected.providerIdentity == current.providerIdentity);
@@ -133,14 +134,9 @@ bool SameListing(std::vector<FileEntry> &before, std::vector<FileEntry> &after) 
 }
 std::string TransferIdentity(const std::string &path) {
   auto location = ParseLocation(path);
-  const unsigned defaultPort = location.scheme == "sftp"   ? 22
-                               : location.scheme == "ftp"  ? 21
-                               : location.scheme == "ftps" ? 990
-                               : location.scheme == "smb"  ? 445
-                                                           : 0;
-  if (location.port == defaultPort)
-    location.port = 0;
-  return location.URL();
+  if (location.Local() || location.Archive())
+    return location.URL();
+  return location.CanonicalAuthority() + EncodePath(location.path);
 }
 bool SameLocal(const struct stat &a, const struct stat &b) {
   return a.st_dev == b.st_dev && a.st_ino == b.st_ino &&
@@ -156,6 +152,49 @@ struct Runner {
   // Preserve each local destination directory across staging, recursive descent
   // and conflict questions. Contents may change; the directory identity may not.
   std::map<std::string, NodeIdentity> directories;
+  struct RemoteDirectory {
+    FileEntry revision;
+    std::optional<std::map<std::string, std::string>> exactFolders;
+  };
+  // The job destination survives across roots. Descendant guards live only
+  // while traversing that subtree. Never cache a listing without an identity.
+  std::map<std::string, RemoteDirectory> remoteDirectories;
+  std::string unverifiedDirectory;
+  void VerifyRemoteDirectories(const TransferControl &control) {
+    for (auto &[path, expected] : remoteDirectories) {
+      FileEntry current;
+      if (!StatFile(path, current, control) || !current.directory || current.link ||
+          expected.revision.providerIdentity != current.providerIdentity) {
+        expected.exactFolders.reset();
+        throw std::runtime_error("Remote destination folder changed: " + path);
+      }
+      if (!expected.revision.SameModification(current)) {
+        expected.exactFolders.reset();
+        expected.revision = current;
+      }
+      if (current.providerIdentity.empty() && unverifiedDirectory.empty())
+        unverifiedDirectory = path;
+    }
+  }
+  bool ExactRemoteFolder(const std::string &parent, const std::string &leaf, const FileEntry &target,
+                         const TransferControl &control) {
+    auto &guard = remoteDirectories.at(parent);
+    if (guard.exactFolders) {
+      const auto prior = guard.exactFolders->find(leaf);
+      if (prior != guard.exactFolders->end() && !target.providerIdentity.empty() &&
+          prior->second == target.providerIdentity)
+        return true;
+    }
+    std::map<std::string, std::string> names;
+    for (const auto &entry : ListFiles(parent, control))
+      if (entry.directory && !entry.link)
+        names.emplace(entry.name, entry.providerIdentity);
+    const auto found = names.find(leaf);
+    const bool exact = found != names.end() && found->second == target.providerIdentity;
+    if (!guard.revision.providerIdentity.empty())
+      guard.exactFolders = std::move(names);
+    return exact;
+  }
   // Keep claims across selected roots, unlike the scoped directory guards.
   std::map<std::string, std::string> directoryOwners;
   void ClaimDirectory(const std::string &key, const std::string &src, const std::string &dst) {
@@ -385,7 +424,22 @@ struct Runner {
             directories.count(dst) != 0};
     auto control = Control(src);
     control.Check();
-    RememberDirectory(parent);
+    if (IsVirtual(parent)) {
+      if (!remoteDirectories.count(parent)) {
+        FileEntry folder;
+        if (!StatFile(parent, folder, control) || !folder.directory || folder.link)
+          throw std::runtime_error("Remote destination folder unavailable: " + parent);
+        remoteDirectories.emplace(parent, RemoteDirectory{folder, {}});
+      }
+      VerifyRemoteDirectories(control);
+    } else {
+      RememberDirectory(parent);
+    }
+    struct RemoteScope {
+      decltype(remoteDirectories) &guards;
+      const std::string &path;
+      ~RemoteScope() { guards.erase(path); }
+    } remoteScope{remoteDirectories, dst};
     FileEntry source, target;
     if (!StatFile(src, source, control, discovered))
       throw std::runtime_error("Source no longer exists");
@@ -470,6 +524,7 @@ struct Runner {
         }
       } else {
         if (!exists) {
+          VerifyRemoteDirectories(control);
           MakeFolder(dst, control);
           ++publishedEntries;
           if (!StatFile(dst, target, control) || !target.directory || target.link)
@@ -478,16 +533,12 @@ struct Runner {
         // A provider can resolve an alias to the existing folder yet return
         // the requested spelling from stat. Even a stable ID cannot prove
         // that the user intended this spelling on a subsequent job.
-        if (exists) {
-          const auto siblings = ListFiles(parent, control);
-          const auto leaf = LocationLeaf(dst);
-          if (std::none_of(siblings.begin(), siblings.end(), [&](const FileEntry &e) {
-                return e.directory && !e.link && e.name == leaf;
-              }))
-            throw std::runtime_error("Cannot establish destination folder identity: " + dst);
-        }
+        if (exists && !ExactRemoteFolder(parent, LocationLeaf(dst), target, control))
+          throw std::runtime_error("Cannot establish destination folder identity: " + dst);
+        remoteDirectories.emplace(dst, RemoteDirectory{target, {}});
+        VerifyRemoteDirectories(control);
         auto key = target.providerIdentity.empty() ? TransferIdentity(dst) :
-            ParseLocation(dst).Authority() + "#directory:" + target.providerIdentity;
+            ParseLocation(dst).CanonicalAuthority() + "#directory:" + target.providerIdentity;
         ClaimDirectory(key, src, dst);
       }
       int skippedBefore = result.skipped;
@@ -534,7 +585,14 @@ struct Runner {
         result.copyLimitations = true;
         RecordOutcome({src, dst, "filesystem limitations", std::move(limitations)});
       }
+      VerifyRemoteDirectories(control);
       if (result.skipped == skippedBefore && omissions == omittedBefore) {
+        if (IsVirtual(dst) && !unverifiedDirectory.empty() && depth == 0) {
+          result.copyLimitations = true;
+          RecordOutcome({src, dst, "filesystem limitations",
+                         "Entries were delivered by path. The server provides no stable identity for " +
+                         unverifiedDirectory + "; folder replacement cannot be excluded."});
+        }
         if (hooks.fileDone)
           hooks.fileDone(src, dst);
       }
@@ -667,6 +725,7 @@ struct Runner {
       if (exists)
         originalDigest = RemoteDigest(dst, control);
       recovery.Advance(RecoveryPhase::Writing);
+      VerifyRemoteDirectories(control);
       stagedExists = true;
       UploadFile(temp.path, staged, control);
       receipt.bytesWritten = stagedBytes;
@@ -702,12 +761,14 @@ struct Runner {
       if (exists) {
         // The server may rename successfully and lose the acknowledgement.
         // Track the recovery name before sending the mutation, not afterward.
+        VerifyRemoteDirectories(control);
         backupExists = true;
         RenameFile(dst, backup, control);
       }
       control.Check();
       // Reserve before the server mutation: a lost acknowledgement still
       // leaves a possible delivery that a later root must not overwrite.
+      VerifyRemoteDirectories(control);
       ReservePublishedName(dst);
       commitAttempted = true;
       receipt.publication = Publication::Unknown;
@@ -722,9 +783,11 @@ struct Runner {
       if (backupExists) {
         if (RemoteDigest(backup, control) != originalDigest)
           throw std::runtime_error("Original backup changed; retained for manual inspection.");
+        VerifyRemoteDirectories(control);
         RemoveFile(backup, false, control);
         backupExists = false;
       }
+      VerifyRemoteDirectories(control);
       recovery.Retire();
       if (hooks.fileDone)
         hooks.fileDone(src, dst);
@@ -763,6 +826,7 @@ struct Runner {
             backupExists = false;
           } else if (target.SameRevision(saved) && matches(backup, saved, originalDigest) &&
                      !StatFile(dst, current, cleanup)) {
+            VerifyRemoteDirectories(cleanup);
             RenameFile(backup, dst, cleanup);
             backupExists = false;
           }
@@ -779,6 +843,7 @@ struct Runner {
             stagedExists = ftp;
           } else if (receipt.contentVerified && stagedRevision.SameRevision(remote) &&
                    matches(staged, remote, expectedDigest)) {
+            VerifyRemoteDirectories(cleanup);
             RemoveFile(staged, false, cleanup);
             stagedExists = StatFile(staged, remote, cleanup);
           }
@@ -830,10 +895,48 @@ struct Runner {
     if (!MatchesRemoteSelection(expected, e))
       throw std::runtime_error("Entry changed before deletion: " + p);
     const bool directory = expected.directory && !expected.link;
-    if (directory)
-      for (const auto &child : ListFiles(p, c))
-        DeleteTree(child.path, child, depth + 1);
-    RemoveFile(p, directory, c);
+    if (directory) {
+      const auto children = ListFiles(p, c);
+      for (size_t i = 0; i < children.size(); ++i) {
+        try {
+          DeleteTree(children[i].path, children[i], depth + 1);
+        } catch (...) {
+          for (++i; i < children.size(); ++i)
+            RecordOutcome({children[i].path, "", "unprocessed", "No removal requested."});
+          throw;
+        }
+      }
+    }
+    bool submitted = false;
+    c.mutationSubmitted = &submitted;
+    try {
+      RemoveFile(p, directory, c);
+    } catch (...) {
+      // Do not resend a destructive request. A fresh read may establish
+      // absence; a replacement or unreadable path proves no such thing.
+      auto failure = std::current_exception();
+      if (!submitted)
+        std::rethrow_exception(failure);
+      c.mutationSubmitted = nullptr;
+      FileEntry now;
+      bool consulted = false, present = true;
+      try {
+        present = StatFile(p, now, c);
+        consulted = true;
+      } catch (...) {}
+      if (consulted && !present) {
+        ++deletedEntries;
+        RecordOutcome({p, "", "deleted", "Removal was not acknowledged; a fresh lookup confirmed absence."});
+      } else if (consulted && !e.providerIdentity.empty() &&
+                 e.SameRevision(now)) {
+        RecordOutcome({p, "", "not deleted", "The same entry is still present."});
+      } else {
+        ++result.unconfirmedDeletions;
+        RecordOutcome({p, "", "deletion unconfirmed",
+                       "Removal was requested but not acknowledged. Inspect this path before selecting it again."});
+      }
+      std::rethrow_exception(failure);
+    }
     ++deletedEntries;
     RecordOutcome({p, "", "deleted", ""});
   }
@@ -876,6 +979,7 @@ Result RunVirtual(const Job &job, const Hooks &hooks) {
         runner.selectedSource = source;
         runner.selectedDirectory = false;
         runner.firstOmission.clear();
+        runner.unverifiedDirectory.clear();
         if (InterruptedVolumes().ContainsResolved(source))
           throw std::runtime_error(kUnavailableVolumeText);
         auto control = runner.Control(source);
@@ -900,17 +1004,17 @@ Result RunVirtual(const Job &job, const Hooks &hooks) {
           try {
             runner.DeleteTree(source, expected->second);
           } catch (...) {
-            if (runner.deletedEntries != deletedBefore) {
+            if (expected->second.directory && runner.deletedEntries != deletedBefore) {
               ++runner.result.partialDeletions;
               runner.RecordOutcome({source, "", "partially deleted",
-                                    "Deletion stopped after removing entries from this folder."});
+                                    "Deletion stopped. See individual paths for confirmed and unconfirmed removals."});
             }
             throw;
           }
         } else if (job.action == Action::Move || job.action == Action::Rename) {
           auto from = ParseLocation(source), to = ParseLocation(dst);
           if (from.Archive() || from.Local() ||
-              from.Authority() != to.Authority())
+              from.CanonicalAuthority() != to.CanonicalAuthority())
             throw std::runtime_error(
                 "Use Copy for transfers between local, archive and network "
                 "locations. The source is retained.");

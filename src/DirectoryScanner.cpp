@@ -281,6 +281,7 @@ public:
             item.AddInt64("size", entry.size) != B_OK ||
             item.AddBool("sizeKnown", entry.sizeKnown) != B_OK ||
             item.AddInt64("date", entry.modified) != B_OK ||
+            item.AddInt32("permissions", entry.permissionsKnown ? int32(entry.permissions) : -1) != B_OK ||
             item.AddBool("modifiedKnown", entry.modifiedKnown) != B_OK ||
             item.AddString("modifiedFraction", entry.modifiedFraction.c_str()) != B_OK ||
             item.AddString("providerIdentity", entry.providerIdentity.c_str()) != B_OK) {

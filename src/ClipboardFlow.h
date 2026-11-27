@@ -26,7 +26,7 @@ public:
   void JobFinished(const BMessage &done);
 
 private:
-  void AskToSaveFile(const char *folder, ClipboardContent content);
+  void AskToSaveFile(Pane &pane, ClipboardContent content);
   void EnqueuePaste(Job &job);
   void FinishPaste(const std::vector<std::string> &moved);
 

@@ -18,6 +18,8 @@ struct FileEntry {
   // Opaque provider identity when available (e.g. the FTP MLSD unique fact).
   std::string providerIdentity;
 
+  bool permissionsKnown = true; // False when a network listing omits its access mode.
+
   bool SameModification(const FileEntry &other) const {
     return modifiedKnown == other.modifiedKnown && modified == other.modified &&
            modifiedFraction == other.modifiedFraction;
@@ -26,6 +28,7 @@ struct FileEntry {
   bool SameRevision(const FileEntry &other) const {
     return directory == other.directory && link == other.link &&
            sizeKnown == other.sizeKnown && (!sizeKnown || size == other.size) &&
+           permissionsKnown == other.permissionsKnown && permissions == other.permissions &&
            SameModification(other) && providerIdentity == other.providerIdentity;
   }
 

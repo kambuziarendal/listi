@@ -521,6 +521,18 @@ void TestMovePermissions(const fs::path &root, const fs::path &out) {
       std::ofstream(from / "memo") << "private";
       std::ofstream(to / "keep") << "unrelated";
       const bool matched = modes.first == modes.second;
+      if (modes.first == 0700 && modes.second == 0755) {
+        const Job copy{Action::Copy, {source.string()}, out.string()};
+        for (int attempt = 0; attempt < 2; ++attempt) {
+          const auto blocked = Run(copy, {});
+          Check(!blocked.completed && !blocked.errors.empty() && !fs::exists(to / "memo") &&
+                    Read(from / "memo") == "private" && Read(to / "keep") == "unrelated",
+                "ordinary directory copy and retry do not expose private children in a public merge");
+        }
+        // The independent Move case below starts with the original destination.
+        if (nested)
+          fs::remove(destination / "outside");
+      }
       const Job move{Action::Move, {source.string()}, out.string()};
       auto verify = [&](const Result &r) {
         struct stat node;

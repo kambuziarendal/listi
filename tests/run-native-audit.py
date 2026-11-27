@@ -52,7 +52,7 @@ WRAPS = {
     "removable-copy": ["fsync", "write", "read"],
     "directory-finalization": ["fsync", "fs_stat_dev"],
     "tar-move-ownership": ["renameat"],
-    "archive-move-faults": ['renameat'],
+    "archive-move-faults": ["renameat", "fstat"],
     "archive-editor-faults": ['rename', 'renameat', 'fsync', 'fs_stat_dev'],
     "archive-local-move-faults": ['renameat', 'unlink', 'openat'],
     "file-operation-faults": ['lstat', 'fs_stat_dev', 'openat', 'write', 'unlinkat', 'stat', 'close', 'fsync', '_ZN5BNode10RemoveAttrEPKc'],

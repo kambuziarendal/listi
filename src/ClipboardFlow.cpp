@@ -14,8 +14,11 @@ namespace Listi {
 ClipboardFlow::ClipboardFlow(InlineAction &actionArea, OperationQueue &queue)
     : actionArea(actionArea), queue(queue) {}
 
-void ClipboardFlow::AskToSaveFile(const char *folder, ClipboardContent content) {
-  auto file = PrepareClipboardFile(folder, content);
+void ClipboardFlow::AskToSaveFile(Pane &pane, ClipboardContent content) {
+  Job destination;
+  pane.BindTransferDestination(destination);
+  auto file = PrepareClipboardFile(destination.destination, content, be_clipboard,
+                                   destination.expectedDestination);
   const auto prompt = (content == ClipboardContent::Image
                            ? "Save clipboard PNG in: "
                            : "Save clipboard text in: ") +
@@ -53,7 +56,7 @@ void ClipboardFlow::Begin(uint32 action, Pane &pane) {
       const auto content = action == kClipboardSaveText
                                ? ClipboardContent::Text
                                : ClipboardContent::Image;
-      AskToSaveFile(pane.Path(), content);
+      AskToSaveFile(pane, content);
       return;
     }
     if (action != kClipboardPaste) {
@@ -83,12 +86,14 @@ void ClipboardFlow::Begin(uint32 action, Pane &pane) {
       return;
     }
     if (auto content = DetectClipboardSaveContent()) {
-      AskToSaveFile(pane.Path(), *content);
+      AskToSaveFile(pane, *content);
       return;
     }
     Job destination;
-    pane.ExportModel().BindArchiveView(destination, pane.Path());
-    clipboardPaste = PrepareFilePaste(pane.Path(), be_clipboard, destination.expectedArchiveSets);
+    pane.BindTransferDestination(destination);
+    clipboardPaste = PrepareFilePaste(destination.destination, be_clipboard,
+                                      destination.expectedArchiveSets,
+                                      destination.expectedDestination);
     if (clipboardPaste.jobs.size() == 1 &&
         (clipboardPaste.jobs[0].action == Action::EditArchive ||
          clipboardPaste.jobs[0].action == Action::MoveArchive)) {

@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import time
+import zipfile
 
 APP = "/boot/system/apps/Listi"
 SIGNATURE = "application/x-vnd.Kambuzi-Lister"
@@ -78,6 +79,90 @@ def run(root, cleanup):
         return next(i for i, value in windows().items() if value == path)
 
     paths(first)
+    helper = Path(__file__).resolve().parents[1] / "build/native-audit-tests/file-clipboard"
+    for route in ("Cut", "mixed Tracker", "archive"):
+        base = root / route
+        inputs = base / "inputs"
+        inputs.mkdir(parents=True)
+        source = inputs / "source.txt"
+        source.write_bytes(b"installed Paste fixture")
+        extra = inputs / "copied.txt"
+        archive = base / "selection.zip"
+        shown, held = base / "mount/shown", base / "held/shown"
+        shown.mkdir(parents=True)
+        browser = index(first)
+        if route == "archive":
+            with zipfile.ZipFile(archive, "w") as container:
+                container.writestr(source.name, source.read_bytes())
+            initial = "archive://" + str(archive) + "!/"
+        else:
+            initial = str(inputs)
+        hey("set", "SourcePath", "of", "Window", browser, "to", initial)
+        paths(initial)
+
+        def ready():
+            return hey("get", "PathReady", "of", "Window", browser).lower() == "true"
+
+        wait_for(ready, "installed " + route + " source loaded")
+        if route == "mixed Tracker":
+            extra.write_bytes(b"retained Tracker copy")
+            subprocess.run([helper, "mixed", source, extra], check=True, timeout=10)
+        else:
+            menu(browser, "All", "Select")
+            menu(browser, "Copy" if route == "archive" else "Cut")
+        hey("set", "SourcePath", "of", "Window", browser, "to", shown)
+        paths(str(shown))
+        wait_for(ready, "installed " + route + " destination loaded")
+        # Rename an ancestor, not the watched directory itself. Its node still
+        # exists unchanged; the visible path now traverses a different parent.
+        shown.parent.rename(held.parent)
+        shown.mkdir(parents=True)
+        menu(browser, "Paste into active folder")
+
+        def refusal():
+            for i in range(int(hey("count", "Window") or 0)):
+                try:
+                    label = hey("get", "Text", "of", "View", "operation error", "of", "Window", i)
+                    if "destination folder was replaced" in label and str(shown) in label:
+                        return True
+                except subprocess.CalledProcessError:
+                    pass
+            return False
+
+        wait_for(refusal, "installed " + route + " Paste reports replaced destination")
+        assert source.read_bytes() == b"installed Paste fixture"
+        assert not any(shown.iterdir()) and not any(held.iterdir())
+        if route == "mixed Tracker":
+            assert extra.read_bytes() == b"retained Tracker copy"
+        if route == "archive":
+            with zipfile.ZipFile(archive) as container:
+                assert container.read(source.name) == b"installed Paste fixture"
+        browser = index(str(shown))
+        menu(browser, "Refresh", "Listi")
+        wait_for(ready, "installed replacement folder reloaded")
+        menu(browser, "Paste into active folder")
+
+        def delivered():
+            if not (shown / source.name).exists():
+                return False
+            if route != "archive" and source.exists():
+                return False
+            return route != "mixed Tracker" or (shown / extra.name).exists()
+
+        wait_for(delivered, "installed " + route + " Paste retries into refreshed folder")
+        assert (shown / source.name).read_bytes() == b"installed Paste fixture" and not any(held.iterdir())
+        if route == "mixed Tracker":
+            assert extra.read_bytes() == (shown / extra.name).read_bytes() == b"retained Tracker copy"
+        if route == "archive":
+            with zipfile.ZipFile(archive) as container:
+                assert container.read(source.name) == b"installed Paste fixture"
+        # Drop earlier operation messages and unread errors before the next case.
+        wait_for(lambda: hey("get", "Busy", "of", "Window", index(str(shown))) == "false",
+                 "installed " + route + " Paste finished")
+        menu(index(str(shown)), "Quit Listi")
+        assert app.wait(timeout=10) == 0
+        app = launch("--new-window", first)
+        paths(first)
     menu(index(first), "New window")
     paths(first, first)
     menu(index(first), "New window")

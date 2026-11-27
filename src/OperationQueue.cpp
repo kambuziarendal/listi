@@ -1160,6 +1160,8 @@ void OperationQueue::Loop() {
     if (result.partialDeletions)
       summary << ". " << result.partialDeletions
               << (result.partialDeletions == 1 ? " folder partially deleted." : " folders partially deleted.");
+    if (result.unconfirmedDeletions)
+      summary << ". Removal unconfirmed for " << result.unconfirmedDeletions << " entries. See Details.";
     if (result.bulkRenameRecoveryNeeded)
       summary << ". Check entry locations in the operation report.";
     else if (result.cancelled) {

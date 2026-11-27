@@ -57,6 +57,42 @@ void *run(void *){try{
   SetArchiveDestination(job,root+"/out",leaf);auto result=RunArchiveJob(job,{});if(!result.errors.empty())std::cerr<<result.errors[0]<<std::endl;
   check(result.errors.empty()&&result.completed==1&&disk(job.destination+"/payload.bin")==disk(base+"original/payload.bin"),"atomic whole-set extraction exact");
  }
+ for (const char *leaf : {"plain.7z.001", "plain.part1.rar", "legacy.rar"}) {
+   const auto fixture = FindArchiveVolumes(base + leaf);
+   const bool legacyRar = std::string(leaf) == "legacy.rar";
+   const std::string member = legacyRar ? "LibarchiveAddingTest.html" : "payload.bin";
+   const auto expected = legacyRar ? read(ChildLocation(OpenArchive(base + leaf), member))
+                                   : disk(base + "original/" + member);
+   for (char separator : {'\n', '\r'}) {
+     const auto folder = root + "/set" + std::to_string(++serial);
+     mkdir(folder.c_str(), 0700);
+     std::vector<std::string> paths;
+     for (const auto &part : fixture.files) {
+       paths.push_back(folder + "/line" + separator + LocationLeaf(part.path));
+       write(paths.back(), disk(part.path));
+     }
+     const auto middle = paths[paths.size() / 2];
+     for (const auto &selected : {paths.front(), middle}) {
+       const auto set = FindArchiveVolumes(selected);
+       check(set.files.size() == paths.size() && set.files.front().path == paths.front(),
+             "multipart basename with line break resolves full set from first or middle");
+       auto job = PrepareArchiveJob(true, {selected});
+       SetArchiveDestination(job, root + "/out", "decoded" + std::to_string(++serial));
+       const auto result = RunArchiveJob(job, {});
+       check(result.completed == 1 && result.errors.empty() &&
+                 disk(job.destination + "/" + member) == expected,
+             "multipart basename with line break extracts exact content");
+     }
+     auto job = PrepareArchiveJob(true, {paths.front()});
+     SetArchiveDestination(job, root + "/out", "stale" + std::to_string(serial));
+     const auto replacement = folder + "/replacement";
+     write(replacement, disk(middle));
+     check(rename(replacement.c_str(), middle.c_str()) == 0, "install new middle-part identity");
+     const auto result = RunArchiveJob(job, {});
+     check(!result.errors.empty() && !result.completed && !exists(job.destination),
+           "changed middle-part identity invalidates confirmed extraction");
+   }
+ }
  auto legacy=OpenArchive(base+"legacy.r01");auto a=read(ChildLocation(legacy,"LibarchiveAddingTest.html"));check(a.size()==20111&&a==read(ChildLocation(legacy,"LibarchiveAddingTest2.html")),"old RAR volumes decode both members identically");
  auto solid=OpenArchive(base+"test_read_format_rar5_multiarchive_solid.part03.rar");check(walk(solid)>0,"solid nested RAR5 set decodes");
  for(const char *leaf:{"plain.7z.001","plain.part1.rar","legacy.rar"}){

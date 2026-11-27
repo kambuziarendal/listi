@@ -123,6 +123,8 @@ BMessage EncodeJob(const Job &job, uint32 what) {
     RequireJobField(item.AddString("path", path.c_str()));
     RequireJobField(item.AddBool("directory", entry.directory));
     RequireJobField(item.AddBool("link", entry.link));
+    if (entry.permissionsKnown)
+      RequireJobField(item.AddInt32("permissions", entry.permissions));
     if (entry.sizeKnown)
       RequireJobField(item.AddInt64("size", entry.size));
     if (entry.modifiedKnown) {
@@ -186,6 +188,12 @@ Job DecodeJob(const BMessage &m) {
     FileEntry entry;
     RequireSnapshot(item.FindBool("directory", &entry.directory) == B_OK &&
                     item.FindBool("link", &entry.link) == B_OK);
+    entry.permissionsKnown = FieldCount(item, "permissions", B_INT32_TYPE) != 0;
+    if (entry.permissionsKnown) {
+      const auto mode = item.GetInt32("permissions", -1);
+      RequireSnapshot(mode >= 0 && mode <= 07777);
+      entry.permissions = mode;
+    }
     entry.sizeKnown = FieldCount(item, "size", B_INT64_TYPE) != 0;
     entry.size = item.GetInt64("size", 0);
     entry.modifiedKnown = FieldCount(item, "modified", B_INT64_TYPE) != 0;

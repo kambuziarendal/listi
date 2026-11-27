@@ -133,6 +133,11 @@ Location ParseLocation(const std::string &s) {
 std::string Location::Authority() const {
   return scheme + "://" + host + (port ? ":" + std::to_string(port) : "");
 }
+std::string Location::CanonicalAuthority() const {
+  const unsigned defaultPort = scheme == "sftp" ? 22 : scheme == "ftp" ? 21 :
+                               scheme == "ftps" ? 990 : scheme == "smb" ? 445 : 0;
+  return port == defaultPort ? scheme + "://" + host : Authority();
+}
 std::string Location::URL() const {
   if (Local())
     return path;

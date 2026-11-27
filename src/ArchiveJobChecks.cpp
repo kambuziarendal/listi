@@ -12,6 +12,19 @@ std::string LocalSource(const std::string &path) {
           "Archive jobs currently require local files or a local archive.");
   return loc.Archive() ? loc.archive : path;
 }
+Job PublishedArchiveGuard(const Job &edit, const std::string &receipt) {
+  const auto current = FindArchiveVolumes(edit.destination);
+  Require(current.Fingerprint() == receipt,
+          "Destination archive changed after publication. Sources were retained.");
+  const auto &file = current.files.front();
+  Job guard;
+  guard.archiveFormat = edit.archiveFormat;
+  guard.destinationFolder = edit.destinationFolder;
+  guard.expectedDestination = edit.expectedDestination;
+  guard.expectedSources[edit.destination] = {int32_t(file.device), int64_t(file.inode)};
+  guard.expectedArchiveSets.emplace(edit.destination, receipt);
+  return guard;
+}
 void VerifyArchiveSets(const Job &job) {
   for (const auto &item : job.expectedArchiveSets)
     Require(FindArchiveVolumes(item.first).Fingerprint() == item.second,

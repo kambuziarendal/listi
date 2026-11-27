@@ -22,10 +22,11 @@ struct Name {
   int kind = 0, index = 0;
 };
 Name Parse(const std::string &name) {
-  static const std::regex seven(R"((.*\.7z)\.([0-9]{3,6}))", std::regex::icase);
-  static const std::regex rar(R"((.*)\.part([0-9]{1,6})\.rar)",
+  // A basename may contain CR and LF, which ECMAScript dot does not match.
+  static const std::regex seven(R"(([^/]*\.7z)\.([0-9]{3,6}))", std::regex::icase);
+  static const std::regex rar(R"(([^/]*)\.part([0-9]{1,6})\.rar)",
                               std::regex::icase);
-  static const std::regex old(R"((.*)\.([r-z])([0-9]{2}))", std::regex::icase);
+  static const std::regex old(R"(([^/]*)\.([r-z])([0-9]{2}))", std::regex::icase);
   std::smatch m;
   Name n;
   if (std::regex_match(name, m, seven)) {

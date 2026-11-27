@@ -31,6 +31,17 @@ int main(int argc, char **argv) {
       if (std::string(argv[1]) == "dump") {
         for (auto &item : ReadFileClipboard(Data(*be_clipboard)))
           printf("%s %s\n", item.cut ? "CUT" : "COPY", item.path.c_str());
+      } else if (std::string(argv[1]) == "mixed" && argc == 4) {
+        // The first Tracker reference is Cut; the second is Copy.
+        auto selection = MakeFileSelection({argv[2], argv[3]}, true);
+        for (const auto &item : ReadFileClipboard(selection)) {
+          if (item.path == argv[3]) {
+            auto key = item.key;
+            key[0] = 'm';
+            Check(selection.ReplaceInt32(key.c_str(), 'Tcsl') == B_OK, "set Tracker Copy mode");
+          }
+        }
+        Set(*be_clipboard, selection);
       } else if ((std::string(argv[1]) == "copy" || std::string(argv[1]) == "cut") && argc > 2) {
         std::vector<std::string> paths; for (int i=2;i<argc;++i) paths.emplace_back(argv[i]);
         PutFileClipboard(paths, std::string(argv[1]) == "cut");

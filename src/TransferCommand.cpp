@@ -156,7 +156,7 @@ Job PrepareTransfer(Job job, bool allowSameFolder) {
       throw std::runtime_error(
           "Two entries would use the same destination name: " + name);
     const auto from = ParseLocation(source);
-    if (job.action == Action::Move && from.Authority() != target.Authority())
+    if (job.action == Action::Move && from.CanonicalAuthority() != target.CanonicalAuthority())
       throw std::runtime_error(
           "Use Copy between these locations. The originals are kept.");
     if (!target.Local() || !from.Local())

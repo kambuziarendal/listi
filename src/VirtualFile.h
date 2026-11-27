@@ -38,6 +38,8 @@ struct TransferControl {
   NetworkCleanupBudget *cleanup = nullptr;
   // Bound by an archive member transfer; listings and reads must not adopt a new revision.
   const std::string *archiveVersion = nullptr;
+  // Set immediately before handing a mutation to the transport library.
+  bool *mutationSubmitted = nullptr;
   void RequireArchiveVersion(const std::string &actual) const {
     if (archiveVersion && *archiveVersion != actual)
       throw std::runtime_error("Archive changed after selection. Reload and select again.");
@@ -61,6 +63,7 @@ struct Location {
   bool Archive() const { return scheme == "archive"; }
   std::string URL() const;
   std::string Authority() const;
+  std::string CanonicalAuthority() const;
 };
 struct Connection {
   std::string username, password, domain, privateKey, knownHosts, keyPassphrase;

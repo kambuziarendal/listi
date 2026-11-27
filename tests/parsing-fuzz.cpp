@@ -45,6 +45,10 @@ void VerifyLocationRegressions() {
   Require(ResolveVirtualRelativePath(archive, "%2e%2e/%2f") ==
           archive + "%252e%252e/%252f");
   const std::string remote = "sftp://fixture:22/";
+  Require(ParseLocation(remote).CanonicalAuthority() ==
+          ParseLocation("sftp://FIXTURE/").CanonicalAuthority());
+  Require(ParseLocation(remote).CanonicalAuthority() !=
+          ParseLocation("sftp://fixture:2222/").CanonicalAuthority());
   Require(ResolveVirtualRelativePath(remote + "old", "../a/b/../c") ==
           remote + "a/c");
   Require(ResolveVirtualRelativePath(remote + "old", ".") == remote + "old");

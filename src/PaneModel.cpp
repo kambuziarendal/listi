@@ -192,6 +192,9 @@ std::map<std::string, Listi::FileEntry> PaneModel::SelectedRemoteEntries() const
     entry.link = row->kind == 2;
     entry.sizeKnown = row->sizeKnown;
     entry.size = row->size;
+    entry.permissionsKnown = row->permissions >= 0;
+    if (entry.permissionsKnown)
+      entry.permissions = row->permissions;
     entry.modifiedKnown = row->modifiedKnown;
     entry.modified = row->modified;
     entry.modifiedFraction = row->modifiedFraction;

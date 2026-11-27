@@ -821,7 +821,7 @@ Result RunArchiveLocalMove(const Job &job, const Hooks &hooks) {
               written.errors.empty() ? "Destination archive update failed."
                                      : written.errors.front());
       copied = true;
-      published = PrepareArchiveEditTarget(target.archive);
+      published = PublishedArchiveGuard(add, written.publishedArchiveVersion);
     } else {
       // Local directory merges may publish several files. A skipped or failed
       // file retains every source member; never treat a partial copy as a move.
@@ -1000,7 +1000,7 @@ Result RunArchiveMove(const Job &job, const Hooks &hooks) {
       copied = true;
       // Destination is now committed and fsynced. Never roll it back to stale
       // bytes if source cleanup fails; retain both copies and report the failure.
-      auto published = PrepareArchiveEditTarget(target.archive);
+      auto published = PublishedArchiveGuard(add, written.publishedArchiveVersion);
       sourceGuard.expectedSources.insert(published.expectedSources.begin(),
                                          published.expectedSources.end());
       sourceGuard.expectedArchiveSets.insert(

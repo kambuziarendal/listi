@@ -9,6 +9,7 @@ namespace Listi {
 struct Job;
 namespace ArchiveJobChecks {
 std::string LocalSource(const std::string &path);
+Job PublishedArchiveGuard(const Job &edit, const std::string &receipt);
 void VerifyArchiveSets(const Job &);
 void RequireArchiveVersions(const Job &shown, const Job &prepared);
 void Guards(const Job &);

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "ConnectionView.h"
 #include "Common.h"
+#include "TransferCommand.h"
 #include "VirtualFile.h"
 #include <Application.h>
 #include <TextControl.h>
@@ -193,6 +194,21 @@ int main() {
   const auto rsa = directory + "/id_rsa", ed = directory + "/id_ed25519";
   std::ofstream(ed + ".pub") << "public key only";
   bool ok = check("");
+  auto canPrepareMove = [](const std::string &from, const std::string &to) {
+    try {
+      Listi::PrepareTransfer({Listi::Action::Move, {from + "/in/file"}, to + "/out"});
+      return true;
+    } catch (const std::runtime_error &) {
+      return false;
+    }
+  };
+  const std::string implicit = "sftp://fixture", explicitPort = "sftp://fixture:22";
+  const bool routes = canPrepareMove(implicit, explicitPort) &&
+                      canPrepareMove(explicitPort, implicit) &&
+                      !canPrepareMove(implicit, "sftp://fixture:2222");
+  puts(routes ? "PASS implicit and explicit SFTP route preparation"
+              : "FAIL implicit and explicit SFTP route preparation");
+  ok &= routes;
   std::ofstream(rsa) << "test";
   ok &= check(rsa);
   std::ofstream(ed) << "test";
