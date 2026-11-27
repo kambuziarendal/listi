@@ -98,8 +98,10 @@ public:
       const auto preview = job.action == Action::Restore ? PreviewRestore(job) : PreviewTrash(job);
       // Confirm the frozen job, never the current pane or selection.
       reply = EncodeJob(job, kTrashReady);
-      reply.AddString("preview", preview.c_str());
+      RequireJobField(reply.AddString("preview", preview.c_str()));
     } catch (const std::exception &error) {
+      reply.MakeEmpty(); // Never deliver a valid job without its confirmation text.
+      reply.what = kTrashReady;
       reply.AddString("error", error.what());
     }
     reply.AddInt64("request", request);
@@ -164,7 +166,7 @@ void FileOperationFlow::AskNamedEntry(Action action, const Pane &source,
   if (!duplicate)
     text += "\nRelative: path from this folder. Absolute: full target path.";
   auto accepted = EncodeJob(job, kNamedEntryAccepted);
-  accepted.AddString("newEntryIn", job.destination.c_str());
+  RequireJobField(accepted.AddString("newEntryIn", job.destination.c_str()));
   AskInline(text.c_str(), duplicate ? "Duplicate" : "Relative link", accepted,
             job.entryName.c_str(), duplicate ? nullptr : "Absolute link");
 }
@@ -243,7 +245,7 @@ void FileOperationFlow::BeginOperation(Action action, const Pane &source,
     std::string question = rename ? "Rename: " + job.sources.front()
                                   : "Create in: " + job.destination;
     if (file)
-      accepted.AddString("newEntryIn", job.destination.c_str());
+      RequireJobField(accepted.AddString("newEntryIn", job.destination.c_str()));
     AskInline(question.c_str(), rename ? "Rename" : file ? "Create file" : "Create folder",
               accepted, name.c_str());
     return;

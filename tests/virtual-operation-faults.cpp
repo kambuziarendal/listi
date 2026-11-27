@@ -45,6 +45,7 @@ struct Remote {
   long nanoseconds = 0;
   bool directory = false;
   std::string identity;
+  std::optional<unsigned> permissions;
 };
 std::map<std::string, Remote> files;
 bool foldDirectoryNames = false;
@@ -54,6 +55,9 @@ std::string StoragePath(std::string path) {
   if (foldDirectoryNames && path.rfind("sftp://fixture/out/", 0) == 0 && at != std::string::npos &&
       (path.size() == at + sizeof(alias) - 1 || path[at + sizeof(alias) - 1] == '/'))
     path.replace(at, sizeof(alias) - 1, "/Drafts");
+  if (foldDirectoryNames && path.rfind("sftp://fixture/out/", 0) == 0 &&
+      Listi::LocationLeaf(path) == "report")
+    path.replace(path.size() - 6, 6, "Report");
   return path;
 }
 bool corruptUpload = false, denyReadback = false, cancelReadback = false;
@@ -150,6 +154,7 @@ bool StatNetwork(const Location &l, FileEntry &entry, const TransferControl &c,
   if (it == files.end()) return false;
   entry.path = l.URL(); entry.name = LocationLeaf(entry.path);
   entry.directory = it->second.directory;
+  entry.permissions = it->second.permissions.value_or(entry.directory ? 0755 : 0644);
   entry.providerIdentity = it->second.identity;
   entry.sizeKnown = !omitStageSize || !suffix(l.URL(), ".part");
   entry.size = it->second.data.size();
@@ -459,9 +464,9 @@ int main() {
   localPublish = LocalPublish::Unexpected;
   const auto copiedFolder = downloadFolder + "/folder";
   check(!partial.completed && partial.partialCopies == 1 &&
-            errorHas(partial, "Source read denied") && partial.outcomes.size() == 2 &&
-            partial.outcomes.front().source == healthy &&
-            partial.outcomes.front().status == "copied" &&
+            errorHas(partial, "Source read denied") && partial.outcomes.size() == 3 &&
+            partial.outcomes.front().status == "folder created" &&
+            partial.outcomes[1].source == healthy && partial.outcomes[1].status == "copied" &&
             partial.outcomes.back().source == sourceFolder &&
             partial.outcomes.back().destination == copiedFolder &&
             partial.outcomes.back().status == "partial" &&
@@ -482,13 +487,32 @@ int main() {
   localPublish = LocalPublish::Unexpected;
   check(!partial.completed && done == 1 && partial.partialCopies == 1 &&
             errorHas(partial, nestedRemote.c_str()) && errorHas(partial, "Only entries shown") &&
-            partial.outcomes.size() == 2 && partial.outcomes.front().source == delivered &&
-            partial.outcomes.front().status == "copied" && partial.outcomes.back().source == sourceFolder &&
+            partial.outcomes.size() == 4 && partial.outcomes[0].status == "folder created" &&
+            partial.outcomes[1].status == "folder created" && partial.outcomes[2].source == delivered &&
+            partial.outcomes[2].status == "copied" && partial.outcomes.back().source == sourceFolder &&
             partial.outcomes.back().status == "partial",
         "a nested FTP fallback on final listing retains the file receipt but not folder completion");
   unlink((copiedFolder + "/nested/visible").c_str());
   rmdir((copiedFolder + "/nested").c_str());
   rmdir(copiedFolder.c_str());
+  reset();
+  files[sourceFolder] = {"", 1, 0, true, "folder-id", 0755};
+  files[healthy] = {"readable memo", 1};
+  localPublish = LocalPublish::Limited;
+  Hooks tightened = hooks;
+  tightened.fileDone = [&](const auto &path, const auto &) {
+    if (path == healthy)
+      files[sourceFolder].permissions = 0700;
+  };
+  r = RunVirtual({Action::Copy, {sourceFolder}, downloadFolder}, tightened);
+  struct stat privateDirectory;
+  check(!r.completed && r.partialCopies == 1 && errorHas(r, "changed before setting") &&
+            !lstat(copiedFolder.c_str(), &privateDirectory) && (privateDirectory.st_mode & 0777) == 0700 &&
+            !access((copiedFolder + "/a-readable").c_str(), F_OK),
+        "source permission tightening during download keeps the partially delivered directory private");
+  unlink((copiedFolder + "/a-readable").c_str());
+  rmdir(copiedFolder.c_str());
+  localPublish = LocalPublish::Unexpected;
   rmdir(downloadFolder.c_str());
   const timespec referenceTime[] = {{0, UTIME_OMIT}, {1, 654000000}};
   FileEntry expected;
@@ -671,6 +695,64 @@ int main() {
                files.at(out + "/drafts/second").data == "second")),
           fold ? "case-insensitive target stops a folder collision and retains delivered receipt" :
                  "case-sensitive target preserves both folders and ordinary existing-root merge");
+  }
+  // Start a new runner for every retry, with no in-memory claims from the
+  // earlier copy. A provider ID still cannot make a different spelling exact.
+  for (bool reverse : {false, true}) {
+    reset();
+    foldDirectoryNames = true;
+    const auto left = in + "/Drafts", right = in + "/drafts";
+    files[left] = files[right] = {"", 1, 0, true};
+    files[left + "/one"] = {"first"};
+    files[right + "/two"] = {"second"};
+    const std::string parent = "sftp://fixture/out";
+    const auto arrived = parent + "/Drafts";
+    r = RunVirtual({Action::Copy, {left, right}, parent}, hooks);
+    check(r.completed == 1 && r.errors.size() == 1 && files.at(arrived + "/one").data == "first" &&
+              !files.count(arrived + "/two"), "first attempt refuses a directory alias");
+    files[arrived].identity = "server-directory-id";
+    Job retry{Action::Copy, reverse ? std::vector<std::string>{right, left} :
+                                     std::vector<std::string>{right}, parent};
+    r = RunVirtual(retry, hooks);
+    check(r.completed == int(reverse) && r.errors.size() == 1 &&
+              files.at(arrived + "/one").data == "first" && !files.count(arrived + "/two"),
+          "reverse order or remaining-only retry refuses the differently spelled directory");
+  }
+  for (bool fold : {false, true}) {
+    for (bool nestedNames : {false, true}) {
+      reset();
+      foldDirectoryNames = fold;
+      const std::string container = "sftp://fixture/in/batch";
+      const std::string target = "sftp://fixture/out";
+      const auto output = nestedNames ? target + "/batch" : target;
+      const auto old = container + "/first", upper = container + "/Report", lower = container + "/report";
+      files[container] = {"", 1, 0, true};
+      files[old] = {"replace old target"};
+      files[upper] = {"first report"};
+      files[lower] = {"second report"};
+      files[output] = {"", 1, 0, true};
+      files[output + "/first"] = {"old"};
+      Hooks replace = hooks;
+      int questions = 0;
+      replace.conflict = [&](const auto &) { ++questions; return Decision::ReplaceAll; };
+      Job batch{Action::Copy, nestedNames ? std::vector<std::string>{container} :
+                                          std::vector<std::string>{old, upper, lower}, target};
+      r = RunVirtual(batch, replace);
+      const bool separate = !fold;
+      check(r.completed == (nestedNames ? int(separate) : 2 + int(separate)) &&
+                r.errors.size() == size_t(fold) && questions == 1 &&
+                files.at(output + "/Report").data == "first report" &&
+                files.at(upper).data == "first report" && files.at(lower).data == "second report" &&
+                (separate ? files.at(output + "/report").data == "second report" :
+                            !files.count(output + "/report")),
+            "Replace All protects earlier file deliveries including children, without blocking distinct names");
+      if (fold) {
+        r = RunVirtual({Action::Copy, {lower}, output}, replace);
+        check(!r.completed && r.errors.size() == 1 && questions == 1 &&
+                  files.at(output + "/Report").data == "first report",
+              "retry of just the remaining file cannot replace a differently spelled delivered file");
+      }
+    }
   }
   foldDirectoryNames = false;
   const auto folder = std::string(dir) + "/upload-folder";

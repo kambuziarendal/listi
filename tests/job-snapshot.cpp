@@ -1,17 +1,40 @@
 // SPDX-License-Identifier: MIT
 #include "JobSnapshot.h"
 #include "VirtualFile.h"
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <sys/stat.h>
 #include <unistd.h>
+namespace {
+const char *failedValue = nullptr;
+bool injected = false;
+std::string Read(const std::string &path) {
+  std::ifstream stream(path);
+  return {std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>()};
+}
+}
+extern "C" status_t RealAddString(BMessage *, const char *, const char *)
+    asm("__real__ZN8BMessage9AddStringEPKcS1_");
+extern "C" status_t WrappedAddString(BMessage *, const char *, const char *)
+    asm("__wrap__ZN8BMessage9AddStringEPKcS1_");
+extern "C" status_t WrappedAddString(BMessage *message, const char *key, const char *value) {
+  if (failedValue && !injected && !strcmp(key, "source") && !strcmp(value, failedValue)) {
+    injected = true;
+    return B_NO_MEMORY;
+  }
+  return RealAddString(message, key, value);
+}
 int main() {
   char tmp[]="/tmp/Listi-snapshot-XXXXXX";char *root=mkdtemp(tmp);if(!root)return 2;
   std::string base=root,src=base+"/file",dst=base+"/dest";mkdir(dst.c_str(),0755);
   int failures=0,checks=0;
   auto check=[&](bool ok,const char*text){++checks;failures+=!ok;std::cout<<(ok?"PASS ":"FAIL ")<<text<<std::endl;};
   {
-    const auto rename = Listi::EncodeJob(Listi::Job{Listi::Action::Rename, {src}, dst}, 'test');
+    std::ofstream(src) << "first";
+    Listi::Job selection{Listi::Action::Rename, {src}, dst};
+    Listi::FreezeLocalJob(selection, dst);
+    const auto rename = Listi::EncodeJob(selection, 'test');
     check(!Listi::DecodeSubmittedJob(rename, {Listi::Action::Trash, Listi::Action::Delete}),
           "a confirmation cannot submit a different command");
     check(!Listi::DecodeSubmittedJob(BMessage('test'), {Listi::Action::Copy}),
@@ -19,6 +42,73 @@ int main() {
     const auto accepted = Listi::DecodeSubmittedJob(rename, {Listi::Action::Rename});
     check(accepted && accepted->sources.front() == src && accepted->destination == dst,
           "a valid confirmation carries its original paths");
+
+    const auto second = base + "/second";
+    std::ofstream(second) << "second";
+    std::ofstream(dst + "/keep") << "untouched";
+    selection.action = Listi::Action::Copy;
+    selection.sources.push_back(second);
+    Listi::FreezeLocalJob(selection, dst);
+    failedValue = second.c_str();
+    bool refused = false;
+    try {
+      const auto accepted = Listi::EncodeJob(selection, 'test');
+      if (auto job = Listi::DecodeSubmittedJob(accepted, {Listi::Action::Copy}))
+        Listi::Run(*job, {});
+    } catch (const std::runtime_error &) {
+      refused = true;
+    }
+    failedValue = nullptr;
+    check(injected && refused && access((dst + "/file").c_str(), F_OK) != 0 &&
+              access((dst + "/second").c_str(), F_OK) != 0 && Read(dst + "/keep") == "untouched" &&
+              Read(src) == "first" && Read(second) == "second",
+          "failed second source append cannot submit a partial copy or change either side");
+    auto complete = Listi::EncodeJob(selection, 'test');
+    auto shortened = complete;
+    shortened.RemoveData("source", 1);
+    shortened.RemoveData("identity", 1);
+    check(!Listi::DecodeSubmittedJob(shortened, {Listi::Action::Copy}),
+          "even matching truncated lists cannot satisfy the recorded selection count");
+    auto legacy = complete;
+    legacy.RemoveName("sourceCount");
+    shortened = legacy;
+    shortened.RemoveData("source", 1);
+    check(!Listi::DecodeSubmittedJob(shortened, {Listi::Action::Copy}),
+          "legacy confirmation rejects an extra identity for an unselected source");
+    shortened = legacy;
+    shortened.RemoveName("source");
+    check(!Listi::DecodeSubmittedJob(shortened, {Listi::Action::Copy}),
+          "an empty selection cannot confirm a file copy");
+    shortened = legacy;
+    shortened.RemoveData("identity", 1);
+    check(!Listi::DecodeSubmittedJob(shortened, {Listi::Action::Copy}),
+          "every local source requires its original identity");
+    BMessage malformed;
+    malformed.AddString("path", second.c_str());
+    malformed.AddInt32("device", 0);
+    shortened.AddMessage("identity", &malformed);
+    check(!Listi::DecodeSubmittedJob(shortened, {Listi::Action::Copy}),
+          "an incomplete nested identity cannot be substituted for the missing guard");
+    auto mismatched = selection;
+    const auto secondNode = mismatched.expectedSources.at(second);
+    mismatched.expectedSources.erase(second);
+    mismatched.expectedSources.emplace(dst + "/keep", secondNode);
+    check(!Listi::DecodeSubmittedJob(Listi::EncodeJob(mismatched, 'test'), {Listi::Action::Copy}),
+          "equal counts cannot hide an identity for a different path");
+    auto restored = Listi::DecodeSubmittedJob(legacy, {Listi::Action::Copy});
+    Listi::Result result;
+    if (restored)
+      result = Listi::Run(*restored, {});
+    check(restored && result.completed == 2 && result.errors.empty() && Read(dst + "/file") == "first" &&
+              Read(dst + "/second") == "second" && Read(dst + "/keep") == "untouched" &&
+              Read(src) == "first" && Read(second) == "second",
+          "a complete legacy confirmation copies the entire selection and preserves bystanders");
+    Listi::Job creation{Listi::Action::MakeDirectory, {}, dst};
+    Listi::FreezeLocalJob(creation, dst);
+    check(bool(Listi::DecodeSubmittedJob(Listi::EncodeJob(creation, 'test'), {Listi::Action::MakeDirectory})),
+          "intentional no-source create confirmation retains its captured parent");
+    for (const auto &path : {src, second, dst + "/file", dst + "/second", dst + "/keep"})
+      unlink(path.c_str());
   }
   for (auto action : {Listi::Action::Rename, Listi::Action::Move, Listi::Action::Delete}) {
     const std::string path = "sftp://fixture/selected";
@@ -29,6 +119,10 @@ int main() {
     entry.SetModification(123, 456000000);
     entry.providerIdentity = "object-7";
     auto captured = Listi::DecodeSubmittedJob(Listi::EncodeJob(selection, 'test'), {action});
+    if (!captured) {
+      check(false, "complete remote selection remains valid");
+      continue;
+    }
     const auto &saved = captured->expectedRemoteSources.at(path);
     check(!saved.directory && saved.link && saved.sizeKnown && saved.size == entry.size &&
               saved.SameModification(entry) && saved.providerIdentity == entry.providerIdentity,

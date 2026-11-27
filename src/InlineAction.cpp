@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "InlineAction.h"
 #include "NamedEntry.h"
+#include "MainWindow.h"
 #include "AdaptiveScrollView.h"
 #include <StringView.h>
 #include "ConnectionView.h"
@@ -177,13 +178,17 @@ void InlineAction::MessageReceived(BMessage *message) {
         name->SetToolTip("Enter one file or folder name, without a slash");
         return;
       }
-      accepted.AddString("name", value.c_str());
+      if (accepted.AddString("name", value.c_str()) != B_OK) {
+        PostMainWindowNotice("Cannot prepare the confirmation. Nothing was submitted.");
+        return;
+      }
     }
-    if (options)
-      accepted.AddInt32("option", options->IndexOf(options->FindMarked()));
-    accepted.AddInt32("which", message->what == kThird       ? 3
-                               : message->what == kAlternate ? 2
-                                                            : 1);
+    const int32 which = message->what == kThird ? 3 : message->what == kAlternate ? 2 : 1;
+    if ((options && accepted.AddInt32("option", options->IndexOf(options->FindMarked())) != B_OK) ||
+        accepted.AddInt32("which", which) != B_OK) {
+      PostMainWindowNotice("Cannot prepare the confirmation. Nothing was submitted.");
+      return;
+    }
   }
   Close();
   // No queued close event may cancel an unrelated later question.

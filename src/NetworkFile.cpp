@@ -499,7 +499,8 @@ FileEntry ParseList(const std::string &line, const Location &l, bool mlsd) {
 }
 // MLSD is a listing, not an exact lookup. MLST asks the server to
 // resolve the requested spelling, including on case-insensitive volumes.
-bool StatFtpName(const Location &l, FileEntry &entry, const TransferControl &control) {
+enum class FtpLookup { Found, Missing, Unsupported };
+FtpLookup LookupFtpName(const Location &l, FileEntry &entry, const TransferControl &control) {
   auto root = l;
   root.path = "/";
   CurlSession probe(root, control);
@@ -534,15 +535,30 @@ bool StatFtpName(const Location &l, FileEntry &entry, const TransferControl &con
     // Use the requested leaf, not the server's potentially absolute pathname.
     entry = ParseList(facts + " " + LocationLeaf(l.URL()), ParseLocation(ParentLocation(l.URL())), true);
     if (!entry.name.empty())
-      return true;
+      return FtpLookup::Found;
   }
   // RFC 3659 also uses 550 for denied access; never treat the code
   // alone, unrecognized/localized text, or unsupported MLST as absence.
-  if (status == CURLE_QUOTE_ERROR && last == "550 No such file or directory.")
-    return false;
+  if (status == CURLE_QUOTE_ERROR) {
+    if (last == "550 No such file or directory.")
+      return FtpLookup::Missing;
+    if (last.compare(0, 4, "500 ") == 0 || last.compare(0, 4, "502 ") == 0 ||
+        last.compare(0, 4, "504 ") == 0)
+      return FtpLookup::Unsupported;
+  }
   throw std::runtime_error("FTP server did not confirm the state of this name: " + l.URL());
 }
 } // namespace
+bool RecheckFtpListingEntry(const Location &location, FileEntry &current,
+                            const TransferControl &control) {
+  const auto result = LookupFtpName(location, current, control);
+  if (result != FtpLookup::Unsupported)
+    return result == FtpLookup::Found;
+  // A server can implement MLSD but not MLST. Re-read its directory rather
+  // than certifying the old entry or treating command rejection as absence.
+  return StatNetwork(location, current, control);
+}
+
 bool NetworkAvailable(const std::string &s) {
   return s == "smb" ? SMB().Available() : Curl().Available();
 }
@@ -681,8 +697,12 @@ bool StatNetwork(const Location &l, FileEntry &e, const TransferControl &c,
       return entry.name == name;
     });
     if (item == items.end()) {
-      if (VisibleEntriesOnly(method))
-        return StatFtpName(l, e, c);
+      if (VisibleEntriesOnly(method)) {
+        const auto result = LookupFtpName(l, e, c);
+        if (result == FtpLookup::Unsupported)
+          throw std::runtime_error("FTP server did not confirm the state of this name: " + url);
+        return result == FtpLookup::Found;
+      }
       // SFTP listing names may differ from the spelling the server resolves.
       // A successful NOBODY request proves the name resolves, but cannot
       // supply its directory/link type. Do not invent that metadata.

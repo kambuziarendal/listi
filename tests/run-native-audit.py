@@ -36,6 +36,7 @@ audit-io theme-text connection-defaults ssh-key-format folder-history
 """.split()
 
 WRAPS = {
+    "job-snapshot": ["_ZN8BMessage9AddStringEPKcS1_"],
     "folder-history": ["write", "fstat", "real_time_clock_usecs"],
     "working-windows": ["stat", "_ZN10BPopUpMenu2GoE6BPointbbb"],
     "removable-copy": ["fsync", "write", "read"],
@@ -104,8 +105,9 @@ def run_tar_edit_ownership(binary):
                 header = tarfile.TarInfo(name)
                 if name == "keep":
                     header.pax_headers["LIBARCHIVE.creationtime"] = "1690000000.987654321"
-                    header.pax_headers["atime"] = "1710000001.987654321"
-                    header.pax_headers["ctime"] = "1710000002.123456789"
+                    header.pax_headers["atime"] = "1710000001.987654321789"
+                    header.pax_headers["ctime"] = "1710000002.123456789987"
+                    header.pax_headers["mtime"] = "1700000001.375123456789"
                     header.mode = 0o4750
                     header.mtime = 1700000001.375
                 header.uid, header.gid = 1001, 2002
@@ -129,7 +131,7 @@ def run_tar_edit_ownership(binary):
             assert member.pax_headers["LIBARCHIVE.creationtime"] == "1690000000.987654321"
             assert member.pax_headers["atime"] == "1710000001.987654321"
             assert member.pax_headers["ctime"] == "1710000002.123456789"
-            assert member.mode == 0o4750 and member.mtime == 1700000001.375
+            assert member.mode == 0o4750 and member.pax_headers["mtime"] == "1700000001.375123456"
             assert archive.extractfile(member).read() == b"keep"
 
         with tarfile.open(path, "w:gz") as archive:

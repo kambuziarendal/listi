@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.38.0-48 (private alpha candidate)
+
+- Replace All cannot replace a result delivered earlier in the same transfer. A directory alias with a different spelling is not an implicit merge, including on a later attempt.
+- Private network folders download into restricted local directories. Job Details distinguishes newly created folders from existing ones.
+- Permanent deletion accounts for link-count changes caused by its own removals. Incomplete job confirmations are rejected rather than submitting a smaller selection.
+- SHA-256 comparison uses an exact FTP lookup when available without dropping its independent final directory check.
+
 ## 0.38.0-47 (private alpha candidate)
 
 - Local transfers refuse to merge distinct source directories into one destination directory. A move into an existing directory checks access permissions and ownership before copying its children.

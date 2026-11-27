@@ -94,7 +94,7 @@ ArchivePrompt ArchiveActions::ConfirmAddition(const Job &job,
                                              const std::string &lease) {
   auto accepted = EncodeJob(job, kArchiveEditAccepted);
   if (!lease.empty())
-    accepted.AddString("clipboardLease", lease.c_str());
+    RequireJobField(accepted.AddString("clipboardLease", lease.c_str()));
   BString text;
   if (job.action == Action::MoveArchive) {
     text << "Move " << int32(job.sources.size()) << " selected entries to:\n"

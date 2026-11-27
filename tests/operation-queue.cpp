@@ -581,7 +581,35 @@ int main(){
        "dismissing the final alert clears Needs attention without reporting success");
  window->Unlock();
 
- window->queue->Enqueue(job(0,402));check(wait([&]{return window->conflicts.size()==6;}),"shutdown fixture is genuinely waiting at conflict");
+ // Once this job has delivered a source, even a stale/repeated Replace
+ // answer must not overwrite it. Exercise the actual queue answers and UI.
+ const auto secondFolder = root + "/other-input";
+ mkdir(secondFolder.c_str(), 0700);
+ const auto firstSource = root + "/in/conflict", secondSource = secondFolder + "/conflict";
+ std::ofstream(firstSource) << "first";
+ std::ofstream(secondSource) << "second";
+ Job colliding{Action::Move, {firstSource, secondSource}, root + "/out"};
+ FreezeLocalJob(colliding, colliding.destination);
+ const auto conflictJob = window->queue->Enqueue(colliding);
+ if (!wait([&] { return window->conflicts.size() == 6; }))
+   return 2;
+ window->Lock();
+ const auto collision = window->conflicts.back();
+ const auto collisionRequest = collision.GetInt64("request", 0);
+ auto *replace = window->FindView("Replace");
+ auto *keep = window->FindView("Keep both");
+ check(collision.GetBool("separateOnly", false) && replace && replace->IsHidden() &&
+           keep && !keep->IsHidden() && !window->queue->Answer(Decision::ReplaceAll, collisionRequest) &&
+           !window->queue->Answer(Decision::Replace, collisionRequest),
+       "same-job collision hides replacement and refuses stale Replace answers");
+ window->Unlock();
+ check(window->queue->Answer(Decision::KeepBoth, collisionRequest) &&
+           wait([&] { return window->queue->Report(conflictJob) != nullptr; }) &&
+           bytes(root + "/out/conflict") == "first" && bytes(root + "/out/conflict (2)") == "second" &&
+           access(firstSource.c_str(), F_OK) != 0 && access(secondSource.c_str(), F_OK) != 0,
+       "Keep both transfers both source payloads to separate recoverable names");
+
+ window->queue->Enqueue(job(0,402));check(wait([&]{return window->conflicts.size()==7;}),"shutdown fixture is genuinely waiting at conflict");
  window->Lock();
  clearReports->Invoke();
  window->Unlock();

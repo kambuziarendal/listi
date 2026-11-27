@@ -266,12 +266,17 @@ struct Runner {
   // The active stack protects ancestors; claims also survive returning from
   // a sibling or starting the next selected root.
   std::map<std::pair<dev_t, ino_t>, std::string> directoryClaims;
-  void ClaimDirectory(const struct stat &node, const std::string &source,
-                      const std::string &destination) {
-    auto claim = directoryClaims.emplace(std::make_pair(node.st_dev, node.st_ino), source);
-    if (!claim.second && claim.first->second != source)
-      throw std::runtime_error(destination + ": already used by source folder " +
-                               claim.first->second + "; not merged with " + source);
+  using NodeKey = std::pair<dev_t, ino_t>;
+  std::map<NodeKey, std::string> publishedFiles;
+  static NodeKey Key(const struct stat &node) { return {node.st_dev, node.st_ino}; }
+  std::string DirectoryConflict(const struct stat &node, const std::string &src,
+                                const std::string &dst, const PinnedDirectory &parent) const {
+    const auto prior = directoryClaims.find(Key(node));
+    if (prior != directoryClaims.end() && prior->second != src)
+      return dst + ": already used by source folder " + prior->second;
+    if (!parent.HasExactLeaf(Leaf(dst)))
+      return dst + ": destination folder uses a different spelling";
+    return {};
   }
   void GuardDirectories() const {
     for (const auto &[path, expected] : copyDirectories) {
@@ -526,6 +531,41 @@ struct Runner {
   void DurabilityNotice(const std::string &src) {
     CopyNotice(src, kNtfsDurabilityNotice);
   }
+  std::string SeparateName(const std::string &dst, bool directory) {
+    const auto leaf = Leaf(dst);
+    const auto dot = leaf.find_last_of('.');
+    const auto split = directory || dot == 0 || dot == std::string::npos ? leaf.size() : dot;
+    const auto prefix = Join(ParentLocation(dst), leaf.substr(0, split));
+    for (uint64_t number = 2;; ++number) {
+      Check();
+      const auto proposed = prefix + " (" + std::to_string(number) + ")" + leaf.substr(split);
+      struct stat node;
+      if (lstat(proposed.c_str(), &node))
+        return errno == ENOENT ? proposed : "";
+    }
+  }
+  bool ChooseSeparate(const std::string &src, std::string &dst, const struct stat &source,
+                      const struct stat &existing, const std::string &reason) {
+    const auto proposed = SeparateName(dst, S_ISDIR(source.st_mode));
+    if (h.copyConflict && !h.privateStaging && !guardedJob->copyForArchiveMove &&
+        !proposed.empty()) {
+      const auto decision = h.copyConflict({src, dst, proposed, source.st_size, existing.st_size,
+                                            source.st_mtime, existing.st_mtime, true});
+      if (decision == Decision::Abort)
+        throw Cancelled();
+      if (decision == Decision::Skip) {
+        ++result.skipped;
+        return false;
+      }
+      if (decision == Decision::KeepBoth) {
+        Guard();
+        dst = proposed;
+        Outcome(src, dst);
+        return true;
+      }
+    }
+    throw std::runtime_error(reason + "; not replaced or merged. Choose a separate name.");
+  }
   bool Allow(std::string &dst, const std::string &src, const struct stat &incoming,
              const struct stat &existing, bool &keepBoth) {
     if (guardedJob && guardedJob->action == Action::Duplicate)
@@ -541,21 +581,7 @@ struct Runner {
     if (h.copyConflict && !h.privateStaging && !guardedJob->copyForArchiveMove &&
         guardedJob->action == Action::Copy && S_ISREG(incoming.st_mode) &&
         S_ISREG(existing.st_mode)) {
-      const auto leaf = Leaf(dst);
-      const auto dot = leaf.find_last_of('.');
-      const auto split = dot == 0 || dot == std::string::npos ? leaf.size() : dot;
-      const auto prefix = Join(ParentLocation(dst), leaf.substr(0, split));
-      std::string proposed;
-      for (uint64_t number = 2;; ++number) {
-        Check();
-        proposed = prefix + " (" + std::to_string(number) + ")" + leaf.substr(split);
-        struct stat candidate;
-        if (lstat(proposed.c_str(), &candidate) != 0) {
-          if (errno != ENOENT)
-            proposed.clear();
-          break;
-        }
-      }
+      const auto proposed = SeparateName(dst, false);
       if (proposed.empty())
         d = h.conflict ? h.conflict(dst) : Decision::Abort;
       else
@@ -618,10 +644,15 @@ struct Runner {
   // CopyEntry checks again through pinned parents before using each merge.
   void CheckMoveMerges(const std::string &source, const std::string &destination,
                        const Snapshot &tree) {
+    std::set<std::string> separate;
     for (const auto &[path, selected] : tree) {
       if (!S_ISDIR(selected.st_mode))
         continue;
       Check();
+      if (separate.count(ParentLocation(path))) {
+        separate.insert(path);
+        continue;
+      }
       const auto target = destination + path.substr(source.size());
       struct stat existing;
       if (!Exists(target, &existing))
@@ -629,6 +660,11 @@ struct Runner {
       if (!S_ISDIR(existing.st_mode))
         throw std::runtime_error(target + ": destination is not a directory; not replaced");
       RequireSameMoveVolume(guardedJob->expectedDestination.device, existing.st_dev);
+      auto parent = PinParent(ParentLocation(target));
+      if (!DirectoryConflict(existing, path, target, parent).empty()) {
+        separate.insert(path);
+        continue;
+      }
       try {
         VerifyMoveMetadata(selected, existing, target);
       } catch (const std::runtime_error &error) {
@@ -638,12 +674,14 @@ struct Runner {
       }
     }
   }
-  bool SameEntry(const struct stat &a, const struct stat &b) {
+  bool SameEntryData(const struct stat &a, const struct stat &b) {
     return a.st_dev == b.st_dev && a.st_ino == b.st_ino &&
            a.st_mode == b.st_mode && SameOwner(a, b) && a.st_size == b.st_size &&
            a.st_mtim.tv_sec == b.st_mtim.tv_sec &&
-           a.st_mtim.tv_nsec == b.st_mtim.tv_nsec &&
-           a.st_ctim.tv_sec == b.st_ctim.tv_sec &&
+           a.st_mtim.tv_nsec == b.st_mtim.tv_nsec;
+  }
+  bool SameEntry(const struct stat &a, const struct stat &b) {
+    return SameEntryData(a, b) && a.st_ctim.tv_sec == b.st_ctim.tv_sec &&
            a.st_ctim.tv_nsec == b.st_ctim.tv_nsec;
   }
   void VerifyCopy(const std::string &source, const struct stat &original) {
@@ -703,6 +741,20 @@ struct Runner {
   void RemoveCopied(const std::string &root, const Snapshot &before,
                     bool *removedAny = nullptr) {
     VerifyCopiedTree(root, before);
+    struct SelectedLinks {
+      std::vector<std::string> names;
+      struct stat revision;
+    };
+    std::map<NodeKey, SelectedLinks> links;
+    if (guardedJob->action == Action::Delete) {
+      for (const auto &[path, selected] : before) {
+        if (!S_ISDIR(selected.st_mode) && selected.st_nlink > 1) {
+          auto &group = links[Key(selected)];
+          group.names.push_back(path);
+          group.revision = selected;
+        }
+      }
+    }
     // Reverse path order visits children before parents. Never enumerate new
     // entries during deletion: rmdir fails safely if a new child appears after
     // the snapshot.
@@ -724,10 +776,14 @@ struct Runner {
       VerifyCopy(it->first, it->second);
       bool directory = S_ISDIR(it->second.st_mode);
       VerifyMoveMetadata(it->second, now, it->first);
-      if (now.st_ino != it->second.st_ino || now.st_dev != it->second.st_dev ||
-          (!directory && !SameEntry(it->second, now)))
-        throw std::runtime_error(
-            it->first + ": source changed during cleanup; left untouched");
+      auto group = links.find(Key(it->second));
+      const auto &revision = group == links.end() ? it->second : group->second.revision;
+      if (now.st_ino != revision.st_ino || now.st_dev != revision.st_dev ||
+          (!directory && (!SameEntry(revision, now) || revision.st_nlink != now.st_nlink))) {
+        const std::string error = it->first + ": source changed during cleanup; left untouched";
+        Problem(it->first, error);
+        throw std::runtime_error(error);
+      }
       if (unlinkat(parent.n, leaf.c_str(), directory ? AT_REMOVEDIR : 0)) {
         const std::string error = it->first + ": " + strerror(errno);
         Problem(it->first, error);
@@ -736,6 +792,24 @@ struct Runner {
       Removed(it->first);
       if (removedAny)
         *removedAny = true;
+      if (group != links.end()) {
+        auto &remaining = group->second;
+        remaining.names.pop_back();
+        if (!remaining.names.empty()) {
+          // unlink changed this inode's ctime and link count. Observe the
+          // resulting revision immediately, before callbacks or the next item.
+          // Every later removal must still match that full revision.
+          const auto &next = remaining.names.back();
+          struct stat after;
+          if (lstat(next.c_str(), &after) || !SameEntryData(now, after) ||
+              after.st_nlink != now.st_nlink - 1) {
+            const std::string error = next + ": linked source changed during cleanup; left untouched";
+            Problem(next, error);
+            throw std::runtime_error(error);
+          }
+          remaining.revision = after;
+        }
+      }
       // The removal has committed. Poll before the next entry, not after
       // this one: a late cancellation cannot bring the source back.
       if (h.progress)
@@ -818,6 +892,10 @@ struct Runner {
       Fail(dst);
     }
     published = true;
+    struct stat reserved;
+    if (fstat(final.n, &reserved))
+      Fail(dst);
+    publishedFiles.emplace(Key(reserved), src);
     ++mutations;
     Outcome(src, dst).status = "partial";
     const auto stagingDetail = Outcome(src).detail;
@@ -936,6 +1014,14 @@ struct Runner {
         Fail(parentPath);
       PinnedDirectory parent(parentPath, parentIdentity.st_dev,
                              parentIdentity.st_ino, true);
+      if (existed) {
+        const auto reason = DirectoryConflict(before, src, dst, parent);
+        if (!reason.empty()) {
+          if (!ChooseSeparate(src, dst, st, before, reason))
+            return false;
+          existed = false; // Exclusive mkdir below also guards the proposed name.
+        }
+      }
       // Merge directories, but never traverse destination symbolic links.
       if (!existed) {
         if (mkdirat(parent.Descriptor(), Leaf(dst).c_str(), 0700))
@@ -951,7 +1037,7 @@ struct Runner {
       CheckDestinationDevice(parentIdentity.st_dev);
       const bool ntfsDirectory = NtfsCopy(before.st_dev);
       const bool ntfsParent = NtfsCopy(parentIdentity.st_dev);
-      ClaimDirectory(before, src, dst);
+      directoryClaims.emplace(Key(before), src);
       copyDirectories.emplace_back(dst, before);
       struct DirectoryScope {
         DirectoryStack &stack;
@@ -1023,24 +1109,39 @@ struct Runner {
     if (existed && S_ISDIR(before.st_mode))
       throw std::runtime_error(dst +
                                ": a directory cannot be replaced by a file");
-    if (existed && PlainCopy()) {
-      CheckDestinationDevice(before.st_dev);
-      if (NtfsCopy(before.st_dev))
-        throw std::runtime_error(dst + ": NTFS directory durability is unavailable; "
-                                     "existing files were left untouched. Copy to an unused name.");
-    }
-    bool keepBoth = false;
-    if (existed && !Allow(dst, src, st, before, keepBoth))
-      return false;
-    if (keepBoth)
-      Outcome(src, dst);
-    Guard();
     const auto parentPath = ParentLocation(dst);
     struct stat parentIdentity;
     if (lstat(parentPath.c_str(), &parentIdentity))
       Fail(parentPath);
     PinnedDirectory parentDirectory(parentPath, parentIdentity.st_dev,
                                     parentIdentity.st_ino);
+    bool keepBoth = false;
+    if (existed) {
+      const auto prior = publishedFiles.find(Key(before));
+      std::string reason;
+      if (prior != publishedFiles.end())
+        reason = dst + ": already delivered from " + prior->second;
+      else if (!parentDirectory.HasExactLeaf(Leaf(dst)))
+        reason = dst + ": replacement name does not match a confirmed directory entry";
+      if (!reason.empty()) {
+        if (!ChooseSeparate(src, dst, st, before, reason))
+          return false;
+        keepBoth = true;
+        existed = false;
+      } else {
+        if (PlainCopy()) {
+          CheckDestinationDevice(before.st_dev);
+          if (NtfsCopy(before.st_dev))
+            throw std::runtime_error(dst + ": NTFS directory durability is unavailable; "
+                                         "existing files were left untouched. Copy to an unused name.");
+        }
+        if (!Allow(dst, src, st, before, keepBoth))
+          return false;
+      }
+    }
+    if (keepBoth)
+      Outcome(src, dst);
+    Guard();
     const int parent = parentDirectory.Descriptor();
     // Keep staging on the target volume without extending a possibly
     // maximum-length destination leaf.
@@ -1213,12 +1314,16 @@ struct Runner {
         if (fstatat(parent, target.c_str(), &currentTarget, AT_SYMLINK_NOFOLLOW) ||
             !SameEntry(before, currentTarget))
           throw std::runtime_error(dst + ": destination changed during operation; left untouched");
+        // A conflict answer can wait while another writer renames the target.
+        // Check the actual spelling again even if the same inode still resolves.
+        parentDirectory.RequireExactLeaf(target);
         if (renameat(parent, leaf.c_str(), parent, target.c_str()))
           Fail(dst);
       } else {
         CommitUnusedName(tmp, dst, staged, parentDirectory);
       }
       published = true;
+      publishedFiles.emplace(Key(staged), src);
       bool flushed = false;
       try {
         flushed = FlushDestination(parentDirectory, stagingIdentity.st_dev,
@@ -1344,7 +1449,9 @@ struct Runner {
     oldParent.Verify();
     CommitUnusedName(source, destination, original, parent);
     if (S_ISDIR(original.st_mode))
-      ClaimDirectory(original, source, destination);
+      directoryClaims.emplace(Key(original), source);
+    else
+      publishedFiles.emplace(Key(original), source);
     FlushPublishedName(source, destination, parent, fromFolder == folder ? nullptr : &oldParent);
     Outcome(source, destination).status = "moved";
   }
@@ -1486,7 +1593,14 @@ struct Runner {
                                      ": selected source changed; left untouched");
           for (const auto &entry : deletion)
             Outcome(entry.first);
-          RemoveCopied(source, deletion);
+          bool removedAny = false;
+          try {
+            RemoveCopied(source, deletion, &removedAny);
+          } catch (...) {
+            if (removedAny && S_ISDIR(sourceStat.st_mode))
+              ++result.partialDeletions;
+            throw;
+          }
           result.completed++;
           continue;
         }

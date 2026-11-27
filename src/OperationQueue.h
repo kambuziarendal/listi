@@ -80,6 +80,6 @@ private:
   int answer = -1;
   int64 conflictSerial = 0, operationSerial = 0;
   int64 runningOperation = 0;
-  bool allowKeepBoth = false, askingFat = false;
+  bool allowKeepBoth = false, askingFat = false, separateOnly = false;
   bool awaitingAnswer = false;
 };

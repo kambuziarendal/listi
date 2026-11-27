@@ -4,6 +4,7 @@
 #include "VirtualFile.h"
 #include <sys/stat.h>
 #include <algorithm>
+#include <set>
 namespace Listi {
 void FreezeLocalJob(Job &job, const std::string &folder) {
   if (InterruptedVolumes().Contains(folder))
@@ -36,70 +37,113 @@ void FreezeLocalJob(Job &job, const std::string &folder) {
     job.destinationFolder = folder;
   }
 }
+void RequireJobField(status_t status) {
+  if (status != B_OK)
+    throw std::runtime_error("Cannot prepare the complete job. Nothing was submitted. Try again.");
+}
+namespace {
+void RequireSnapshot(bool ok) {
+  if (!ok)
+    throw std::runtime_error("Incomplete job selection. Nothing was submitted. Select the entries again.");
+}
+int32 FieldCount(const BMessage &message, const char *field, type_code expectedType) {
+  type_code type;
+  int32 count;
+  const auto status = message.GetInfo(field, &type, &count);
+  if (status == B_NAME_NOT_FOUND)
+    return 0;
+  RequireSnapshot(status == B_OK && type == expectedType && count > 0);
+  return count;
+}
+std::string RequiredString(const BMessage &message, const char *field) {
+  const char *value;
+  RequireSnapshot(message.FindString(field, &value) == B_OK && *value);
+  return value;
+}
+template<class F>
+void ReadItems(const BMessage &message, const char *field, F read) {
+  const auto count = FieldCount(message, field, B_MESSAGE_TYPE);
+  for (int32 i = 0; i < count; ++i) {
+    BMessage item;
+    RequireSnapshot(message.FindMessage(field, i, &item) == B_OK);
+    read(item);
+  }
+}
+void ReadPaths(const BMessage &message, const char *field, std::vector<std::string> &paths) {
+  const auto count = FieldCount(message, field, B_STRING_TYPE);
+  for (int32 i = 0; i < count; ++i) {
+    const char *path;
+    RequireSnapshot(message.FindString(field, i, &path) == B_OK && *path);
+    paths.emplace_back(path);
+  }
+}
+} // namespace
+
 BMessage EncodeJob(const Job &job, uint32 what) {
   BMessage m(what);
-  m.AddInt32("action", int(job.action));
-  m.AddString("archiveFormat", job.archiveFormat.c_str());
-  m.AddInt32("archiveLevel", job.archiveLevel);
-  m.AddInt64("archivePasswordToken", job.archivePasswordToken);
-  m.AddBool("archiveEncryptNames", job.archiveEncryptNames);
-  m.AddString("archivePath", job.archivePath.c_str());
+  RequireJobField(m.AddInt32("action", int(job.action)));
+  RequireJobField(m.AddInt64("sourceCount", static_cast<int64>(job.sources.size())));
+  RequireJobField(m.AddString("archiveFormat", job.archiveFormat.c_str()));
+  RequireJobField(m.AddInt32("archiveLevel", job.archiveLevel));
+  RequireJobField(m.AddInt64("archivePasswordToken", job.archivePasswordToken));
+  RequireJobField(m.AddBool("archiveEncryptNames", job.archiveEncryptNames));
+  RequireJobField(m.AddString("archivePath", job.archivePath.c_str()));
   for (const auto &path : job.archiveRemove)
-    m.AddString("archiveRemove", path.c_str());
+    RequireJobField(m.AddString("archiveRemove", path.c_str()));
   for (const auto &path : job.archiveFolders)
-    m.AddString("archiveFolder", path.c_str());
+    RequireJobField(m.AddString("archiveFolder", path.c_str()));
   for (const auto &rename : job.archiveRenames) {
     BMessage item;
-    item.AddString("from", rename.first.c_str());
-    item.AddString("to", rename.second.c_str());
-    m.AddMessage("archiveRename", &item);
+    RequireJobField(item.AddString("from", rename.first.c_str()));
+    RequireJobField(item.AddString("to", rename.second.c_str()));
+    RequireJobField(m.AddMessage("archiveRename", &item));
   }
-  m.AddString("entryName", job.entryName.c_str());
-  m.AddString("destination", job.destination.c_str());
-  m.AddString("destinationFolder", job.destinationFolder.c_str());
-  m.AddInt32("destinationDevice", job.expectedDestination.device);
-  m.AddInt64("destinationNode", job.expectedDestination.inode);
+  RequireJobField(m.AddString("entryName", job.entryName.c_str()));
+  RequireJobField(m.AddString("destination", job.destination.c_str()));
+  RequireJobField(m.AddString("destinationFolder", job.destinationFolder.c_str()));
+  RequireJobField(m.AddInt32("destinationDevice", job.expectedDestination.device));
+  RequireJobField(m.AddInt64("destinationNode", job.expectedDestination.inode));
   for (const auto &path : job.sources)
-    m.AddString("source", path.c_str());
+    RequireJobField(m.AddString("source", path.c_str()));
   for (const auto &rename : job.bulkNames) {
     BMessage item;
-    item.AddString("source", rename.first.c_str());
-    item.AddString("name", rename.second.c_str());
-    m.AddMessage("bulkName", &item);
+    RequireJobField(item.AddString("source", rename.first.c_str()));
+    RequireJobField(item.AddString("name", rename.second.c_str()));
+    RequireJobField(m.AddMessage("bulkName", &item));
   }
   for (const auto &entry : job.expectedSources) {
     BMessage item;
-    item.AddString("path", entry.first.c_str());
-    item.AddInt32("device", entry.second.device);
-    item.AddInt64("node", entry.second.inode);
-    m.AddMessage("identity", &item);
+    RequireJobField(item.AddString("path", entry.first.c_str()));
+    RequireJobField(item.AddInt32("device", entry.second.device));
+    RequireJobField(item.AddInt64("node", entry.second.inode));
+    RequireJobField(m.AddMessage("identity", &item));
   }
   for (const auto &[path, entry] : job.expectedRemoteSources) {
     BMessage item;
-    item.AddString("path", path.c_str());
-    item.AddBool("directory", entry.directory);
-    item.AddBool("link", entry.link);
+    RequireJobField(item.AddString("path", path.c_str()));
+    RequireJobField(item.AddBool("directory", entry.directory));
+    RequireJobField(item.AddBool("link", entry.link));
     if (entry.sizeKnown)
-      item.AddInt64("size", entry.size);
+      RequireJobField(item.AddInt64("size", entry.size));
     if (entry.modifiedKnown) {
-      item.AddInt64("modified", entry.modified);
-      item.AddString("fraction", entry.modifiedFraction.c_str());
+      RequireJobField(item.AddInt64("modified", entry.modified));
+      RequireJobField(item.AddString("fraction", entry.modifiedFraction.c_str()));
     }
-    item.AddString("providerIdentity", entry.providerIdentity.c_str());
+    RequireJobField(item.AddString("providerIdentity", entry.providerIdentity.c_str()));
     // Retain the original field name for previously encoded Delete jobs.
-    m.AddMessage("remoteDelete", &item);
+    RequireJobField(m.AddMessage("remoteDelete", &item));
   }
   for (const auto &[source, target] : job.restoreTargets) {
     BMessage item;
-    item.AddString("source", source.c_str());
-    item.AddString("target", target.c_str());
-    m.AddMessage("restoreTarget", &item);
+    RequireJobField(item.AddString("source", source.c_str()));
+    RequireJobField(item.AddString("target", target.c_str()));
+    RequireJobField(m.AddMessage("restoreTarget", &item));
   }
   for (const auto &entry : job.expectedArchiveSets) {
     BMessage item;
-    item.AddString("path", entry.first.c_str());
-    item.AddString("fingerprint", entry.second.c_str());
-    m.AddMessage("archiveSet", &item);
+    RequireJobField(item.AddString("path", entry.first.c_str()));
+    RequireJobField(item.AddString("fingerprint", entry.second.c_str()));
+    RequireJobField(m.AddMessage("archiveSet", &item));
   }
   return m;
 }
@@ -116,42 +160,45 @@ Job DecodeJob(const BMessage &m) {
   job.destinationFolder = m.GetString("destinationFolder", "");
   job.expectedDestination = {m.GetInt32("destinationDevice", -1),
                              m.GetInt64("destinationNode", -1)};
-  const char *path;
-  for (int32 i = 0; m.FindString("source", i, &path) == B_OK; ++i)
-    job.sources.emplace_back(path);
-  for (int32 i = 0; m.FindString("archiveRemove", i, &path) == B_OK; ++i)
-    job.archiveRemove.emplace_back(path);
-  for (int32 i = 0; m.FindString("archiveFolder", i, &path) == B_OK; ++i)
-    job.archiveFolders.emplace_back(path);
-  BMessage item;
-  for (int32 i = 0; m.FindMessage("archiveRename", i, &item) == B_OK; ++i)
-    job.archiveRenames[item.GetString("from", "")] = item.GetString("to", "");
-  for (int32 i = 0; m.FindMessage("bulkName", i, &item) == B_OK; ++i)
-    job.bulkNames[item.GetString("source", "")] = item.GetString("name", "");
-  for (int32 i = 0; m.FindMessage("identity", i, &item) == B_OK; ++i)
-    job.expectedSources[item.GetString("path", "")] = {
-        item.GetInt32("device", -1), item.GetInt64("node", -1)};
-  for (int32 i = 0; m.FindMessage("remoteDelete", i, &item) == B_OK; ++i) {
+  ReadPaths(m, "source", job.sources);
+  // Legacy snapshots have no declared count. Their selection and identities
+  // still have to agree when submitted through a confirmation.
+  if (FieldCount(m, "sourceCount", B_INT64_TYPE))
+    RequireSnapshot(m.GetInt64("sourceCount", -1) == static_cast<int64>(job.sources.size()));
+  ReadPaths(m, "archiveRemove", job.archiveRemove);
+  ReadPaths(m, "archiveFolder", job.archiveFolders);
+  ReadItems(m, "archiveRename", [&](const BMessage &item) {
+    RequireSnapshot(job.archiveRenames.emplace(RequiredString(item, "from"), RequiredString(item, "to")).second);
+  });
+  ReadItems(m, "bulkName", [&](const BMessage &item) {
+    RequireSnapshot(job.bulkNames.emplace(RequiredString(item, "source"), RequiredString(item, "name")).second);
+  });
+  ReadItems(m, "identity", [&](const BMessage &item) {
+    NodeIdentity identity{item.GetInt32("device", -1), item.GetInt64("node", -1)};
+    RequireSnapshot(identity.device >= 0 && identity.inode >= 0 &&
+                    job.expectedSources.emplace(RequiredString(item, "path"), identity).second);
+  });
+  ReadItems(m, "remoteDelete", [&](const BMessage &item) {
     FileEntry entry;
-    bool directory, link;
-    if (item.FindString("path", &path) != B_OK ||
-        item.FindBool("directory", &directory) != B_OK || item.FindBool("link", &link) != B_OK)
-      continue;
-    entry.directory = directory;
-    entry.link = link;
-    entry.sizeKnown = item.HasInt64("size");
+    RequireSnapshot(item.FindBool("directory", &entry.directory) == B_OK &&
+                    item.FindBool("link", &entry.link) == B_OK);
+    entry.sizeKnown = FieldCount(item, "size", B_INT64_TYPE) != 0;
     entry.size = item.GetInt64("size", 0);
-    entry.modifiedKnown = item.HasInt64("modified");
+    entry.modifiedKnown = FieldCount(item, "modified", B_INT64_TYPE) != 0;
     entry.modified = item.GetInt64("modified", 0);
     entry.modifiedFraction = item.GetString("fraction", "");
     entry.providerIdentity = item.GetString("providerIdentity", "");
-    job.expectedRemoteSources.emplace(path, std::move(entry));
-  }
-  for (int32 i = 0; m.FindMessage("archiveSet", i, &item) == B_OK; ++i)
-    job.expectedArchiveSets[item.GetString("path", "")] =
-        item.GetString("fingerprint", "");
-  for (int32 i = 0; m.FindMessage("restoreTarget", i, &item) == B_OK; ++i)
-    job.restoreTargets[item.GetString("source", "")] = item.GetString("target", "");
+    RequireSnapshot(job.expectedRemoteSources.emplace(RequiredString(item, "path"), std::move(entry)).second);
+  });
+  ReadItems(m, "archiveSet", [&](const BMessage &item) {
+    RequireSnapshot(job.expectedArchiveSets.emplace(RequiredString(item, "path"), RequiredString(item, "fingerprint")).second);
+  });
+  ReadItems(m, "restoreTarget", [&](const BMessage &item) {
+    // An empty (but present) target records an unavailable original path.
+    const char *target;
+    RequireSnapshot(item.FindString("target", &target) == B_OK &&
+                    job.restoreTargets.emplace(RequiredString(item, "source"), target).second);
+  });
   return job;
 }
 std::optional<Job> DecodeSubmittedJob(const BMessage &message,
@@ -161,6 +208,49 @@ std::optional<Job> DecodeSubmittedJob(const BMessage &message,
       std::find(allowed.begin(), allowed.end(), static_cast<Action>(value)) ==
           allowed.end())
     return std::nullopt;
-  return DecodeJob(message);
+  try {
+    auto job = DecodeJob(message);
+    const bool create = job.action == Action::MakeFile || job.action == Action::MakeDirectory;
+    const bool edit = job.action == Action::EditArchive;
+    const bool archiveMutation = edit && (!job.archiveRemove.empty() || !job.archiveRenames.empty() ||
+                                           !job.archiveFolders.empty());
+    if ((create && !job.sources.empty()) || (!create && !archiveMutation && job.sources.empty()))
+      return std::nullopt;
+    if (!job.destinationFolder.empty() &&
+        (job.expectedDestination.device < 0 || job.expectedDestination.inode < 0))
+      return std::nullopt;
+    // Extract can guard additional archive volumes. Edit and MoveArchive
+    // also guard the containers, not just individually selected local paths.
+    const bool extraLocalGuards = edit || job.action == Action::ExtractArchive || job.action == Action::MoveArchive;
+    std::set<std::string> distinct;
+    size_t local = 0, remote = 0;
+    for (const auto &path : job.sources) {
+      if (!distinct.insert(path).second)
+        return std::nullopt;
+      const auto location = ParseLocation(path);
+      if (location.Local()) {
+        ++local;
+        if (!job.expectedSources.count(path))
+          return std::nullopt;
+      } else if (!location.Archive()) {
+        ++remote;
+        const bool mutation = job.action == Action::Delete || job.action == Action::Rename ||
+                              job.action == Action::Move;
+        // Older read-only drags can supply URLs without revision metadata.
+        if ((mutation || !job.expectedRemoteSources.empty()) && !job.expectedRemoteSources.count(path))
+          return std::nullopt;
+      }
+      if (job.action == Action::BulkRename && !job.bulkNames.count(path))
+        return std::nullopt;
+      if (job.action == Action::Restore && !job.restoreTargets.count(path))
+        return std::nullopt;
+    }
+    if ((!extraLocalGuards && job.expectedSources.size() != local) ||
+        (!job.expectedRemoteSources.empty() && job.expectedRemoteSources.size() != remote))
+      return std::nullopt;
+    return job;
+  } catch (const std::runtime_error &) {
+    return std::nullopt;
+  }
 }
 }

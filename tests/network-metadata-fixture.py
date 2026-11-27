@@ -46,6 +46,23 @@ UPLOADS = {"upload-uncertain", "upload-cancel", "upload-mlsd", "cancel-mlsd", "u
 FILTERED = {"mlsd-hidden", "mlsd-mixed", "upload-mlsd"}
 
 
+def count_probe(operation, path):
+    # Count requests, not wall time. Keep the comparison and download trees
+    # separate so their traffic is identifiable from the host-side log.
+    folder = next((part for part in Path(path).parts if part.startswith("scaling-")), None)
+    if folder:
+        print(f"PROBE {folder} {operation}", flush=True)
+
+
+def make_scaling_trees(root):
+    for n in (4, 8, 16, 32):
+        for action in ("compare", "download"):
+            folder = root / f"scaling-{action}-{n}"
+            folder.mkdir()
+            for i in range(n):
+                (folder / str(i)).write_text(str(i))
+
+
 class MetadataFS(AbstractedFS):
     def ftp2fs(self, path):
         resolved = Path(super().ftp2fs(path))
@@ -109,6 +126,7 @@ class MetadataFTP(FTPHandler):
         return super().pre_process_command(line, cmd, arg)
 
     def ftp_MLSD(self, path):
+        count_probe("FTP-MLSD", path)
         folder = Path(path)
         if (folder.name in LEGACY | {"list-all"} or
                 (folder.name == "upload-uncertain" and any(folder.glob("*.part"))) or
@@ -118,6 +136,10 @@ class MetadataFTP(FTPHandler):
         return super().ftp_MLSD(path)
 
     def ftp_MLST(self, path):
+        count_probe("FTP-MLST", path)
+        if Path(path).parent.name == "scaling-compare-4":
+            self.respond("502 MLST unavailable.")
+            return
         file = Path(path)
         if (file.name == ".settings" and file.parent.name in LEGACY or
                 file.suffix == ".part" and file.exists() and
@@ -183,6 +205,7 @@ class MetadataSFTP(paramiko.SFTPServerInterface):
         return candidate
 
     def list_folder(self, path):
+        count_probe("SFTP-READDIR", path)
         try:
             entries = []
             for child in self.resolve(path).iterdir():
@@ -192,6 +215,7 @@ class MetadataSFTP(paramiko.SFTPServerInterface):
             return paramiko.SFTPServer.convert_errno(error.errno)
 
     def stat(self, path):
+        count_probe("SFTP-STAT", path)
         try:
             local = self.resolve(path)
             item = paramiko.SFTPAttributes.from_stat(local.stat())
@@ -288,6 +312,13 @@ def main():
     sftp_root = staging / "sftp"
     (sftp_root / "signals").mkdir(parents=True)
     MetadataFTP.cancel_signal = sftp_root / "signals" / "checking-upload"
+    private = sftp_root / "Private"
+    private.mkdir(mode=0o700)
+    inner = private / "inner"
+    inner.mkdir(mode=0o700)
+    memo = inner / "memo"
+    memo.write_bytes(b"private payload")
+    memo.chmod(0o644)
     (sftp_root / "rename-control").mkdir()
     (sftp_root / "rename-control" / "original").write_bytes(b"control")
     (sftp_root / "aliases").mkdir()
@@ -320,6 +351,9 @@ def main():
     for directory in UPLOADS:
         auth.override_perm(USER, str(ftp_root / directory), perm="elrwd")
     MetadataFTP.authorizer = auth
+    for volume in (ftp_root, sftp_root):
+        make_scaling_trees(volume)
+
     class SFTPServer(socketserver.ThreadingTCPServer):
         allow_reuse_address = True
         daemon_threads = True

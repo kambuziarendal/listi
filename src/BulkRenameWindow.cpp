@@ -282,13 +282,17 @@ public:
         break;
       }
       if (!queued && preview.CanApply() && HasCurrentPreview()) {
-        auto accepted = Listi::EncodeJob(preview.job, kBulkRenameAccepted);
-        if (target.SendMessage(&accepted) == B_OK) {
-          queued = true;
-          apply->SetEnabled(false);
-          PostMessage(B_QUIT_REQUESTED);
-        } else {
-          status->SetText("Could not queue the rename. No changes were made.");
+        try {
+          auto accepted = Listi::EncodeJob(preview.job, kBulkRenameAccepted);
+          if (target.SendMessage(&accepted) == B_OK) {
+            queued = true;
+            apply->SetEnabled(false);
+            PostMessage(B_QUIT_REQUESTED);
+          } else {
+            status->SetText("Could not queue the rename. No changes were made.");
+          }
+        } catch (const std::exception &error) {
+          status->SetText(error.what());
         }
       }
       break;
