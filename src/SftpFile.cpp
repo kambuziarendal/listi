@@ -145,6 +145,20 @@ std::set<std::string> ListSftpNames(const Location &l, const TransferControl &c)
   });
 }
 
+std::string CanonicalSftpPath(const Location &l, const TransferControl &c) {
+  return WithSession(l, c, [&](SftpSession &session) {
+    std::array<char, 32768> path;
+    const auto n = session.Request(c, [&] {
+      return libssh2_sftp_realpath(session.Channel(), l.path.c_str(),
+                                  path.data(), path.size());
+    });
+    session.Require(n, "Resolve SFTP entry");
+    if (n <= 0 || size_t(n) >= path.size())
+      throw std::runtime_error("Cannot establish canonical SFTP path: " + l.URL());
+    return std::string(path.data(), n);
+  });
+}
+
 bool StatSftp(const Location &l, FileEntry &entry, const TransferControl &c) {
   return WithSession(l, c, [&](SftpSession &session) {
     LIBSSH2_SFTP_ATTRIBUTES attributes{};

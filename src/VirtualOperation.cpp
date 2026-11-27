@@ -147,6 +147,86 @@ bool SameLocal(const struct stat &a, const struct stat &b) {
          a.st_ctim.tv_sec == b.st_ctim.tv_sec &&
          a.st_ctim.tv_nsec == b.st_ctim.tv_nsec;
 }
+// Read-only safety checks for an SFTP copy batch. A verified spelling and
+// canonical path are namespace evidence, not a persistent SFTP v3 object ID.
+struct SftpCopyPreflight {
+  const TransferControl &control;
+  std::set<std::string> sourcePaths, checkedParents, outputs;
+  std::map<std::string, std::set<std::string>> names;
+  size_t visited = 0;
+
+  void CheckPath(const std::string &path) {
+    const auto location = ParseLocation(path);
+    if (CanonicalSftpPath(location, control) != location.path)
+      throw std::runtime_error("Cannot establish canonical SFTP path: " + path);
+    if (location.path == "/")
+      return;
+    const auto parent = ParentLocation(path);
+    auto listing = names.find(parent);
+    if (listing == names.end())
+      listing = names.emplace(parent, ListSftpNames(ParseLocation(parent), control)).first;
+    if (!listing->second.count(LocationLeaf(path)))
+      throw std::runtime_error("Cannot establish exact SFTP name: " + path);
+  }
+
+  void CheckParents(const std::string &path) {
+    std::vector<std::string> pending;
+    for (auto folder = path; !checkedParents.count(folder); folder = ParentLocation(folder)) {
+      pending.push_back(folder);
+      if (ParseLocation(folder).path == "/")
+        break;
+    }
+    for (auto it = pending.rbegin(); it != pending.rend(); ++it) {
+      FileEntry entry;
+      if (!StatFile(*it, entry, control) || !entry.directory || entry.link)
+        throw std::runtime_error("Cannot establish SFTP parent folder: " + *it);
+      CheckPath(*it);
+      checkedParents.insert(*it);
+    }
+  }
+
+  bool WithinSelection(const std::string &path) const {
+    for (auto candidate = path;; candidate = ParentLocation(candidate)) {
+      if (sourcePaths.count(TransferIdentity(candidate)))
+        return true;
+      if (ParseLocation(candidate).path == "/")
+        return false;
+    }
+  }
+
+  void CheckOutput(const std::string &source, const FileEntry &input,
+                   const std::string &target, unsigned depth = 0,
+                   bool parentExists = true) {
+    control.Check();
+    if (depth > 128 || ++visited > 200000)
+      throw std::runtime_error("Folder tree exceeds the transfer limit");
+    if (input.link)
+      throw std::runtime_error("Links are not followed during archive/network transfers: " + source);
+    if (depth && ParseLocation(source).scheme == "sftp")
+      CheckPath(source);
+    const auto key = TransferIdentity(target);
+    if (!outputs.insert(key).second || WithinSelection(target))
+      throw std::runtime_error("SFTP destination overlaps a selected source or output: " + target);
+    FileEntry entry;
+    const bool exists = parentExists && StatFile(target, entry, control);
+    if (exists) {
+      if (entry.link || entry.directory != input.directory)
+        throw std::runtime_error("Cannot safely merge with the SFTP destination: " + target);
+      CheckPath(target);
+    }
+    if (input.directory) {
+      const auto prefix = key + "/";
+      const auto selected = sourcePaths.lower_bound(prefix);
+      if (selected != sourcePaths.end() && selected->compare(0, prefix.size(), prefix) == 0)
+        throw std::runtime_error("An SFTP merge folder contains a selected source: " + target);
+      // Check projected names even for new trees, but do not query destination
+      // children beneath a folder which has not been created yet.
+      for (const auto &child : ListFiles(source, control))
+        CheckOutput(child.path, child, ChildLocation(target, child.name), depth + 1, exists);
+    }
+  }
+};
+
 struct Runner {
   const Hooks &hooks;
   const Job &job;
@@ -165,8 +245,11 @@ struct Runner {
     control.requireExactName = true;
     for (auto &[path, expected] : remoteDirectories) {
       FileEntry current;
+      const auto location = ParseLocation(path);
       if (!StatFile(path, current, control) || !current.directory || current.link ||
-          expected.revision.providerIdentity != current.providerIdentity) {
+          expected.revision.providerIdentity != current.providerIdentity ||
+          (job.action == Action::Copy && location.scheme == "sftp" &&
+           CanonicalSftpPath(location, control) != location.path)) {
         expected.exactFolders.reset();
         throw std::runtime_error("Remote destination folder changed: " + path);
       }
@@ -433,6 +516,48 @@ struct Runner {
         throw std::runtime_error("Folder tree exceeds the transfer limit");
       CheckExistingOutputs(child.path, ChildLocation(dst, child.name), control, count, depth + 1);
     }
+  }
+  void PreflightSftpCopy() {
+    auto control = Control(job.destination, false);
+    // These are read-only checks, not transfer progress.
+    control.progress = {};
+    SftpCopyPreflight check{control, {}, {}, {}, {}};
+    check.CheckParents(ParseLocation(job.destination).URL());
+    std::vector<FileEntry> inputs;
+    inputs.reserve(job.sources.size());
+    for (const auto &source : job.sources) {
+      selectedSource = source;
+      control = Control(source, false);
+      control.progress = {};
+      control.Check();
+      const auto location = ParseLocation(source);
+      if (LocationLeaf(source).empty())
+        throw std::runtime_error("A location root cannot be transferred: " + source);
+      if (location.scheme == "sftp")
+        check.CheckParents(ParentLocation(location.URL()));
+      FileEntry entry;
+      if (!StatFile(source, entry, control) || entry.link)
+        throw std::runtime_error("Cannot establish source entry for SFTP copy: " + source);
+      const auto expected = job.expectedRemoteSources.find(source);
+      if (expected != job.expectedRemoteSources.end() &&
+          !MatchesRemoteSelection(expected->second, entry))
+        throw std::runtime_error("Selected network entry changed before copying: " + source);
+      if (location.scheme == "sftp") {
+        check.CheckPath(location.URL());
+        check.sourcePaths.insert(TransferIdentity(source));
+      }
+      inputs.push_back(std::move(entry));
+    }
+    if (check.WithinSelection(job.destination))
+      throw std::runtime_error("A selected source contains the SFTP destination folder");
+    for (size_t i = 0; i < job.sources.size(); ++i) {
+      selectedSource = job.sources[i];
+      control = Control(selectedSource, false);
+      control.progress = {};
+      check.CheckOutput(selectedSource, inputs[i],
+                        ChildLocation(job.destination, LocationLeaf(selectedSource)));
+    }
+    selectedSource.clear();
   }
   void Copy(const std::string &src, const std::string &dst, int depth = 0,
             const FileEntry *discovered = nullptr) {
@@ -1173,6 +1298,21 @@ Result RunVirtual(const Job &job, const Hooks &hooks) {
       MakeFolder(job.destination, runner.Control(job.destination));
       runner.result.completed = 1;
       return runner.result;
+    }
+    if (job.action == Action::Copy && ParseLocation(job.destination).scheme == "sftp") {
+      try {
+        runner.PreflightSftpCopy();
+      } catch (const Cancelled &) {
+        throw;
+      } catch (const std::exception &error) {
+        for (const auto &source : job.sources) {
+          if (!hooks.privateStaging)
+            runner.RecordOutcome({source, "", "unprocessed", error.what()});
+          if (hooks.fileFailed)
+            hooks.fileFailed(source, error.what());
+        }
+        throw;
+      }
     }
     if (hooks.checkOverwrite && job.action == Action::Copy && !IsVirtual(job.destination)) {
       size_t count = 0;

@@ -420,6 +420,7 @@ def run():
                       SRC / "RemovableCopy.cpp",
                       SRC / "VirtualOperation.cpp", SRC / "VirtualFile.cpp",
                       SRC / "VirtualLocation.cpp", SRC / "Sha256.cpp",
+                      SRC / "FolderCompare.cpp",
                       SRC / "RecoveryInventory.cpp", SRC / "MessageStore.cpp"]
         binary = OUTPUT / name
         subprocess.run([

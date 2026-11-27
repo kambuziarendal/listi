@@ -262,6 +262,7 @@ CompareResult CompareFolders(const CompareRequest &r,
   control.sftpSessions = &sessions;
   CompareResult result;
   result.checksum = r.checksum;
+  bool finalChecksPassed = false;
   try {
     Need(r.entryLimit > 0 && !r.left.empty() && !r.right.empty(),
          "Choose two folders to compare.");
@@ -329,8 +330,9 @@ CompareResult CompareFolders(const CompareRequest &r,
                         : CompareState::Unverified;
         else {
           try {
-            e.leftHash = Digest(x, control);
+            auto leftHash = Digest(x, control);
             e.rightHash = Digest(y, control);
+            e.leftHash = std::move(leftHash);
             e.state = e.leftHash == e.rightHash
                           ? CompareState::Verified
                           : CompareState::ContentDifferent;
@@ -360,6 +362,7 @@ CompareResult CompareFolders(const CompareRequest &r,
     Need(leftGuard == ArchiveGuard(r.left) &&
              rightGuard == ArchiveGuard(r.right),
          "An archive changed during comparison. Run it again.");
+    finalChecksPassed = true;
     const auto limitedListing = [](const Tree &tree) {
       return std::any_of(tree.begin(), tree.end(), [](const auto &row) {
         return VisibleEntriesOnly(row.second.listing);
@@ -376,6 +379,21 @@ CompareResult CompareFolders(const CompareRequest &r,
     result.error = "Comparison cancelled. Results are incomplete.";
   } catch (const std::exception &e) {
     result.error = e.what();
+  }
+  if (!finalChecksPassed) {
+    for (auto &entry : result.entries) {
+      if (entry.leftHash.empty() && entry.rightHash.empty())
+        continue;
+      if (entry.state == CompareState::Verified)
+        --result.verified;
+      else
+        --result.different;
+      ++result.unverified;
+      entry.state = CompareState::Unverified;
+      entry.leftHash.clear();
+      entry.rightHash.clear();
+      entry.detail = "Final comparison checks did not finish successfully.";
+    }
   }
   return result;
 }

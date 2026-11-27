@@ -4,7 +4,9 @@
 // src/VirtualFile.cpp src/VirtualLocation.cpp src/Sha256.cpp src/RemovableCopy.cpp
 // -pthread -lsqlite3 -o /tmp/listi-faults
 // Real staging/dispatch code, deterministic fake network commit failures.
+#include "ArchiveVolumes.h"
 #include "FileOperation.h"
+#include "FolderCompare.h"
 #if defined(__HAIKU__) || defined(LISTI_DOWNLOAD_STAGE_PROBE)
 #include "DownloadStageProbe.h"
 #endif
@@ -70,6 +72,7 @@ std::string StoragePath(std::string path) {
 bool corruptUpload = false, denyReadback = false, cancelReadback = false;
 bool cancelAtReadyCheck = false, cancelAfterStore = false, hideStoredPart = false;
 bool uncertainRollback = false, replaceStageOnRead = false;
+std::string unresolvedCanonical;
 std::string changeIdentityOnRead, tightenOnRead, downgradeListing;
 std::string changedAfterList, changedAfterRemove;
 std::string lostRemoval, unreadableLookup, lostMove, swapDuringMove;
@@ -171,7 +174,8 @@ bool StatNetwork(const Location &l, FileEntry &entry, const TransferControl &c,
     throw std::runtime_error("SFTP entry no longer has its selected name");
   auto it = files.find(StoragePath(l.URL()));
   if (it == files.end()) {
-    if (l.path != "/out" && l.path != "/")
+    if (l.path != "/out" && l.path != "/" &&
+        !(l.scheme == "sftp" && l.path == "/in"))
       return false;
     entry.directory = true;
     entry.providerIdentity = "fixture-parent";
@@ -187,14 +191,33 @@ bool StatNetwork(const Location &l, FileEntry &entry, const TransferControl &c,
     entry.SetModification(it->second.modified, it->second.nanoseconds);
   return true;
 }
+std::string CanonicalSftpPath(const Location &entry, const TransferControl &control) {
+  control.Check();
+  if (entry.URL() == unresolvedCanonical)
+    throw std::runtime_error("Canonical path unavailable for fixture entry");
+  return ParseLocation(StoragePath(entry.URL())).path;
+}
 std::set<std::string> ListSftpNames(const Location &folder, const TransferControl &c) {
   std::set<std::string> names;
+  if (folder.path == "/") {
+    names.insert("in");
+    names.insert("out");
+  }
   for (const auto &[path, file] : files) {
     c.Check();
     if (ParentLocation(path) == folder.URL())
       names.insert(LocationLeaf(path));
   }
   return names;
+}
+ArchiveVolumes FindArchiveVolumes(const std::string &) {
+  throw std::runtime_error("Unexpected archive comparison");
+}
+std::string ArchiveVolumes::Fingerprint() const {
+  throw std::runtime_error("Unexpected archive fingerprint");
+}
+bool RecheckFtpListingEntry(const Location &, FileEntry &, const TransferControl &) {
+  throw std::runtime_error("Unexpected FTP comparison");
 }
 std::vector<FileEntry> ListNetwork(const Location &l, const TransferControl &c,
                                    ListingMethod *method) {
@@ -340,6 +363,7 @@ int main() {
     changeIdentityOnRead.clear();
     tightenOnRead.clear();
     unreadableLookup.clear();
+    unresolvedCanonical.clear();
     changedAfterList.clear();
     changedAfterRemove.clear();
     lostRemoval.clear();
@@ -905,6 +929,33 @@ int main() {
               files.at(unreadableLookup).data == "untouched",
           "existing SFTP target checks literal names without inspecting unrelated siblings");
   }
+  for (const auto &blockedPath : {in, in + "/second", out}) {
+    reset();
+    files[in] = files[out] = {"", 1, 0, true};
+    files[in + "/second"] = {"not delivered"};
+    unresolvedCanonical = blockedPath;
+    const Job batch{Action::Copy, {source, in + "/second"},
+                    blockedPath == out ? out : "sftp://fixture/out"};
+    r = RunVirtual(batch, hooks);
+    check(!r.completed && !r.partialCopies && !done && r.outcomes.size() == 2 &&
+              r.outcomes[0].status == "unprocessed" && r.outcomes[1].status == "unprocessed" &&
+              errorHas(r, "Canonical path unavailable") &&
+              files.at(destination).data == "old contents" &&
+              files.at(in + "/second").data == "not delivered" &&
+              !files.count(out + "/input") && !files.count(out + "/second"),
+          "unresolved SFTP identity blocks every selected output, including an earlier file");
+  }
+  reset();
+  files[in] = files[in + "/fresh"] = {"", 1, 0, true};
+  files[in + "/fresh/child"] = {"kept"};
+  unresolvedCanonical = in + "/fresh/child";
+  r = RunVirtual({Action::Copy, {source, in + "/fresh"}, "sftp://fixture/out"}, hooks);
+  check(!r.completed && !r.partialCopies && !done && r.outcomes.size() == 2 &&
+            errorHas(r, "Canonical path unavailable") &&
+            files.at(destination).data == "old contents" &&
+            files.at(in + "/fresh/child").data == "kept" &&
+            !files.count("sftp://fixture/out/fresh"),
+        "full SFTP preflight checks a later source child before creating a fresh output tree");
   for (bool fold : {false, true}) {
     reset();
     foldDirectoryNames = fold;
@@ -934,7 +985,7 @@ int main() {
     reset();
     foldDirectoryNames = true;
     const auto left = in + "/Drafts", right = in + "/drafts";
-    files[left] = files[right] = {"", 1, 0, true};
+    files[in] = files[left] = files[right] = {"", 1, 0, true};
     files[left + "/one"] = {"first"};
     files[right + "/two"] = {"second"};
     const std::string parent = "sftp://fixture/out";
@@ -946,7 +997,7 @@ int main() {
     Job retry{Action::Copy, reverse ? std::vector<std::string>{right, left} :
                                      std::vector<std::string>{right}, parent};
     r = RunVirtual(retry, hooks);
-    check(r.completed == int(reverse) && r.errors.size() == 1 &&
+    check(!r.completed && r.errors.size() == 1 &&
               files.at(arrived + "/one").data == "first" && !files.count(arrived + "/two"),
           "reverse order or remaining-only retry refuses the differently spelled directory");
   }
@@ -1496,6 +1547,37 @@ int main() {
   unlink(sibling.c_str());
   rmdir(folder.c_str());
   unlink(source.c_str()); rmdir(dir);
+  reset();
+  files.clear();
+  const std::string leftCompare = "sftp://fixture/in";
+  const std::string rightCompare = "sftp://fixture/out";
+  files[leftCompare + "/equal"] = files[rightCompare + "/equal"] = {"same"};
+  files[leftCompare + "/other"] = {"left"};
+  files[rightCompare + "/other"] = {"else"};
+  const CompareRequest comparison{leftCompare, rightCompare, true};
+  auto compared = CompareFolders(comparison);
+  check(compared.complete && compared.verified == 1 && compared.different == 1 &&
+            SelectCompareRows(compared, false, 10).total == 1,
+        "successful final comparison retains SHA match and content difference");
+  for (bool cancelFinal : {false, true}) {
+    const auto scansBefore = listingCounts[leftCompare];
+    TransferControl control{[&] {
+      if (listingCounts[leftCompare] <= scansBefore + 1)
+        return true;
+      if (!cancelFinal)
+        throw std::runtime_error("Fixture final comparison read failed");
+      return false;
+    }};
+    compared = CompareFolders(comparison, control);
+    check(!compared.complete && compared.cancelled == cancelFinal &&
+              !compared.verified && !compared.different && compared.unverified == 2 &&
+              compared.entries.size() == 2 &&
+              std::all_of(compared.entries.begin(), compared.entries.end(), [](const auto &entry) {
+                return entry.state == CompareState::Unverified && entry.leftHash.empty() &&
+                       entry.rightHash.empty();
+              }) && SelectCompareRows(compared, false, 10).total == 2,
+          "failed or cancelled final checks revoke SHA evidence and show both rows without matches");
+  }
   std::cout << checks << " fault checks, " << failures << " failures\n";
   return failures ? 1 : 0;
 }

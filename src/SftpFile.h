@@ -6,6 +6,7 @@
 namespace Listi {
 std::vector<FileEntry> ListSftp(const Location &, const TransferControl &);
 std::set<std::string> ListSftpNames(const Location &, const TransferControl &);
+std::string CanonicalSftpPath(const Location &, const TransferControl &);
 bool StatSftp(const Location &, FileEntry &, const TransferControl &);
 void ReadSftp(const Location &, const DataSink &, const TransferControl &);
 void UploadSftp(const std::string &, const Location &, const TransferControl &);
