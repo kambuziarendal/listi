@@ -2,7 +2,6 @@
 #include "VirtualFile.h"
 #include <algorithm>
 #include <cctype>
-#include <cstring>
 
 namespace Listi {
 namespace {
@@ -48,7 +47,15 @@ std::string EncodePath(const std::string &s) {
   }
   return out;
 }
-std::string DecodePath(const std::string &s) {
+namespace {
+void RequirePathByte(unsigned char c, bool localArchivePath) {
+  if (c == 0)
+    throw std::runtime_error("NUL is not supported in paths");
+  if (!localArchivePath && (c == '\r' || c == '\n'))
+    throw std::runtime_error("Line breaks are not supported in virtual paths");
+}
+
+std::string DecodeURLPath(const std::string &s, bool localArchivePath) {
   std::string out;
   auto digit = [](char c) -> int {
     if (c >= '0' && c <= '9')
@@ -67,13 +74,15 @@ std::string DecodePath(const std::string &s) {
       c = (digit(s[i + 1]) << 4) | digit(s[i + 2]);
       i += 2;
     }
-    if (c == 0 || c == '\r' || c == '\n')
-      throw std::runtime_error(
-          "Control characters are not supported in remote paths");
+    RequirePathByte(c, localArchivePath);
     out += c;
   }
   return out;
 }
+} // namespace
+
+std::string DecodePath(const std::string &s) { return DecodeURLPath(s, false); }
+
 Location ParseLocation(const std::string &s) {
   Location l;
   auto split = s.find("://");
@@ -89,7 +98,7 @@ Location ParseLocation(const std::string &s) {
     auto boundary = rest.find("!/");
     if (boundary == std::string::npos)
       throw std::runtime_error("Invalid archive location");
-    l.archive = DecodePath(rest.substr(0, boundary));
+    l.archive = DecodeURLPath(rest.substr(0, boundary), true);
     if (l.archive.empty() || l.archive[0] != '/')
       throw std::runtime_error("Archive path must be absolute");
     l.path = Normalize(DecodePath(rest.substr(boundary + 1)));
@@ -97,12 +106,15 @@ Location ParseLocation(const std::string &s) {
   }
   auto slash = rest.find('/');
   l.host = rest.substr(0, slash);
-  if (l.host.empty() || l.host.find_first_of("@?# \\\r\n") != std::string::npos)
+  if (l.host.empty() || l.host.find('\0') != std::string::npos ||
+      l.host.find_first_of("@?# \\\r\n") != std::string::npos)
     throw std::runtime_error("Use a server name without credentials; connect "
                              "using the Network dialog");
   auto colon = l.host.rfind(':');
   if (colon != std::string::npos &&
       (l.host[0] != '[' || colon > l.host.find(']'))) {
+    if (colon == 0)
+      throw std::runtime_error("Missing server name");
     std::string port = l.host.substr(colon + 1);
     if (port.empty() || port.size() > 5 ||
         port.find_first_not_of("0123456789") != std::string::npos)
@@ -136,6 +148,16 @@ std::string ChildLocation(const std::string &p, const std::string &name) {
   auto l = ParseLocation(p);
   l.path += (l.path.empty() || l.path.back() == '/' ? "" : "/") + name;
   return l.URL();
+}
+std::string ResolveVirtualRelativePath(const std::string &base,
+                                       const std::string &relative) {
+  auto location = ParseLocation(base);
+  if (location.Local() || relative.empty() || relative.front() == '/')
+    throw std::runtime_error("Expected a relative virtual path");
+  for (unsigned char c : relative)
+    RequirePathByte(c, false);
+  location.path = Normalize(location.path + "/" + relative);
+  return location.URL();
 }
 std::string ParentLocation(const std::string &p) {
   auto l = ParseLocation(p);

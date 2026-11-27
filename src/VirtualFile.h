@@ -73,6 +73,9 @@ bool IsListiPrivateEntry(const std::string &path);
 std::string EncodePath(const std::string &);
 std::string DecodePath(const std::string &);
 std::string ChildLocation(const std::string &, const std::string &);
+// Navigation treats components as literal names and stays inside the URL root.
+std::string ResolveVirtualRelativePath(const std::string &base,
+                                       const std::string &relative);
 std::string ParentLocation(const std::string &);
 std::string LocationLeaf(const std::string &);
 // Interim single-account mode: a normalized route can be registered only

@@ -65,6 +65,7 @@ ArchiveVolumes FindArchiveVolumes(const std::string &path) {
   if (!dir)
     throw std::runtime_error("Cannot inspect archive parts in this folder.");
   std::map<int, std::string> found;
+  bool ambiguousRarRoot = false;
   for (;;) {
     errno = 0;
     auto entry = readdir(dir.get());
@@ -76,11 +77,24 @@ ArchiveVolumes FindArchiveVolumes(const std::string &path) {
     auto name = Parse(entry->d_name);
     if (name.kind != selected.kind || name.family != selected.family)
       continue;
-    if (!found.emplace(name.index, entry->d_name).second)
-      throw std::runtime_error("Duplicate archive part number.");
+    if (!found.emplace(name.index, entry->d_name).second) {
+      // Standalone .rar files can differ only by case. They are ambiguous
+      // roots only when numbered siblings actually need a root.
+      if (selected.kind == 3 && name.index == 0)
+        ambiguousRarRoot = true;
+      else
+        throw std::runtime_error("Duplicate archive part number.");
+    }
     if (found.size() > 256)
       throw std::runtime_error("Archive has more than 256 parts; this set "
                                "exceeds the current reader limit.");
+  }
+  if (ambiguousRarRoot) {
+    if (selected.index != 0 || found.size() != 1)
+      throw std::runtime_error("Ambiguous first volume for numbered RAR parts.");
+    out.files.push_back(requested);
+    out.Verify();
+    return out;
   }
   const int first = selected.kind == 3 ? 0 : 1;
   if (found.empty() || found.begin()->first != first)

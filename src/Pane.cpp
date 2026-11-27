@@ -542,7 +542,7 @@ void Pane::Navigate(const char *p) {
     }
     if (!queries.count(request) && request[0] != '/' && request != "@disks" && !Listi::IsVirtual(request))
       request = Listi::IsVirtual(path.String())
-                    ? Listi::ChildLocation(path.String(), request)
+                    ? Listi::ResolveVirtualRelativePath(path.String(), request)
                     : Listi::Join(path.String(), request);
     if (Listi::IsVirtual(request))
       request = Listi::ParseLocation(request).URL();
