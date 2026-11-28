@@ -16,6 +16,7 @@ public:
   SftpSession &operator=(const SftpSession &) = delete;
   ~SftpSession();
   void Connect(const Location &, const TransferControl &);
+  SftpPeer Peer() const;
   LIBSSH2_SFTP *Channel() const { return sftp; }
 
   template<typename F>

@@ -388,6 +388,30 @@ void CheckRecursiveRevision(const std::string &server, const std::string &local)
   }
 }
 void CheckSftpCompare(const std::string &sftp, const std::string &local) {
+  const auto sizeReference = local + "/size-reference";
+  std::filesystem::create_directory(sizeReference);
+  std::ofstream(sizeReference + "/sample") << "abc";
+  std::ofstream(sizeReference + "/steady") << "stable";
+  for (bool checksum : {false, true}) {
+    const auto remote = ChildLocation(sftp, checksum ? "compare-size-hash" : "compare-size-quick");
+    CompareRequest request{sizeReference, remote, checksum};
+    const auto result = CompareFolders(request);
+    const auto filtered = SelectCompareRows(result, false, 2);
+    Expect(!result.complete && result.error.find(remote + "/sample") != std::string::npos &&
+               !result.sizeOnly && !result.verified && !result.different && result.unverified == 2 &&
+               filtered.total == 2 && filtered.indices.size() == 2,
+           "late size change revokes both results and exposes them in the differences filter");
+    for (auto index : filtered.indices) {
+      const auto &row = result.entries.at(index);
+      Expect(row.state == CompareState::Unverified && row.leftBytes == -1 && row.rightBytes == -1 &&
+                 row.leftHash.empty() && row.rightHash.empty(),
+             "provisional row has no confirmed sizes or hashes: " + row.relative);
+    }
+    const auto fresh = CompareFolders(request);
+    Expect(fresh.complete && !fresh.unverified &&
+               (checksum ? fresh.verified == 2 : fresh.sizeOnly == 1 && fresh.different == 1),
+           "stable retry uses the current remote sizes and contents");
+  }
   const auto reference = local + "/late-change";
   std::filesystem::create_directory(reference);
   for (int i = 0; i < 8; ++i)

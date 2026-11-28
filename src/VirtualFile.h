@@ -37,7 +37,20 @@ struct NetworkCleanupBudget {
 class SftpSession;
 // Only the worker for this job can use its authenticated sessions. The account
 // bound to a canonical authority cannot change during the process.
-using SftpSessions = std::map<std::string, std::shared_ptr<SftpSession>>;
+struct SftpPeer {
+  std::string endpoint, hostKey;
+  int keyType;
+  bool IndependentOf(const SftpPeer &other) const {
+    // One daemon can offer multiple key types, or listen on multiple addresses.
+    return endpoint != other.endpoint && keyType == other.keyType && hostKey != other.hostKey;
+  }
+};
+struct SftpSessions {
+  std::map<std::string, std::shared_ptr<SftpSession>> connections;
+  // Only cross-route transfers bind peers. Reconnection cannot silently
+  // invalidate the evidence used to distinguish their source and destination.
+  std::map<std::string, SftpPeer> boundPeers;
+};
 struct TransferControl {
   std::function<bool()> proceed;
   std::function<void(uint64_t)> progress;

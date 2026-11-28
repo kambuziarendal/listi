@@ -382,18 +382,16 @@ CompareResult CompareFolders(const CompareRequest &r,
   }
   if (!finalChecksPassed && !result.entries.empty()) {
     result.error += " All displayed results are provisional because final checks did not finish.";
+    result.verified = result.sizeOnly = result.different = 0;
+    result.unverified = result.entries.size();
     for (auto &entry : result.entries) {
-      if (entry.leftHash.empty() && entry.rightHash.empty())
-        continue;
-      if (entry.state == CompareState::Verified)
-        --result.verified;
-      else
-        --result.different;
-      ++result.unverified;
-      entry.state = CompareState::Unverified;
+      entry.leftBytes = entry.rightBytes = -1;
       entry.leftHash.clear();
       entry.rightHash.clear();
-      entry.detail = "Final comparison checks did not finish successfully.";
+      if (entry.state != CompareState::Error)
+        entry.state = CompareState::Unverified;
+      if (entry.detail.empty())
+        entry.detail = "Final comparison checks did not finish successfully.";
     }
   }
   return result;

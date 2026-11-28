@@ -211,6 +211,7 @@ class MetadataSFTP(paramiko.SFTPServerInterface):
     def __init__(self, server, root):
         super().__init__(server)
         self.root = root
+        self.size_listed = set()
 
     def resolve(self, path, *, follow=True):
         candidate = self.root / path.lstrip("/")
@@ -227,6 +228,12 @@ class MetadataSFTP(paramiko.SFTPServerInterface):
     def list_folder(self, path):
         count_probe("SFTP-READDIR", path)
         try:
+            if path in {"/compare-size-quick", "/compare-size-hash"}:
+                sample = self.resolve(path) / "sample"
+                final = b"abcde" if path.endswith("-quick") else b"abc"
+                if path in self.size_listed and sample.read_bytes() != final:
+                    sample.write_bytes(final)
+                self.size_listed.add(path)
             entries = []
             for child in self.resolve(path).iterdir():
                 entry = ListAttributes.from_stat(child.lstat(), child.name)
@@ -389,6 +396,11 @@ def main():
     (sftp_root / "aliases").mkdir()
     (sftp_root / "aliases" / "Report").write_bytes(b"original")
     (sftp_root / "aliases" / "third").write_bytes(b"third")
+    for name, initial in (("compare-size-quick", b"abc"), ("compare-size-hash", b"abcde")):
+        folder = sftp_root / name
+        folder.mkdir()
+        (folder / "sample").write_bytes(initial)
+        (folder / "steady").write_bytes(b"stable")
     late = sftp_root / "compare-late"
     late.mkdir()
     for i in range(8):

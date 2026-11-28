@@ -97,6 +97,23 @@ void SftpSession::Handshake(const Location &location, const Connection &account,
     throw std::runtime_error(untrusted);
 }
 
+SftpPeer SftpSession::Peer() const {
+  char *address = nullptr;
+  long port = 0;
+  size_t length = 0;
+  int type = LIBSSH2_HOSTKEY_TYPE_UNKNOWN;
+  const auto *key = libssh2_session_hostkey(ssh, &length, &type);
+  auto &curl = Curl();
+  if (!key || !length || type == LIBSSH2_HOSTKEY_TYPE_UNKNOWN ||
+      LIBCALL(curl, curl_easy_getinfo)(transport, CURLINFO_PRIMARY_IP, &address) != CURLE_OK ||
+      !address || !*address ||
+      LIBCALL(curl, curl_easy_getinfo)(transport, CURLINFO_PRIMARY_PORT, &port) != CURLE_OK ||
+      port <= 0)
+    throw std::runtime_error("Cannot identify the connected SFTP server.");
+  // Connect() has already checked this exact binary host key against the route's pin.
+  return {"[" + std::string(address) + "]:" + std::to_string(port), std::string(key, length), type};
+}
+
 SftpSession::~SftpSession() {
   // No blocking protocol shutdown on a lost connection or a cancelled job.
   // Normal operations close their own handle and check the server's reply.

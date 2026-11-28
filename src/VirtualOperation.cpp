@@ -525,7 +525,8 @@ struct Runner {
     // These are read-only checks, not transfer progress.
     control.progress = {};
     SftpTransferPreflight check{control, {}, {}, {}, {}};
-    check.CheckParents(ParseLocation(job.destination).URL());
+    const auto destination = ParseLocation(job.destination);
+    check.CheckParents(destination.URL());
     std::vector<FileEntry> inputs;
     inputs.reserve(job.sources.size());
     for (const auto &source : job.sources) {
@@ -536,8 +537,13 @@ struct Runner {
       const auto location = ParseLocation(source);
       if (LocationLeaf(source).empty())
         throw std::runtime_error("A location root cannot be transferred: " + source);
-      if (location.scheme == "sftp")
+      if (location.scheme == "sftp") {
+        if (location.CanonicalAuthority() != destination.CanonicalAuthority() &&
+            !BindSftpPeer(location, control).IndependentOf(BindSftpPeer(destination, control)))
+          throw std::runtime_error("Cannot distinguish these SFTP servers. Use the same address "
+                                   "in both panes if they share storage.");
         check.CheckParents(ParentLocation(location.URL()));
+      }
       FileEntry entry;
       if (!StatFile(source, entry, control) || (!moving && entry.link))
         throw std::runtime_error("Cannot establish source entry for SFTP transfer: " + source);

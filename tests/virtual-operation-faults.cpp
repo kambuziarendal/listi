@@ -57,6 +57,8 @@ struct Remote {
   bool modifiedKnown = true;
 };
 std::map<std::string, Remote> files;
+std::map<std::string, Listi::SftpPeer> peers;
+unsigned mutationRequests = 0;
 bool foldDirectoryNames = false;
 std::string StoragePath(std::string path) {
   constexpr char alias[] = "/drafts";
@@ -191,6 +193,12 @@ bool StatNetwork(const Location &l, FileEntry &entry, const TransferControl &c,
     entry.SetModification(it->second.modified, it->second.nanoseconds);
   return true;
 }
+SftpPeer BindSftpPeer(const Location &entry, const TransferControl &control) {
+  control.Check();
+  if (!peers.count(entry.host))
+    throw std::runtime_error("Cannot identify fixture peer");
+  return peers.at(entry.host);
+}
 std::string CanonicalSftpPath(const Location &entry, const TransferControl &control) {
   control.Check();
   if (entry.URL() == unresolvedCanonical)
@@ -271,6 +279,7 @@ void ReadNetwork(const Location &l, const DataSink &sink, const TransferControl 
   c.Tick(data.size());
 }
 void UploadNetwork(const std::string &local, const Location &l, const TransferControl &c) {
+  ++mutationRequests;
   std::ifstream stream(local);
   std::string data(std::istreambuf_iterator<char>(stream), {});
   if (corruptUpload && !data.empty()) data.front() ^= 1;
@@ -283,6 +292,7 @@ void UploadNetwork(const std::string &local, const Location &l, const TransferCo
 void ChangeNetwork(const Location &l, const char *action,
                    const std::string &target, const TransferControl &c) {
   c.Check();
+  ++mutationRequests;
   if (c.mutationSubmitted)
     *c.mutationSubmitted = true;
   std::string source = StoragePath(l.URL());
@@ -358,6 +368,8 @@ int main() {
     std::cout << (ok ? "PASS " : "FAIL ") << label << '\n';
   };
   auto reset = [&] {
+    peers.clear();
+    mutationRequests = 0;
     postCancelReadCalls = 0;
     commitFailed = expireDuringCleanup = false;
     cleanupReadBytes = 0;
@@ -964,6 +976,36 @@ int main() {
               !prompts && fixtureTree() == expected,
           collision ? "upward SFTP merge rejects a projected child inside the source before delivery"
                     : "non-overlapping upward SFTP merge delivers all files without changing the source");
+  }
+  // The two routes have identical source/target path texts and the destination
+  // contains an existing file. Authorization to replace is not namespace evidence.
+  for (const std::string trial : {"same-key", "same-peer", "other-key-type", "unknown", "independent"}) {
+    reset();
+    peers["fixture"] = {"peer:22", "key-a", 1};
+    if (trial != "unknown")
+      peers["other"] = {trial == "same-peer" ? "peer:22" : "other:22",
+                        trial == "same-key" ? "key-a" : "key-b",
+                        trial == "other-key-type" ? 2 : 1};
+    const auto sourceTree = std::string("sftp://other/out/album");
+    const auto targetTree = std::string("sftp://fixture/out/album");
+    files[sourceTree] = files[targetTree] = {"", 1, 0, true};
+    files[sourceTree + "/memo"] = {"selected"};
+    files[targetTree + "/memo"] = {"prior"};
+    auto expected = fixtureTree();
+    int prompts = 0;
+    Hooks observe = hooks;
+    observe.conflict = [&](const auto &) { ++prompts; return Decision::Replace; };
+    r = RunVirtual({Action::Copy, {sourceTree}, "sftp://fixture/out"}, observe);
+    if (trial == "independent") {
+      expected[targetTree + "/memo"] = {false, "selected"};
+      check(r.completed == 1 && !r.partialCopies && r.errors.empty() && prompts == 1 &&
+                mutationRequests > 0 && fixtureTree() == expected,
+            "independent authenticated peers support equal paths without changing source bytes");
+    } else {
+      check(!r.completed && !r.partialCopies && !r.errors.empty() && !prompts &&
+                !mutationRequests && fixtureTree() == expected,
+            "ambiguous or missing SFTP peer identity rejects before any mutation or conflict");
+    }
   }
   for (auto action : {Action::Copy, Action::Move}) {
     for (bool reverse : {false, true}) {
@@ -1617,29 +1659,48 @@ int main() {
   files[leftCompare + "/equal"] = files[rightCompare + "/equal"] = {"same"};
   files[leftCompare + "/other"] = {"left"};
   files[rightCompare + "/other"] = {"else"};
-  const CompareRequest comparison{leftCompare, rightCompare, true};
-  auto compared = CompareFolders(comparison);
-  check(compared.complete && compared.verified == 1 && compared.different == 1 &&
-            SelectCompareRows(compared, false, 10).total == 1,
-        "successful final comparison retains SHA match and content difference");
-  for (bool cancelFinal : {false, true}) {
-    const auto scansBefore = listingCounts[leftCompare];
-    TransferControl control{[&] {
-      if (listingCounts[leftCompare] <= scansBefore + 1)
-        return true;
-      if (!cancelFinal)
-        throw std::runtime_error("Fixture final comparison read failed");
-      return false;
-    }};
-    compared = CompareFolders(comparison, control);
-    check(!compared.complete && compared.cancelled == cancelFinal &&
-              !compared.verified && !compared.different && compared.unverified == 2 &&
-              compared.entries.size() == 2 &&
-              std::all_of(compared.entries.begin(), compared.entries.end(), [](const auto &entry) {
-                return entry.state == CompareState::Unverified && entry.leftHash.empty() &&
-                       entry.rightHash.empty();
-              }) && SelectCompareRows(compared, false, 10).total == 2,
-          "failed or cancelled final checks revoke SHA evidence and show both rows without matches");
+  files[leftCompare + "/read-error"] = files[rightCompare + "/read-error"] = {"read me"};
+  files[leftCompare + "/different-size"] = {"abc"};
+  files[rightCompare + "/different-size"] = {"abcde"};
+  for (bool checksum : {false, true}) {
+    const CompareRequest comparison{leftCompare, rightCompare, checksum};
+    auto compared = CompareFolders(comparison);
+    check(compared.complete && compared.verified == (checksum ? 2u : 0u) &&
+              compared.sizeOnly == (checksum ? 0u : 3u) &&
+              compared.different == (checksum ? 2u : 1u) && !compared.unverified &&
+              SelectCompareRows(compared, false, 10).total == compared.different,
+          "stable comparison retains confirmed size and checksum results");
+    // Keep a real per-row read diagnostic when final validation also fails.
+    if (checksum)
+      unreadableSource = leftCompare + "/read-error";
+    for (bool cancelFinal : {false, true}) {
+      const auto scansBefore = listingCounts[leftCompare];
+      TransferControl control{[&] {
+        if (listingCounts[leftCompare] <= scansBefore + 1)
+          return true;
+        if (!cancelFinal)
+          throw std::runtime_error("Fixture final comparison read failed");
+        return false;
+      }};
+      compared = CompareFolders(comparison, control);
+      const auto visible = SelectCompareRows(compared, false, 10);
+      const bool rowsInvalidated = std::all_of(
+          compared.entries.begin(), compared.entries.end(), [&](const auto &entry) {
+            if (entry.leftBytes != -1 || entry.rightBytes != -1 ||
+                !entry.leftHash.empty() || !entry.rightHash.empty())
+              return false;
+            if (checksum && entry.relative == "read-error")
+              return entry.state == CompareState::Error && entry.detail == "Source read denied";
+            return entry.state == CompareState::Unverified;
+          });
+      check(!compared.complete && compared.cancelled == cancelFinal &&
+                !compared.verified && !compared.sizeOnly && !compared.different &&
+                compared.unverified == 4 && compared.entries.size() == 4 && rowsInvalidated &&
+                visible.total == 4 && visible.indices.size() == 4 &&
+                compared.error.find("provisional") != std::string::npos,
+            "failed or cancelled final checks revoke sizes and hashes and expose every row");
+    }
+    unreadableSource.clear();
   }
   std::cout << checks << " fault checks, " << failures << " failures\n";
   return failures ? 1 : 0;

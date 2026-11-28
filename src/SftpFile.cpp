@@ -17,11 +17,20 @@ auto WithSession(const Location &location, const TransferControl &control, F act
   // A browser lookup gets a private session. For a job, keep a connection per
   // bound authority, never a cache of names or attributes.
   std::shared_ptr<SftpSession> temporary;
-  auto &slot = control.sftpSessions ? (*control.sftpSessions)[location.CanonicalAuthority()] : temporary;
+  const auto route = location.CanonicalAuthority();
+  auto &slot = control.sftpSessions ? control.sftpSessions->connections[route] : temporary;
   try {
     if (!slot) {
       slot = std::make_shared<SftpSession>();
       slot->Connect(location, control);
+      if (control.sftpSessions) {
+        const auto bound = control.sftpSessions->boundPeers.find(route);
+        if (bound != control.sftpSessions->boundPeers.end()) {
+          const auto peer = slot->Peer();
+          if (peer.endpoint != bound->second.endpoint || peer.hostKey != bound->second.hostKey)
+            throw std::runtime_error("SFTP server changed during transfer. Refresh and try again.");
+        }
+      }
     }
     return action(*slot);
   } catch (...) {
@@ -142,6 +151,16 @@ std::set<std::string> ListSftpNames(const Location &l, const TransferControl &c)
       return true;
     });
     return names;
+  });
+}
+
+SftpPeer BindSftpPeer(const Location &location, const TransferControl &control) {
+  if (!control.sftpSessions)
+    throw std::logic_error("Cannot bind an SFTP peer outside a transfer session.");
+  return WithSession(location, control, [&](SftpSession &session) {
+    const auto peer = session.Peer();
+    control.sftpSessions->boundPeers.emplace(location.CanonicalAuthority(), peer);
+    return peer;
   });
 }
 
