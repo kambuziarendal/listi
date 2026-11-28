@@ -190,7 +190,7 @@ bool StatSftp(const Location &l, FileEntry &entry, const TransferControl &c) {
     current.path = l.URL();
     current.name = LocationLeaf(current.path);
     if (!Describe(attributes, current))
-      throw std::runtime_error("Unsupported or unidentified SFTP entry: " + current.path);
+      throw UnsupportedSftpEntry("Unsupported or unidentified SFTP entry: " + current.path);
     entry = std::move(current);
     return true;
   });

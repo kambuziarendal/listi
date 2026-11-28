@@ -4,6 +4,9 @@
 #include <set>
 
 namespace Listi {
+struct UnsupportedSftpEntry : std::runtime_error {
+  using std::runtime_error::runtime_error;
+};
 std::vector<FileEntry> ListSftp(const Location &, const TransferControl &);
 std::set<std::string> ListSftpNames(const Location &, const TransferControl &);
 SftpPeer BindSftpPeer(const Location &, const TransferControl &);

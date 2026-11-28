@@ -75,7 +75,8 @@ std::string StoragePath(std::string path) {
 bool corruptUpload = false, denyReadback = false, cancelReadback = false;
 bool cancelAtReadyCheck = false, cancelAfterStore = false, hideStoredPart = false;
 bool uncertainRollback = false, replaceStageOnRead = false;
-std::string unresolvedCanonical, canonicalAlias, omittedSftpName;
+std::string unresolvedCanonical, canonicalAlias, omittedSftpName, specialSftpName;
+unsigned specialLookups = 0, specialReads = 0;
 std::string changeIdentityOnRead, tightenOnRead, downgradeListing;
 std::string changedAfterList, changedAfterRemove;
 std::string lostRemoval, unreadableLookup, lostMove, swapDuringMove;
@@ -163,6 +164,10 @@ void ReadArchive(const Location &, const DataSink &, const TransferControl &) {
 bool StatNetwork(const Location &l, FileEntry &entry, const TransferControl &c,
                  const FileEntry *) {
   ++statRequests;
+  if (l.URL() == specialSftpName) {
+    ++specialLookups;
+    throw UnsupportedSftpEntry("Unsupported SFTP fixture entry");
+  }
   if (expireDuringCleanup && c.cleanup)
     c.cleanup->deadline = NetworkCleanupBudget::Clock::now();
   // The target is statted before staging, then again after Ready.
@@ -251,6 +256,10 @@ std::vector<FileEntry> ListNetwork(const Location &l, const TransferControl &c,
   return out;
 }
 void ReadNetwork(const Location &l, const DataSink &sink, const TransferControl &c) {
+  if (l.URL() == specialSftpName) {
+    ++specialReads;
+    throw std::runtime_error("Unexpected read of a special SFTP fixture entry");
+  }
   if (cancelled)
     ++postCancelReadCalls;
   c.Check();
@@ -383,6 +392,8 @@ int main() {
     unresolvedCanonical.clear();
     canonicalAlias.clear();
     omittedSftpName.clear();
+    specialSftpName.clear();
+    specialLookups = specialReads = 0;
     changedAfterList.clear();
     changedAfterRemove.clear();
     lostRemoval.clear();
@@ -1132,6 +1143,74 @@ int main() {
                               errorHas(r, "selected SFTP source")),
           ("remapped download preflight: " + scenario).c_str());
     std::filesystem::remove_all(root);
+  }
+  for (const bool overlap : {false, true}) {
+    reset();
+    peers.at("fixture").mayBeLocal = true;
+    files.clear();
+    const auto base = std::string(dir) + "/download-backup";
+    const auto target = base + "/album";
+    std::filesystem::create_directories(target);
+    if (chmod(target.c_str(), 0700))
+      return 1;
+    std::ofstream(target + "/common.txt") << "shared";
+    std::ofstream(target + "/edit.txt") << (overlap ? "new-version" : "old-version");
+    const std::string remoteTree = "sftp://fixture/out/album";
+    files[remoteTree] = {"", 1, 0, true};
+    files[remoteTree + "/common.txt"] = {"shared"};
+    files[remoteTree + "/edit.txt"] = {"new-version"};
+    const auto before = fixtureTree();
+    int prompts = 0;
+    Hooks observed = hooks;
+    observed.conflict = [&](const auto &) { ++prompts; return Decision::Replace; };
+    localPublish = LocalPublish::Limited;
+    r = RunVirtual({Action::Copy, {remoteTree}, base}, observed);
+    localPublish = LocalPublish::Unexpected;
+    check(r.completed == int(!overlap) && !r.partialCopies && prompts == (overlap ? 0 : 2) &&
+              r.errors.empty() == !overlap && fixtureTree() == before && !mutationRequests &&
+              readBytes(target + "/common.txt") == "shared" &&
+              readBytes(target + "/edit.txt") == "new-version",
+          overlap ? "identical download tree views still reject a possible source alias"
+                  : "same-size edited downloaded sibling distinguishes an independent backup");
+    std::filesystem::remove_all(base);
+  }
+
+  for (const bool upload : {false, true}) {
+    for (const bool overlap : {false, true}) {
+      reset();
+      peers.at("fixture").mayBeLocal = true;
+      files.clear();
+      const auto base = std::string(dir) + "/fifo-copy";
+      const auto localMemo = base + "/memo.txt";
+      const auto localPipe = base + "/a.pipe";
+      const std::string remoteMemo = "sftp://fixture/out/memo.txt";
+      specialSftpName = "sftp://fixture/out/a.pipe";
+      files[specialSftpName] = {};
+      files[remoteMemo] = {(upload && !overlap) ? "old" : "new-version"};
+      std::filesystem::create_directory(base);
+      if (mkfifo(localPipe.c_str(), 0600))
+        return 1;
+      std::ofstream(localMemo) << ((upload || overlap) ? "new-version" : "old");
+      const auto before = fixtureTree();
+      int prompts = 0;
+      Hooks observed = hooks;
+      observed.conflict = [&](const auto &) { ++prompts; return Decision::Replace; };
+      localPublish = LocalPublish::Limited;
+      const Job memoJob = upload ? Job{Action::Copy, {localMemo}, "sftp://fixture/out"}
+                                 : Job{Action::Copy, {remoteMemo}, base};
+      r = RunVirtual(memoJob, observed);
+      localPublish = LocalPublish::Unexpected;
+      struct stat pipe;
+      check(r.completed == int(!overlap) && !r.partialCopies && prompts == int(!overlap) &&
+                r.errors.empty() == !overlap && !specialLookups && !specialReads &&
+                (mutationRequests != 0) == (upload && !overlap) &&
+                (!overlap || fixtureTree() == before) &&
+                readBytes(localMemo) == "new-version" && files.at(remoteMemo).data == "new-version" &&
+                !lstat(localPipe.c_str(), &pipe) && S_ISFIFO(pipe.st_mode),
+            overlap ? "an unselected FIFO does not establish disjointness or permit overlap"
+                    : "the selected file distinguishes independent folders without accessing a FIFO sibling");
+      std::filesystem::remove_all(base);
+    }
   }
   // The two routes have identical source/target path texts and the destination
   // contains an existing file. Authorization to replace is not namespace evidence.

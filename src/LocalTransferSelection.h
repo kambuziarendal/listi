@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #pragma once
 #include "Sha256.h"
+#include "SftpFile.h"
 #include "UnavailableVolume.h"
 #include "VirtualFile.h"
 #include <algorithm>
@@ -112,6 +113,15 @@ private:
 
   std::string WitnessDigest(const std::string &path, uint64_t expected,
                             const TransferControl &control) {
+    FileEntry current;
+    if (!StatFile(path, current, control) || current.directory || current.link ||
+        !current.sizeKnown || current.size < 0 || uint64_t(current.size) != expected)
+      throw std::runtime_error("File changed during transfer preflight: " + path);
+    if (!IsVirtual(path)) {
+      struct stat st;
+      if (lstat(path.c_str(), &st) || !S_ISREG(st.st_mode))
+        throw std::runtime_error("File changed during transfer preflight: " + path);
+    }
     Sha256 hash;
     ReadFile(path, [&](const char *bytes, size_t size) {
       if (size > expected)
@@ -140,17 +150,23 @@ private:
       if (!visible && name.front() == '.')
         continue; // A server may hide private entries; omission is not proof.
       const auto remotePath = ChildLocation(remoteParent, name);
-      FileEntry remote;
-      if (!StatFile(remotePath, remote, control)) {
-        if (visible)
-          throw std::runtime_error("SFTP directory view changed: " + remoteParent);
-        distinctFolders.insert(key);
-        return true;
-      }
       const auto local = ChildLocation(candidate.path, name);
       struct stat st;
       if (lstat(local.c_str(), &st))
         throw std::runtime_error("Local directory view changed: " + local);
+      if (!S_ISREG(st.st_mode) && !S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode))
+        continue; // An unselected special entry is not an identity witness.
+      FileEntry remote;
+      try {
+        if (!StatFile(remotePath, remote, control)) {
+          if (visible)
+            throw std::runtime_error("SFTP directory view changed: " + remoteParent);
+          distinctFolders.insert(key);
+          return true;
+        }
+      } catch (const UnsupportedSftpEntry &) {
+        continue; // Do not rely on entries whose remote type is unspecified.
+      }
       if (remote.directory != bool(S_ISDIR(st.st_mode)) ||
           remote.link != bool(S_ISLNK(st.st_mode)) ||
           (S_ISREG(st.st_mode) && remote.sizeKnown && remote.size != st.st_size)) {
@@ -218,8 +234,20 @@ public:
     for (const auto index : PossibleParents(folder, names, control)) {
       CompareStep(control);
       const auto &candidate = folders[index];
-      if ((!selectedLeaf.empty() && !AffectsSelectedLeaf(candidate, selectedLeaf, control)) ||
-          DifferentFolder(index, folder, names, control))
+      if (!selectedLeaf.empty()) {
+        if (!AffectsSelectedLeaf(candidate, selectedLeaf, control))
+          continue;
+        const auto local = ChildLocation(candidate.path, selectedLeaf);
+        struct stat st;
+        FileEntry remote;
+        if (lstat(local.c_str(), &st) || !S_ISREG(st.st_mode) ||
+            !StatFile(ChildLocation(folder, selectedLeaf), remote, control) ||
+            remote.directory || remote.link)
+          throw std::runtime_error("Cannot establish selected SFTP file identity: " + local);
+        if (remote.sizeKnown && remote.size != st.st_size)
+          continue;
+      }
+      if (DifferentFolder(index, folder, names, control, true))
         continue;
       throw std::runtime_error("Cannot distinguish the local destination from a selected SFTP "
                                "source. Choose a separate destination: " + candidate.path);
@@ -246,15 +274,23 @@ public:
           throw std::runtime_error("Local directory view changed before upload: " + local);
         if (!candidate.entireTree && !selectedFiles.count({st.st_dev, st.st_ino}))
           continue;
+        const bool regular = S_ISREG(st.st_mode) && !existing->directory && !existing->link;
+        if (regular && existing->sizeKnown && existing->size != st.st_size)
+          continue;
         if (st.st_nlink == 1 && DifferentFolder(index, parent, names, control, true))
           continue;
-        if (S_ISREG(st.st_mode) && !existing->directory && !existing->link) {
-          if (existing->sizeKnown && existing->size != st.st_size)
-            continue;
+        if (regular) {
           // Two separate folders can both contain just 'memo'. Different
           // bytes rule out the candidate without trusting timestamps.
-          if (!targetHash)
+          if (!targetHash) {
+            FileEntry current;
+            if (!StatFile(target, current, control) || current.directory || current.link ||
+                !existing->SameRevision(current))
+              throw std::runtime_error("File changed during transfer preflight: " + target);
             targetHash = digest(target, control);
+          }
+          if (lstat(local.c_str(), &st) || !S_ISREG(st.st_mode))
+            throw std::runtime_error("File changed during transfer preflight: " + local);
           if (digest(local, control) != *targetHash)
             continue;
         }
