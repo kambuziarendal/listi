@@ -1061,6 +1061,78 @@ int main() {
           "local file conflict requires evidence that the actual replacement is outside the selection");
   }
   std::filesystem::remove_all(localTree);
+  for (const std::string old : {"old", "old-version"}) {
+    reset();
+    peers.at("fixture").mayBeLocal = true;
+    const auto backup = std::string(dir) + "/backup";
+    std::filesystem::create_directory(backup);
+    std::ofstream(backup + "/common.txt") << "shared";
+    std::ofstream(backup + "/edit.txt") << "new-version";
+    const std::string remoteBackup = "sftp://fixture/out/backup";
+    files[remoteBackup] = {"", 1, 0, true};
+    files[remoteBackup + "/common.txt"] = {"shared"};
+    files[remoteBackup + "/edit.txt"] = {old};
+    int prompts = 0;
+    Hooks observed = hooks;
+    observed.conflict = [&](const auto &) { ++prompts; return Decision::Replace; };
+    r = RunVirtual({Action::Copy, {backup}, "sftp://fixture/out"}, observed);
+    check(r.completed == 1 && r.errors.empty() && !r.partialCopies && prompts == 2 &&
+              mutationRequests && files.at(remoteBackup + "/common.txt").data == "shared" &&
+              files.at(remoteBackup + "/edit.txt").data == "new-version" &&
+              readBytes(backup + "/common.txt") == "shared" &&
+              readBytes(backup + "/edit.txt") == "new-version",
+          "an independent backup can update an edited sibling beside a byte-identical file");
+    std::filesystem::remove_all(backup);
+  }
+  for (const std::string scenario : {"new folder", "replacement", "safe first", "separate"}) {
+    reset();
+    peers.at("fixture").mayBeLocal = true;
+    files.clear();
+    const auto root = std::string(dir) + "/remapped";
+    const auto tree = root + "/album/album";
+    const std::string remoteTree = "sftp://fixture/out/album/album";
+    const bool replacing = scenario == "replacement";
+    const bool separate = scenario == "separate";
+    const auto target = separate ? root + "/independent" : root;
+    std::filesystem::create_directories(tree + "/album");
+    files[remoteTree] = files[remoteTree + "/album"] = {"", 1, 0, true};
+    if (replacing) {
+      std::ofstream(tree + "/memo") << "selected-original";
+      std::ofstream(tree + "/album/memo") << "inner-data";
+      files[remoteTree + "/memo"] = {"selected-original"};
+      files[remoteTree + "/album/memo"] = {"inner-data"};
+    } else {
+      std::filesystem::create_directory(tree + "/album/new-empty");
+      files[remoteTree + "/album/new-empty"] = {"", 1, 0, true};
+    }
+    if (separate) {
+      std::filesystem::create_directory(target);
+      std::ofstream(target + "/marker") << "unrelated";
+    }
+    std::vector<std::string> selected{remoteTree};
+    if (scenario == "safe first") {
+      selected.insert(selected.begin(), "sftp://fixture/out/first");
+      files[selected.front()] = {"safe bytes"};
+    }
+    localPublish = LocalPublish::Limited;
+    int prompts = 0;
+    Hooks observed = hooks;
+    observed.conflict = [&](const auto &) { ++prompts; return Decision::Replace; };
+    const auto before = fixtureTree();
+    r = RunVirtual({Action::Copy, selected, target}, observed);
+    localPublish = LocalPublish::Unexpected;
+    check(!r.partialCopies && !mutationRequests && !prompts && fixtureTree() == before &&
+              !std::filesystem::exists(tree + "/new-empty") &&
+              !std::filesystem::exists(target + "/first") &&
+              (!replacing || readBytes(tree + "/memo") == "selected-original") &&
+              (separate ? r.completed == 1 && r.errors.empty() &&
+                              std::filesystem::is_directory(target + "/album/album/new-empty") &&
+                              readBytes(target + "/marker") == "unrelated"
+                        : !r.completed && r.outcomes.size() == selected.size() &&
+                              errorHas(r, "selected SFTP source")),
+          ("remapped download preflight: " + scenario).c_str());
+    std::filesystem::remove_all(root);
+  }
   // The two routes have identical source/target path texts and the destination
   // contains an existing file. Authorization to replace is not namespace evidence.
   for (const std::string trial : {"same-key", "same-peer", "other-key-type", "unknown", "independent"}) {

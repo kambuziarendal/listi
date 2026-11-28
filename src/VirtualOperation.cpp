@@ -6,7 +6,7 @@
 #include "StagingSpace.h"
 #include "Sha256.h"
 #include "SftpFile.h"
-#include "LocalUploadSelection.h"
+#include "LocalTransferSelection.h"
 #include "RecoveryInventory.h"
 #include "UnavailableVolume.h"
 #include "VirtualFile.h"
@@ -166,6 +166,65 @@ bool WithinSftpSelection(const std::string &path, const std::set<std::string> &s
 
 // Read-only safety checks for an SFTP transfer batch. A verified spelling and
 // canonical path are namespace evidence, not a persistent SFTP v3 object ID.
+using LocalDownloadPlan = std::map<std::string, std::optional<struct stat>>;
+
+struct SftpDownloadPreflight {
+  explicit SftpDownloadPreflight(const TransferControl &control) : control(control) {}
+
+  const TransferControl &control;
+  LocalTransferSelection localOutputs;
+  LocalDownloadPlan plan;
+  std::vector<std::pair<std::string, std::string>> remoteSources;
+  size_t visited = 0;
+
+  void Project(const std::string &source, const FileEntry &input, const std::string &target,
+               bool protectRemote, unsigned depth = 0, bool parentExists = true) {
+    control.Check();
+    if (depth > 128 || ++visited > 200000)
+      throw std::runtime_error("Folder tree exceeds the transfer limit");
+    if (input.link)
+      throw std::runtime_error("Links are not followed during archive/network transfers: " + source);
+    if (protectRemote && (input.directory || !depth))
+      remoteSources.emplace_back(input.directory ? source : ParentLocation(source),
+                                 input.directory ? "" : LocationLeaf(source));
+
+    std::optional<struct stat> output;
+    if (parentExists) {
+      struct stat st;
+      if (!lstat(target.c_str(), &st)) {
+        if ((input.directory && !S_ISDIR(st.st_mode)) ||
+            (!input.directory && !S_ISREG(st.st_mode)))
+          throw std::runtime_error("Cannot safely merge with the local destination: " + target);
+        output = st;
+      } else if (errno != ENOENT) {
+        throw std::runtime_error("Cannot check destination: " + target);
+      }
+      if (!output || !input.directory)
+        localOutputs.AddOutput(target, control);
+    }
+    if (!plan.emplace(target, output).second)
+      throw std::runtime_error("More than one selected entry projects to: " + target);
+    if (input.directory)
+      for (const auto &child : ListFiles(source, control))
+        Project(child.path, child, ChildLocation(target, child.name), protectRemote,
+                depth + 1, bool(output));
+  }
+
+  void CheckOverlap() {
+    if (localOutputs.Empty())
+      return;
+    std::map<std::string, std::set<std::string>> listed;
+    for (const auto &[folder, leaf] : remoteSources) {
+      auto [it, added] = listed.try_emplace(folder);
+      if (added)
+        it->second = ListSftpNames(ParseLocation(folder), control);
+      if (!leaf.empty() && !it->second.count(leaf))
+        throw std::runtime_error("Cannot establish exact SFTP name: " + folder);
+      localOutputs.CheckSourceFolder(it->second, folder, leaf, control);
+    }
+  }
+};
+
 struct SftpTransferPreflight {
   explicit SftpTransferPreflight(const TransferControl &control) : control(control) {}
 
@@ -173,7 +232,7 @@ struct SftpTransferPreflight {
   std::set<std::string> sourcePaths, checkedParents, outputs;
   std::map<std::string, std::set<std::string>> names;
   size_t visited = 0;
-  LocalUploadSelection localSelection;
+  LocalTransferSelection localSelection;
   std::map<std::string, bool> localPlan;
 
   const std::set<std::string> &Names(const std::string &folder) {
@@ -386,6 +445,7 @@ struct Runner {
   std::string selectedSource;
   std::set<std::string> protectedSftpSources;
   std::map<std::string, bool> localUploadPlan;
+  LocalDownloadPlan localDownloadPlan;
   void Guard() {
     if (job.checkDestinationWindow)
       job.checkDestinationWindow();
@@ -612,6 +672,61 @@ struct Runner {
     localUploadPlan = std::move(check.localPlan);
     selectedSource.clear();
   }
+  void PreflightSftpDownload() {
+    auto control = Control(job.destination, false);
+    control.progress = {};
+    std::vector<bool> localPeers;
+    localPeers.reserve(job.sources.size());
+    bool mayShareStorage = false;
+    for (const auto &source : job.sources) {
+      const auto location = ParseLocation(source);
+      const bool local = location.scheme == "sftp" && BindSftpPeer(location, control).mayBeLocal;
+      localPeers.push_back(local);
+      mayShareStorage |= local;
+    }
+    if (!mayShareStorage)
+      return;
+
+    RememberDirectory(job.destination);
+    SftpDownloadPreflight check{control};
+    for (size_t i = 0; i < job.sources.size(); ++i) {
+      selectedSource = job.sources[i];
+      control = Control(selectedSource, false);
+      control.progress = {};
+      FileEntry input;
+      if (LocationLeaf(selectedSource).empty() || !StatFile(selectedSource, input, control))
+        throw std::runtime_error("Cannot establish source entry for SFTP download: " + selectedSource);
+      const auto expected = job.expectedRemoteSources.find(selectedSource);
+      if (expected != job.expectedRemoteSources.end() && !MatchesRemoteSelection(expected->second, input))
+        throw std::runtime_error("Selected network entry changed before copying: " + selectedSource);
+      check.Project(selectedSource, input, ChildLocation(job.destination, LocationLeaf(selectedSource)),
+                    localPeers[i]);
+    }
+    selectedSource.clear();
+    control = Control(job.destination, false);
+    control.progress = {};
+    check.CheckOverlap();
+    localDownloadPlan = std::move(check.plan);
+  }
+
+  void CheckLocalDownloadPlan(const std::string &target, bool exists) {
+    if (localDownloadPlan.empty())
+      return;
+    const auto found = localDownloadPlan.find(target);
+    if (found != localDownloadPlan.end() && bool(found->second) == exists) {
+      if (!exists)
+        return;
+      const auto &expected = *found->second;
+      struct stat now;
+      if (!lstat(target.c_str(), &now) &&
+          ((S_ISDIR(expected.st_mode) && S_ISDIR(now.st_mode) &&
+            expected.st_dev == now.st_dev && expected.st_ino == now.st_ino) ||
+           (S_ISREG(expected.st_mode) && SameLocal(expected, now))))
+        return;
+    }
+    throw std::runtime_error("SFTP download plan changed. Refresh and try again: " + target);
+  }
+
   void Copy(const std::string &src, const std::string &dst, int depth = 0,
             const FileEntry *discovered = nullptr) {
     if (depth > 128 || ++visited > 200000)
@@ -669,6 +784,7 @@ struct Runner {
       throw std::runtime_error(
           "Links are not followed during archive/network transfers");
     bool exists = StatFile(dst, target, control);
+    CheckLocalDownloadPlan(dst, exists);
     if (!localUploadPlan.empty()) {
       const auto planned = localUploadPlan.find(TransferIdentity(dst));
       if (planned == localUploadPlan.end() || planned->second != exists)
@@ -1337,8 +1453,14 @@ Result RunVirtual(const Job &job, const Hooks &hooks) {
     runner.Guard();
     if (job.action == Action::Copy || job.action == Action::Move)
       CheckNetworkTransferDestination(job.sources, ParseLocation(job.destination));
-    if ((job.action == Action::Copy || job.action == Action::Move) &&
-        ParseLocation(job.destination).scheme == "sftp") {
+    const auto destination = ParseLocation(job.destination);
+    const bool sftpDestination = (job.action == Action::Copy || job.action == Action::Move) &&
+                                 destination.scheme == "sftp";
+    const bool sftpDownload = job.action == Action::Copy && destination.Local() &&
+        std::any_of(job.sources.begin(), job.sources.end(), [](const auto &source) {
+          return ParseLocation(source).scheme == "sftp";
+        });
+    if (sftpDestination || sftpDownload) {
       try {
         // The displayed destination and the worker preflight both do network
         // I/O. Validate the complete frozen local selection before either.
@@ -1351,7 +1473,10 @@ Result RunVirtual(const Job &job, const Hooks &hooks) {
           CheckFrozenSource(path, expected);
         }
         runner.CheckDisplayedDestination();
-        runner.PreflightSftpTransfer();
+        if (sftpDestination)
+          runner.PreflightSftpTransfer();
+        else
+          runner.PreflightSftpDownload();
       } catch (const Cancelled &) {
         throw;
       } catch (const std::exception &error) {

@@ -650,6 +650,13 @@ verify its contents; a special file outside that directory is not part of
 the copy. Copy and Move reject a network destination inside any selected
 source folder on the same server, before transferring the first entry.
 
+When the SFTP server is on this computer, its folders may also be visible
+in the local pane under different paths. Before copying in either direction,
+Listi checks the whole selection for overlap. If it cannot distinguish the
+destination from a selected source, it stops before asking about conflicts.
+This can happen even with separate empty folders. If both folders are
+available locally, open both in local panes and copy there instead.
+
 When replacing a local file with an SFTP download, Listi checks the current
 remote contents against the staged download. For an upload that would
 replace a file, Listi reads the destination before asking and checks those
