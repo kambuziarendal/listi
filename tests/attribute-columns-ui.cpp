@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: MIT
 #include "FileProperties.h"
 #include "Pane.h"
+#include "FileListExportWindow.h"
+#include <Entry.h>
+#include <fcntl.h>
+#include <RadioButton.h>
 #include "PropertiesWindow.h"
 #include <Application.h>
 #include <Alert.h>
@@ -165,6 +169,12 @@ int main() {
     first.Save(nullptr, kNumber, B_INT32_TYPE, "-14");
     second.Save(nullptr, kLabel, B_STRING_TYPE, "");
 
+    const std::vector<std::pair<std::string, time_t>> dates = {
+        {f.first, -2208988800LL}, {f.second, 0}, {f.third, 946684800}};
+    for (const auto &[path, date] : dates) {
+      const timespec times[2] = {{date, 0}, {date, 0}};
+      Check(utimensat(AT_FDCWD, path.c_str(), times, 0) == 0, "set chronology fixture");
+    }
     Preferences prefs;
     prefs.folderModes[f.root] = 1; // Same remembered Icons view in both panes.
     auto left = new Pane(0, prefs);
@@ -370,6 +380,80 @@ int main() {
                                                      "2"};
         }),
         "numbers sort by value including exact uint64, while strings sort as text");
+    for (bool selectedOnly : {false, true}) {
+      std::vector<std::string> names;
+      {
+        WindowLock lock(browser);
+        auto &list = List(*left, "files");
+        list.DeselectAll();
+        for (int32 i = 0; i < list.CountRows(); ++i) {
+          const std::string name = Cell(*list.RowAt(i), 0);
+          if (name == "..") continue;
+          if (i % 2) list.AddToSelection(list.RowAt(i));
+          if (!selectedOnly || i % 2) names.push_back(name);
+        }
+        // Haiku's programmatic AddToSelection changes the outline only. A
+        // user gesture also notifies the pane, which owns the export selection.
+        list.SelectionChanged();
+        if (selectedOnly)
+          Check(left->Selected().size() == names.size(), "pane received selected rows");
+        Listi::ShowFileListExport(*left);
+      }
+      BWindow *exporter = nullptr;
+      for (int32 i = 0; i < app.CountWindows(); ++i)
+        if (std::string(app.WindowAt(i)->Title()) == "Export file list")
+          exporter = app.WindowAt(i);
+      Check(exporter != nullptr, "export dialog opened");
+      const std::string leaf = selectedOnly ? "listi-selected.csv" : "listi-visible.csv";
+      // Save outside the watched fixture so the first export cannot change the second.
+      const std::string output = f.root + "-" + leaf;
+      f.extra.push_back(output);
+      {
+        WindowLock lock(exporter);
+        auto radio = static_cast<BRadioButton *>(exporter->FindView(selectedOnly ? "selected" : "all"));
+        radio->SetValue(B_CONTROL_ON);
+        BMessage refresh('scop');
+        exporter->MessageReceived(&refresh);
+        auto preview = static_cast<BTextView *>(exporter->FindView("preview"));
+        std::string sample = preview->Text();
+        size_t at = 0;
+        for (size_t i = 0; i < std::min(size_t(3), names.size()); ++i) {
+          at = sample.find("\"" + names[i] + "\",", at);
+          Check(at != std::string::npos, "preview follows panel order");
+          ++at;
+        }
+        entry_ref folder;
+        Check(get_ref_for_path("/boot/home", &folder) == B_OK, "CSV output folder");
+        BMessage save(B_SAVE_REQUESTED);
+        save.AddRef("directory", &folder);
+        save.AddString("name", output.substr(output.rfind('/') + 1).c_str());
+        exporter->MessageReceived(&save);
+      }
+      std::ifstream saved(output);
+      std::string line;
+      Check(bool(std::getline(saved, line)), "CSV header saved");
+      for (const auto &name : names)
+        Check(std::getline(saved, line) && line.find("\"" + name + "\",") == 0,
+              "saved CSV follows panel order");
+      Check(!std::getline(saved, line), "no extra CSV rows");
+    }
+    for (bool ascending : {true, false}) {
+      {
+        WindowLock lock(browser);
+        left->Sort({2, ascending});
+      }
+      Check(Await([&] {
+        WindowLock lock(browser);
+        std::vector<std::string> paths;
+        for (const auto *entry : left->DisplayedRows())
+          if (entry->path == f.first || entry->path == f.second || entry->path == f.third)
+            paths.push_back(entry->path);
+        const std::vector<std::string> expected = ascending
+            ? std::vector<std::string>{f.first, f.second, f.third}
+            : std::vector<std::string>{f.third, f.second, f.first};
+        return paths == expected;
+      }), "Details sorts 1900, 1970 and 2000 chronologically");
+    }
     {
       WindowLock lock(browser);
       auto display = dynamic_cast<BMenuField *>(left->FindView("display mode"));

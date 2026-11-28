@@ -52,6 +52,7 @@ WRAPS = {
     "removable-copy": ["fsync", "write", "read"],
     "directory-finalization": ["fsync", "fs_stat_dev"],
     "tar-move-ownership": ["renameat"],
+    "tar-edit-ownership": ["fchown"],
     "archive-move-faults": ["renameat", "fstat"],
     "archive-editor-faults": ['rename', 'renameat', 'fsync', 'fs_stat_dev'],
     "archive-local-move-faults": ['renameat', 'unlink', 'openat'],
@@ -185,6 +186,52 @@ def run_tar_edit_ownership(binary):
         original = path.read_bytes()
         subprocess.run([binary, path, "unsupported"], cwd=ROOT, check=True, timeout=90)
         assert path.read_bytes() == original
+
+
+def run_cpio_edit_ownership(binary):
+    # Encode and inspect the fixed-width newc headers without libarchive.
+    def member(name, inode, uid, gid, payload):
+        fields = (inode, 0o100640, uid, gid, 1, 1700000000, len(payload),
+                  0, 0, 0, 0, len(name) + 1, 0)
+        header = b"070701" + b"".join(f"{value:08x}".encode() for value in fields)
+        header += name.encode() + b"\0"
+        return header + bytes(-len(header) % 4) + payload + bytes(-len(payload) % 4)
+
+    def headers(data):
+        result = {}
+        pos = 0
+        while True:
+            assert data[pos:pos + 6] == b"070701"
+            fields = [int(data[pos + i:pos + i + 8], 16) for i in range(6, 110, 8)]
+            size, name_size = fields[6], fields[11]
+            name = data[pos + 110:pos + 109 + name_size].decode()
+            if name == "TRAILER!!!":
+                return result
+            pos = (pos + 110 + name_size + 3) & ~3
+            assert name not in result
+            result[name] = fields[2], fields[3], data[pos:pos + size]
+            pos = (pos + size + 3) & ~3
+
+    with tempfile.TemporaryDirectory(prefix="listi-cpio-owner-") as folder:
+        path = Path(folder) / "owners.cpio"
+        source = (member("old-name", 1, 123, 456, b"rename me") +
+                  member("keep", 2, 345, 678, b"keep me") +
+                  member("TRAILER!!!", 0, 0, 0, b""))
+        path.write_bytes(source)
+        path.chmod(0o444)
+        subprocess.run([binary, path, "read-only"], cwd=ROOT, check=True, timeout=90)
+        assert path.read_bytes() == source
+        path.chmod(0o664)
+        if os.geteuid() == 0:
+            os.chown(path, 2191, 2192)
+            subprocess.run([binary, path, "deny-owner"], cwd=ROOT, check=True, timeout=90)
+            assert path.read_bytes() == source
+        before = path.stat()
+        subprocess.run([binary, path, "rename"], cwd=ROOT, check=True, timeout=90)
+        after = path.stat()
+        assert (after.st_uid, after.st_gid, after.st_mode) == (before.st_uid, before.st_gid, before.st_mode)
+        assert headers(path.read_bytes()) == {"new-name": (123, 456, b"rename me"),
+                                              "keep": (345, 678, b"keep me")}
 
 
 def run_tar_move_ownership(binary):
@@ -435,6 +482,7 @@ def run():
             run_disk_actions(binary)
         elif name == "tar-edit-ownership":
             run_tar_edit_ownership(binary)
+            run_cpio_edit_ownership(binary)
         elif name == "tar-move-ownership":
             run_tar_move_ownership(binary)
         else:

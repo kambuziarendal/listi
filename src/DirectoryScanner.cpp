@@ -269,6 +269,7 @@ public:
     if (Listi::IsVirtual(path.String())) {
       Listi::TransferControl control;
       control.proceed = [&] { return generation->load() == serial; };
+      control.connectionAttempt = m->GetInt64("connectionAttempt", 0);
       auto virtualRow = [&](const Listi::FileEntry &entry,
                             bool parent = false) {
         BMessage item;
@@ -332,6 +333,10 @@ public:
         if (location.Archive() && (fingerprint.empty() ||
             done.AddString("archiveVersion", fingerprint.c_str()) != B_OK))
           throw std::runtime_error("Cannot identify the listed archive. Reload and select again.");
+        if (control.connectionAttempt) {
+          control.Check();
+          Listi::FinishConnectionAttempt(path.String(), control.connectionAttempt, true);
+        }
         auto parent = Listi::ParentLocation(path.String());
         if (parent != path.String()) {
           Listi::FileEntry entry;
@@ -346,8 +351,12 @@ public:
           virtualRow(entry);
         }
       } catch (const Listi::Cancelled &) {
+        if (control.connectionAttempt)
+          Listi::FinishConnectionAttempt(path.String(), control.connectionAttempt, false);
         return;
       } catch (const std::exception &error) {
+        if (control.connectionAttempt)
+          Listi::FinishConnectionAttempt(path.String(), control.connectionAttempt, false);
         scanError = error.what();
       }
     } else if (path == "@disks") {

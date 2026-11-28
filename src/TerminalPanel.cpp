@@ -400,10 +400,10 @@ private:
         }
         return 1;
       };
-      result.sb_pushline = [](int cols, const VTermScreenCell *cells,
+      result.sb_pushline = [](int continuation, int cols, const VTermScreenCell *cells,
                               void *data) {
         auto &view = *static_cast<TerminalView *>(data);
-        view.history.emplace_back(cells, cells + cols);
+        view.history.push_back({{cells, cells + cols}, continuation != 0});
         if (view.history.size() > kMaxHistory)
           view.history.pop_front();
         if (view.historyOffset > 0)
@@ -476,7 +476,7 @@ private:
     row -= historyOffset;
     if (row >= 0)
       return vterm_screen_get_cell(screen, VTermPos{row, col}, &cell);
-    const auto &line = history[history.size() + row];
+    const auto &line = history[history.size() + row].cells;
     if (size_t(col) >= line.size())
       return false;
     cell = line[col];
@@ -499,6 +499,13 @@ private:
     return row * columns + col;
   }
 
+  bool ContinuesPreviousLine(int row) const {
+    row -= historyOffset;
+    if (row < 0)
+      return history[history.size() + row].continuation;
+    return vterm_state_get_lineinfo(vterm_obtain_state(state), row)->continuation;
+  }
+
   void Copy() {
     if (!screen || selection.start == selection.end)
       return;
@@ -506,7 +513,8 @@ private:
     const int first = std::min(selection.start, selection.end);
     const int last = std::max(selection.start, selection.end);
     for (int index = first; index <= last; ++index) {
-      if (index != first && index % columns == 0) {
+      if (index != first && index % columns == 0 &&
+          !ContinuesPreviousLine(index / columns)) {
         while (!text.empty() && text.back() == ' ')
           text.pop_back();
         text += '\n';
@@ -574,7 +582,11 @@ private:
   std::unique_ptr<BMessageRunner> runner;
   int64 pollGeneration = 0;
   std::string pending;
-  std::deque<std::vector<VTermScreenCell>> history;
+  struct HistoryLine {
+    std::vector<VTermScreenCell> cells;
+    bool continuation;
+  };
+  std::deque<HistoryLine> history;
   int historyOffset = 0;
   int rows = 12;
   int columns = 80;

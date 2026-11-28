@@ -262,6 +262,10 @@ class InspectorEditor : public BGroupView {
         return;
       }
       result.append(source.substr(start));
+      if (!body->Fits(0, body->TextLength(), result)) {
+        Status("Replacement exceeds the encoded document size limit. Nothing changed.");
+        return;
+      }
       if (source != result)
         body->SetText(result.data(), result.size());
       body->MakeFocus();
@@ -276,8 +280,7 @@ class InspectorEditor : public BGroupView {
         return;
       body->GetSelection(&from, &to);
     }
-    if (source.size() - needle.size() + value.size() >
-        Inspector::kDocumentLimit) {
+    if (!body->Fits(from, to, value)) {
       Status("Replacement exceeds the document size limit. Nothing changed.");
       return;
     }
@@ -351,7 +354,9 @@ public:
         leaf(file.substr(file.rfind('/') + 1)), document(std::move(source)),
         closeTarget(owner) {
     menu = BuildMenu();
-    body = new Inspector::InspectorTextView(path, document->Text());
+    body = new Inspector::InspectorTextView(path, *document, [this] {
+      Status("Edit exceeds the encoded document limit of 256 KiB.");
+    });
     wrapItem->SetMarked(body->DoesWordWrap());
     auto scroll =
         new Listi::AdaptiveScrollView("editor scroll", body, true, B_NO_BORDER);

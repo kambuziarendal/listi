@@ -4,7 +4,9 @@
 #include "ArchivePasswords.h"
 #include <Application.h>
 #include <cstdio>
+#include <fcntl.h>
 #include <fstream>
+#include <sys/stat.h>
 #include <pthread.h>
 #include <unistd.h>
 using namespace Listi;
@@ -36,6 +38,28 @@ void copy(const std::string &from, const std::string &to) {
   std::ofstream out(to, std::ios::binary);
   out << in.rdbuf();
 }
+void extractedTimes(const std::string &root, const std::string &archive) {
+  const timespec expected[] = {{-1, 0}, {0, 0}, {1700000000, 125000000}};
+  const char *names[] = {"before", "epoch", "fraction"};
+  auto extract = PrepareArchiveJob(true, {archive});
+  SetArchiveDestination(extract, root, "extracted-times");
+  check(RunArchiveJob(extract, {}).completed == 1, "extract timestamped 7z");
+  const auto url = OpenArchive(archive), reference = root + "/reference-time";
+  std::ofstream(reference) << "reference";
+  for (int i = 0; i < 3; ++i) {
+    FileEntry entry;
+    check(StatFile(ChildLocation(url, names[i]), entry) && entry.modifiedKnown &&
+              entry.modified == expected[i].tv_sec &&
+              entry.ModifiedNanoseconds() == expected[i].tv_nsec, "exact p7zip member time");
+    // Measure this volume's precision independently of the archive adapter.
+    timespec times[2] = {expected[i], expected[i]};
+    struct stat stored, actual;
+    const auto path = extract.destination + "/" + names[i];
+    check(!utimensat(AT_FDCWD, reference.c_str(), times, 0) && !stat(reference.c_str(), &stored) &&
+              !stat(path.c_str(), &actual) && actual.st_mtim.tv_sec == stored.st_mtim.tv_sec &&
+              actual.st_mtim.tv_nsec == stored.st_mtim.tv_nsec, "extracted time matches filesystem precision");
+  }
+}
 void *run(void *) {
   try {
     char cwd[4096];
@@ -45,6 +69,7 @@ void *run(void *) {
     auto root = mkdtemp(temp);
     check(root, "test root");
     check(SevenZipAvailable(), "optional native engine available");
+    extractedTimes(root, base + "times.7z");
     for (const char *name : {"data.7z", "headers.7z"}) {
       password("Listi-test-only");
       std::string file = base + name;

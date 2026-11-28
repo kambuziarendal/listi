@@ -139,17 +139,17 @@ la_ssize_t BudgetArchiveWrite(archive *archive, void *opaque,
   return size;
 }
 // Read the original logical headers, not the ownership of extracted scratch files.
-void ReadTarMetadata(DynamicLibrary &lib, archive *reader, archive_entry *entry,
+void ReadMemberMetadata(DynamicLibrary &lib, archive *reader, archive_entry *entry,
                    int status, const Hooks &hooks, TarMemberMap &metadata) {
   ArchiveMetadataBudget budget;
   for (; status != ARCHIVE_EOF;
        status = LIBCALL(lib, archive_read_next_header)(reader, &entry)) {
-    Require(status == ARCHIVE_OK, "Cannot read TAR ownership. Original archive retained.");
+    Require(status == ARCHIVE_OK, "Cannot read archive member ownership. Original archive retained.");
     if (hooks.proceed && !hooks.proceed())
       throw Cancelled();
     Require(metadata.size() < 200000, "Archive has too many entries.");
     auto name = SafeArchivePath(LIBCALL(lib, archive_entry_pathname)(entry));
-    Require(!name.empty(), "Cannot preserve an explicit TAR root entry. Original archive retained.");
+    Require(!name.empty(), "Cannot preserve an explicit archive root entry. Original archive retained.");
     const char *user = LIBCALL(lib, archive_entry_uname)(entry);
     const char *group = LIBCALL(lib, archive_entry_gname)(entry);
     budget.Charge(sizeof(TarMemberMap::value_type) + ArchiveMetadataBudget::NodeOverhead +
@@ -159,7 +159,7 @@ void ReadTarMetadata(DynamicLibrary &lib, archive *reader, archive_entry *entry,
     Require(!flags && !cleared && !LIBCALL(lib, archive_entry_xattr_count)(entry) &&
                 !LIBCALL(lib, archive_entry_acl_types)(entry) &&
                 !LIBCALL(lib, archive_entry_sparse_count)(entry),
-            "Cannot preserve extended TAR metadata for " + name + ". Original archive retained.");
+            "Cannot preserve extended member metadata for " + name + ". Original archive retained.");
     TarMemberMetadata member{LIBCALL(lib, archive_entry_uid)(entry),
                              LIBCALL(lib, archive_entry_gid)(entry),
                              user ? user : "", group ? group : "",
@@ -177,7 +177,7 @@ void ReadTarMetadata(DynamicLibrary &lib, archive *reader, archive_entry *entry,
       member.created.emplace(LIBCALL(lib, archive_entry_birthtime)(entry),
                              LIBCALL(lib, archive_entry_birthtime_nsec)(entry));
     Require(metadata.emplace(std::move(name), std::move(member)).second,
-            "Ambiguous TAR member ownership. Original archive retained.");
+            "Ambiguous archive member ownership. Original archive retained.");
   }
 }
 struct Pack {
@@ -241,7 +241,7 @@ struct Pack {
       LIBCALL(writer.lib, archive_entry_set_gid)(entry, member == metadata.end() ? 0 : member->second.gid);
       if (member != metadata.end()) {
         const auto &saved = member->second;
-        Require(bool(S_ISDIR(before.st_mode)) == saved.directory, "TAR member type changed: " + name);
+        Require(bool(S_ISDIR(before.st_mode)) == saved.directory, "Archive member type changed: " + name);
         LIBCALL(writer.lib, archive_entry_set_perm)(entry, saved.mode);
         LIBCALL(writer.lib, archive_entry_set_mtime)(entry, saved.modified, saved.nanoseconds);
         if (saved.accessed)
@@ -416,8 +416,8 @@ std::string DetectArchiveEditFormat(const std::string &path,
           "Archive is damaged or cannot be inspected for editing.");
   const int detected =
       LIBCALL(lib, archive_format)(reader.value) & ARCHIVE_FORMAT_BASE_MASK;
-  if (metadata && detected == ARCHIVE_FORMAT_TAR)
-    ReadTarMetadata(lib, reader.value, entry, status, hooks, *metadata);
+  if (metadata && (detected == ARCHIVE_FORMAT_TAR || detected == ARCHIVE_FORMAT_CPIO))
+    ReadMemberMetadata(lib, reader.value, entry, status, hooks, *metadata);
   if (detected == ARCHIVE_FORMAT_CAB)
     CabValidateEdit(fd.n);
   if (detected == ARCHIVE_FORMAT_LHA)

@@ -362,6 +362,10 @@ void Pane::SetSource(bool source) {
   activityLevel = active ? 1.f : 0.f;
   InvalidateActivityBorder();
 }
+std::vector<PaneEntry *> Pane::DisplayedRows() const {
+  return mode == 0 ? list->DisplayedRows() : entries.Visible();
+}
+
 PaneSort Pane::Sorting() {
   return mode == 0 ? list->Sorting() : entries.Sorting();
 }
@@ -595,14 +599,14 @@ void Pane::UpdateNavigation() {
   forward->SetEnabled(history.Forward() >= 0);
 }
 void Pane::StartNavigation(const std::string &request, int target, bool trash,
-                           bool restore, bool refresh) {
+                           bool restore, bool refresh, int64 connectionAttempt) {
   try {
     const auto query = queries.find(request);
     if (Listi::InterruptedVolumes().Contains(
             query == queries.end() ? request : query->second.request.root) ||
         (mediaReadSuspended && path == request.c_str()))
       throw std::runtime_error(Listi::kUnavailableVolumeText);
-    if (Listi::IsVirtual(request))
+    if (!connectionAttempt && Listi::IsVirtual(request))
       Listi::RequireConnection(request);
   } catch (const std::exception &error) {
     restoring.reset();
@@ -678,6 +682,8 @@ void Pane::StartNavigation(const std::string &request, int target, bool trash,
   m.AddInt64("serial", serial);
   m.AddBool("icons", false);
   m.AddBool("firstScreen", true);
+  const bool attachedAttempt = !connectionAttempt ||
+      m.AddInt64("connectionAttempt", connectionAttempt) == B_OK;
   m.AddInt32("iconSize", mode == 0 || mode == MillerMode || mode == MiniIconMode ? 16 : 96);
   m.AddBool("trash", trash);
   if (mode == 0)
@@ -687,7 +693,7 @@ void Pane::StartNavigation(const std::string &request, int target, bool trash,
   check.AddInt64("serial", serial);
   scanTimer.reset(new BMessageRunner(BMessenger(this), &check, 250000));
   bool started = false;
-  if (scanTimer->InitCheck() == B_OK) {
+  if (attachedAttempt && scanTimer->InitCheck() == B_OK) {
     if (IsSearchList()) {
       SetStatus("Reading search results...");
       queryWorker = Listi::NewSearchWorker(BMessenger(this), generation, queryFailure);
@@ -701,6 +707,8 @@ void Pane::StartNavigation(const std::string &request, int target, bool trash,
     }
   }
   if (!started) {
+    if (connectionAttempt)
+      Listi::FinishConnectionAttempt(request, connectionAttempt, false);
     BMessage failed(kScanDone);
     failed.AddInt64("serial", serial);
     failed.AddString("error",
@@ -1195,7 +1203,10 @@ void Pane::MessageReceived(BMessage *m) {
       break;
     if (m->GetBool("place", false))
       Activate();
-    Navigate(m->GetString("path", edit->Text()));
+    if (auto attempt = m->GetInt64("connectionAttempt", 0))
+      StartNavigation(m->GetString("path", ""), -1, false, false, false, attempt);
+    else
+      Navigate(m->GetString("path", edit->Text()));
     if (m->GetBool("tree", false))
       Activate();
     else

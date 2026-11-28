@@ -3,6 +3,7 @@
 #include "InspectorContent.h"
 #include <File.h>
 #include <string>
+#include <string_view>
 
 namespace Inspector {
 constexpr size_t kDocumentLimit = TextLimit;
@@ -13,6 +14,8 @@ public:
   Document(const Document &) = delete;
   Document &operator=(const Document &) = delete;
   const std::string &Text() const { return text; }
+  size_t EncodedTextBytes(std::string_view part) const;
+  size_t TextBudget() const { return kDocumentLimit - (bom ? 3 : 0); }
   void Save(const std::string &text);
 
 private:

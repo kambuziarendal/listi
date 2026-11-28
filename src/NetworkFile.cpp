@@ -106,7 +106,7 @@ struct SMBSession {
   Connection auth;
   const TransferControl &control;
   explicit SMBSession(const Location &l, const TransferControl &c)
-      : auth(GetConnection(l.URL())), control(c) {
+      : auth(GetConnection(l.URL(), c.connectionAttempt)), control(c) {
     if (!lib.Available())
       throw std::runtime_error(
           "Install samba4 from HaikuDepot to connect to SMB shares");
@@ -219,7 +219,7 @@ struct CurlSession {
   char error[CURL_ERROR_SIZE] = {};
   curl_slist *commands = nullptr;
   explicit CurlSession(const Location &l, const TransferControl &c)
-      : auth(GetConnection(l.URL())), control(c) {
+      : auth(GetConnection(l.URL(), c.connectionAttempt)), control(c) {
     curl = NewCurlHandle();
     try {
       Set(CURLOPT_URL, l.URL().c_str());
@@ -371,6 +371,11 @@ void ParseModify(const std::string &value, FileEntry &entry) {
 }
 // MLSD preserves spaces in names. Unix LIST is a fallback for SFTP and older
 // FTP.
+struct UnverifiedFtpType : std::runtime_error {
+  explicit UnverifiedFtpType(const std::string &name)
+      : std::runtime_error("Unverified FTP entry type: " + name), name(name) {}
+  std::string name;
+};
 FileEntry ParseList(const std::string &line, const Location &l, bool mlsd) {
   FileEntry e;
   e.permissionsKnown = !mlsd;
@@ -382,7 +387,7 @@ FileEntry ParseList(const std::string &line, const Location &l, bool mlsd) {
     e.name = line.substr(at + 1);
     std::string facts = line.substr(0, at);
     size_t i = 0;
-    bool sawModify = false;
+    bool sawModify = false, sawType = false, validType = false;
     while (i < facts.size()) {
       auto end = facts.find(';', i);
       if (end == std::string::npos)
@@ -396,10 +401,15 @@ FileEntry ParseList(const std::string &line, const Location &l, bool mlsd) {
       if (key == "type") {
         std::transform(v.begin(), v.end(), v.begin(),
                        [](unsigned char c) { return std::tolower(c); });
+        if (sawType)
+          throw UnverifiedFtpType(e.name);
+        sawType = true;
         if (v == "cdir" || v == "pdir")
           return {};
         e.directory = v == "dir";
-        e.link = v.find("slink") != std::string::npos;
+        e.link = v == "os.unix=slink" || v.rfind("os.unix=slink:", 0) == 0 ||
+                 v == "os.unix=symlink" || v.rfind("os.unix=symlink:", 0) == 0;
+        validType = e.directory || e.link || v == "file";
       } else if (key == "unique") {
         e.providerIdentity = v;
       } else if (key == "size") {
@@ -425,6 +435,8 @@ FileEntry ParseList(const std::string &line, const Location &l, bool mlsd) {
       }
       i = end + 1;
     }
+    if (!validType)
+      throw UnverifiedFtpType(e.name);
   } else {
     if (line.rfind("total ", 0) == 0 || line.empty())
       return {};
@@ -526,9 +538,9 @@ bool NetworkAvailable(const std::string &s) {
   // libssh2 is a linked package dependency; SFTP additionally needs curl for TCP.
   return s == "smb" ? SMB().Available() : Curl().Available();
 }
-std::vector<FileEntry> ListNetwork(const Location &l,
-                                   const TransferControl &c,
-                                   ListingMethod *method) {
+static std::vector<FileEntry> ListNetworkEntries(const Location &l, const TransferControl &c,
+                                                 ListingMethod *method,
+                                                 const std::string *requestedName) {
   if (method)
     *method = ListingMethod::Provider;
   c.Check();
@@ -622,11 +634,23 @@ std::vector<FileEntry> ListNetwork(const Location &l,
       line.pop_back();
     if (line.empty())
       continue;
-    auto e = ParseList(line, l, mlsd);
-    if (!e.name.empty())
-      out.push_back(e);
+    try {
+      auto e = ParseList(line, l, mlsd);
+      if (!e.name.empty())
+        out.push_back(std::move(e));
+    } catch (const UnverifiedFtpType &unknown) {
+      if (requestedName && *requestedName != unknown.name)
+        continue; // An unrelated row cannot invalidate an exact lookup.
+      if (!c.listingWarning || requestedName)
+        throw;
+      *c.listingWarning = "Incomplete listing: FTP entries with unverified types are not shown.";
+    }
   }
   return out;
+}
+std::vector<FileEntry> ListNetwork(const Location &l, const TransferControl &c,
+                                   ListingMethod *method) {
+  return ListNetworkEntries(l, c, method, nullptr);
 }
 bool StatNetwork(const Location &l, FileEntry &e, const TransferControl &c,
                  const FileEntry *discovered) {
@@ -652,8 +676,8 @@ bool StatNetwork(const Location &l, FileEntry &e, const TransferControl &c,
     entry = *discovered;
   } else {
     ListingMethod method;
-    auto items = ListNetwork(ParseLocation(ParentLocation(url)), c, &method);
     const auto name = LocationLeaf(url);
+    auto items = ListNetworkEntries(ParseLocation(ParentLocation(url)), c, &method, &name);
     auto item = std::find_if(items.begin(), items.end(), [&](const FileEntry &entry) {
       return entry.name == name;
     });

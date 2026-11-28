@@ -297,7 +297,7 @@ void ReadSftpPrefix(const Location &l, const FileEntry &, size_t bytes, const Da
   c.Check();
   prefixReads.emplace_back(l.URL(), bytes);
   if (l.URL() == specialSftpName || l.URL() == unreadableSource)
-    throw std::runtime_error("Witness read denied");
+    throw WitnessAccessDenied("Witness read denied");
   const auto &data = files.at(StoragePath(l.URL())).data;
   if (bytes > data.size())
     throw std::runtime_error("Short witness");
@@ -1372,6 +1372,68 @@ int main() {
               readBytes(localFile) == "edit" && files.at(remoteFile).data == "new",
           "read-only preflight cannot reuse the discarded revision of a cached witness");
     std::filesystem::remove_all(local);
+  }
+  for (const bool upload : {false, true}) {
+    reset();
+    const auto folder = std::string(dir) + "/indexed-names";
+    const auto local = folder + "/memo";
+    const std::string remote = "sftp://fixture/out";
+    std::filesystem::create_directory(folder);
+    std::ofstream(local) << "same";
+    files[remote + "/memo"] = {"same"};
+    LocalTransferSelection selection;
+    if (upload)
+      selection.Add(local, {}, {});
+    else
+      selection.AddOutput(local, {});
+    std::ofstream(folder + "/later") << "appeared";
+    FileEntry existing;
+    StatFile(remote + "/memo", existing);
+    bool refused = false;
+    try {
+      if (upload)
+        selection.CheckParent({"memo", "later"}, remote + "/memo", &existing, {});
+      else
+        selection.CheckSourceFolder({"memo", "later"}, remote, "memo", {});
+      selection.RecheckWitnesses({});
+    } catch (const std::runtime_error &) {
+      refused = true;
+    }
+    check(refused && mutationRequests == 0 && readBytes(local) == "same",
+          "read-only preflight rejects a stale negative name index");
+    std::filesystem::remove_all(folder);
+  }
+  for (const bool upload : {false, true}) {
+    reset();
+    peers.at("fixture").mayBeLocal = true;
+    files.clear();
+    const auto folder = std::string(dir) + "/skip-denied";
+    const std::string remote = "sftp://fixture/out";
+    std::filesystem::create_directory(folder);
+    for (const std::string leaf : {"first", "second"}) {
+      std::ofstream(folder + "/" + leaf) << (upload ? "new" : "old");
+      files[remote + "/" + leaf] = {upload ? "old" : "new"};
+    }
+    if (upload)
+      unreadableSource = remote + "/first";
+    else if (chmod((folder + "/first").c_str(), 0000))
+      return 1;
+    const auto source = upload ? folder : remote;
+    const Job batch{Action::Copy, {source + "/first", source + "/second"}, upload ? remote : folder};
+    Hooks decisions = hooks;
+    unsigned prompts = 0;
+    decisions.conflict = [&](const auto &) { return ++prompts == 1 ? Decision::Skip : Decision::Replace; };
+    localPublish = LocalPublish::Limited;
+    r = RunVirtual(batch, decisions);
+    localPublish = LocalPublish::Unexpected;
+    chmod((folder + "/first").c_str(), 0600);
+    check(r.completed == 1 && r.skipped == 1 && r.errors.empty() && prompts == 2 &&
+              readBytes(folder + "/first") == (upload ? "new" : "old") &&
+              files.at(remote + "/first").data == (upload ? "old" : "new") &&
+              readBytes(folder + "/second") == "new" && files.at(remote + "/second").data == "new",
+          "a stable sibling permits skipping an unreadable target and copying the next file");
+    unreadableSource.clear();
+    std::filesystem::remove_all(folder);
   }
   // The two routes have identical source/target path texts and the destination
   // contains an existing file. Authorization to replace is not namespace evidence.

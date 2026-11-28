@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "StagingSpace.h"
 #include "InspectorDocument.h"
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
@@ -204,8 +205,12 @@ Document::Document(const std::string &selected) : path(selected) {
   Guard();
 }
 
+size_t Document::EncodedTextBytes(std::string_view part) const {
+  return part.size() + (crlf ? std::count(part.begin(), part.end(), '\n') : 0);
+}
+
 void Document::Save(const std::string &edited) {
-  if (edited.size() > kDocumentLimit || edited.find('\r') != std::string::npos)
+  if (EncodedTextBytes(edited) > TextBudget() || edited.find('\r') != std::string::npos)
     throw std::runtime_error("Use LF editor text within the 256 KiB limit.");
   ValidateText(edited);
   // In a document without a BOM, a leading U+FEFF would be decoded as a

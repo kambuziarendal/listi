@@ -163,7 +163,7 @@ SftpSession::~SftpSession() {
 
 void SftpSession::Connect(const Location &location, const TransferControl &control) {
   control.Check();
-  auto account = GetConnection(location.URL());
+  auto account = GetConnection(location.URL(), control.connectionAttempt);
   transport = NewCurlHandle();
   static std::once_flag initialized;
   std::call_once(initialized, [] {
@@ -241,6 +241,9 @@ void SftpSession::Require(long result, const char *operation) const {
   const auto reason = result == LIBSSH2_ERROR_SFTP_PROTOCOL && sftp
       ? "server status " + std::to_string(libssh2_sftp_last_error(sftp))
       : "SSH error " + std::to_string(result);
+  if (result == LIBSSH2_ERROR_SFTP_PROTOCOL && sftp &&
+      libssh2_sftp_last_error(sftp) == LIBSSH2_FX_PERMISSION_DENIED)
+    throw WitnessAccessDenied(std::string(operation) + ": " + reason);
   throw std::runtime_error(std::string(operation) + ": " + reason);
 }
 

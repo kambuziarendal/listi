@@ -13,8 +13,9 @@
 namespace Inspector {
 
 InspectorTextView::InspectorTextView(const std::string &path,
-                                     const std::string &text)
-    : ScrollTextView("editor text"), language(Syntax::Language(path, text)) {
+                                     const Document &source, std::function<void()> limitNotice)
+    : ScrollTextView("editor text"), onLimit(std::move(limitNotice)),
+      document(source), language(Syntax::Language(path, source.Text())) {
   SetFontAndColor(be_fixed_font);
   SetViewUIColor(B_DOCUMENT_BACKGROUND_COLOR);
   SetLowUIColor(B_DOCUMENT_BACKGROUND_COLOR);
@@ -24,7 +25,7 @@ InspectorTextView::InspectorTextView(const std::string &path,
   SetWordWrap(language == Syntax::Family::Plain || language == Syntax::Family::Markdown);
   SetInsets(8, 6, 8, 6);
   SetTabWidth(be_fixed_font->StringWidth("    "));
-  SetText(text.c_str());
+  SetText(source.Text().c_str());
   recording = true;
 }
 
@@ -41,6 +42,36 @@ void InspectorTextView::MessageReceived(BMessage *message) {
   BTextView::MessageReceived(message);
 }
 
+void InspectorTextView::RejectOversize() const {
+  beep();
+  if (onLimit)
+    onLimit();
+}
+
+bool InspectorTextView::Fits(int32 from, int32 to, std::string_view insert) const {
+  auto current = Content();
+  const size_t budget = document.TextBudget();
+  if (insert.size() > budget)
+    return false;
+  return document.EncodedTextBytes(current.substr(0, from)) +
+         document.EncodedTextBytes(insert) +
+         document.EncodedTextBytes(current.substr(to)) <= budget;
+}
+
+void InspectorTextView::KeyDown(const char *bytes, int32 count) {
+  if (count > 0 && (static_cast<unsigned char>(bytes[0]) >= 32 ||
+                     bytes[0] == B_ENTER || bytes[0] == B_TAB) &&
+      bytes[0] != B_DELETE && !(modifiers() & B_COMMAND_KEY)) {
+    int32 from, to;
+    GetSelection(&from, &to);
+    if (!Fits(from, to, {bytes, static_cast<size_t>(count)})) {
+      RejectOversize();
+      return;
+    }
+  }
+  BTextView::KeyDown(bytes, count);
+}
+
 void InspectorTextView::Paste(BClipboard *clipboard) {
   const void *data = nullptr;
   ssize_t size = 0;
@@ -55,12 +86,10 @@ void InspectorTextView::Paste(BClipboard *clipboard) {
       size > 0)
     bytes = {static_cast<const char *>(data), static_cast<size_t>(size)};
   bytes = bytes.substr(0, bytes.find('\0'));
-  if (bytes.find('\r') == bytes.npos) {
+  if (bytes.empty()) {
     clipboard->Unlock();
-    BTextView::Paste(clipboard);
     return;
   }
-
   int32 from, to;
   GetSelection(&from, &to);
   const size_t keptBytes = TextLength() - (to - from);
@@ -70,7 +99,7 @@ void InspectorTextView::Paste(BClipboard *clipboard) {
   // cannot produce a fitting edit even in the best case.
   if (bytes.size() / 2 + bytes.size() % 2 > available) {
     clipboard->Unlock();
-    beep();
+    RejectOversize();
     return;
   }
   std::string text;
@@ -80,13 +109,17 @@ void InspectorTextView::Paste(BClipboard *clipboard) {
       continue;
     if (text.size() == available) {
       clipboard->Unlock();
-      beep();
+      RejectOversize();
       return;
     }
     text += bytes[i] == '\r' ? '\n' : bytes[i];
   }
   clipboard->Unlock();
 
+  if (!Fits(from, to, text)) {
+    RejectOversize();
+    return;
+  }
   Select(from, to); // Cancel inline input before replacing the selection.
   Delete(from, to);
   const auto insertedBytes = static_cast<int32>(text.size());
@@ -101,6 +134,10 @@ std::string_view InspectorTextView::Content() const {
 
 void InspectorTextView::InsertText(const char *text, int32 size, int32 at,
                                    const text_run_array *) {
+  if (recording && size > 0 && !Fits(at, at, {text, static_cast<size_t>(size)})) {
+    RejectOversize();
+    return;
+  }
   if (recording && size > 0)
     pending.push_back({at, true, std::string(text, size)});
   // Files are plain text. Never import font runs from a rich clipboard.

@@ -13,6 +13,11 @@
 #include <vector>
 
 namespace Listi {
+// A read-only witness can be inaccessible even when another sibling proves
+// separation. Other failures, especially cancellation and revision changes, propagate.
+struct WitnessAccessDenied : std::runtime_error {
+  using std::runtime_error::runtime_error;
+};
 struct Cancelled : std::exception {};
 // Shared by all remote calls made to reconcile one failed upload. Never used
 // to limit the original transfer or to authorize an unverified mutation.
@@ -65,6 +70,7 @@ struct TransferControl {
   // Browsers may omit unsupported entries with a visible warning. Workers cannot.
   std::string *listingWarning = nullptr;
   bool requireExactName = false; // SFTP mutation guards also need exact spelling.
+  int64_t connectionAttempt = 0; // Provisional credentials for one browsing scan only.
   void RequireArchiveVersion(const std::string &actual) const {
     if (archiveVersion && *archiveVersion != actual)
       throw std::runtime_error("Archive changed after selection. Reload and select again.");
@@ -112,7 +118,9 @@ void CheckNetworkTransferDestination(const std::vector<std::string> &sources,
 // once per process. Existing panes and queued work never adopt new credentials.
 bool SetConnection(const std::string &url, const Connection &);
 void RequireConnection(const std::string &url);
-Connection GetConnection(const std::string &url);
+Connection GetConnection(const std::string &url, int64_t attempt = 0);
+int64_t BeginConnectionAttempt(const std::string &url, const Connection &);
+void FinishConnectionAttempt(const std::string &url, int64_t attempt, bool accepted);
 // FTP servers may omit names from both MLSD and LIST.
 enum class ListingMethod { Provider, FtpMlsd, FtpList };
 inline bool VisibleEntriesOnly(ListingMethod method) {

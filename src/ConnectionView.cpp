@@ -121,15 +121,14 @@ class ConnectionView : public BGroupView {
     closeTarget.SendMessage(&done);
   }
   void Connect(const std::string &location, const Listi::Connection &auth) {
-    if (!Listi::SetConnection(location, auth)) {
-      error->SetMessage("This server already has a different connection. Restart Listi to change accounts or credentials.");
-      password->SetText("");
-      keyPassphrase->SetText("");
-      return;
-    }
+    const auto attempt = Listi::BeginConnectionAttempt(location, auth);
     BMessage navigate(kNavigate);
-    navigate.AddString("path", location.c_str());
-    pane.SendMessage(&navigate);
+    if (navigate.AddString("path", location.c_str()) != B_OK ||
+        navigate.AddInt64("connectionAttempt", attempt) != B_OK ||
+        pane.SendMessage(&navigate) != B_OK) {
+      Listi::FinishConnectionAttempt(location, attempt, false);
+      throw std::runtime_error("Cannot start the network folder scan.");
+    }
     Close();
   }
   void AskPassphrase(std::string location, Listi::Connection auth) {

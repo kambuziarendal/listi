@@ -24,6 +24,7 @@ public:
 private:
   struct Folder {
     std::string path;
+    struct stat revision;
     bool entireTree;
     Names names;
     Names mutations;
@@ -48,6 +49,9 @@ private:
     control.Check();
     if (depth > 128 || InterruptedVolumes().ContainsResolved(path))
       throw std::runtime_error("Cannot inspect local transfer folder: " + path);
+    struct stat revision;
+    if (stat(path.c_str(), &revision) || !S_ISDIR(revision.st_mode))
+      throw std::runtime_error("Cannot inspect local transfer folder: " + path);
     Names names;
     // ListFiles intentionally hides private staging and unavailable entries;
     // the identity witness needs the raw names, including dotfiles.
@@ -61,7 +65,7 @@ private:
     }
     for (const auto &name : names)
       containingName[name].push_back(folders.size());
-    folders.push_back({path, entireTree, std::move(names), {}});
+    folders.push_back({path, revision, entireTree, std::move(names), {}});
   }
 
 public:
@@ -139,10 +143,15 @@ private:
       return false;
     witnessBytesRemaining -= bytes * 2;
     Sha256 localHash, remoteHash;
-    ReadLocalPrefix(local.path, local.revision, bytes,
-                    [&](const char *data, size_t n) { localHash.Update(data, n); }, control);
-    ReadSftpPrefix(ParseLocation(remotePath), remote, bytes,
-                   [&](const char *data, size_t n) { remoteHash.Update(data, n); }, control);
+    try {
+      ReadLocalPrefix(local.path, local.revision, bytes,
+                      [&](const char *data, size_t n) { localHash.Update(data, n); }, control);
+      ReadSftpPrefix(ParseLocation(remotePath), remote, bytes,
+                     [&](const char *data, size_t n) { remoteHash.Update(data, n); }, control);
+    } catch (const WitnessAccessDenied &) {
+      control.Check();
+      return false; // No evidence either way. Try other stable evidence.
+    }
     FileEntry current;
     if (!StatFile(remotePath, current, control) || !remote.SameRevision(current))
       throw std::runtime_error("File changed during transfer preflight: " + remotePath);
@@ -315,6 +324,21 @@ public:
   }
 
   void RecheckWitnesses(const TransferControl &control) const {
+    // The name shortlist can exclude every candidate, without a file witness.
+    // Its directory revisions must cover enumeration through the final decision.
+    for (const auto &folder : folders) {
+      control.Check();
+      struct stat current;
+      size_t count = 0;
+      for (const auto &entry : std::filesystem::directory_iterator(folder.path)) {
+        control.Check();
+        if (++count > folder.names.size() || !folder.names.count(entry.path().filename().string()))
+          throw std::runtime_error("Directory changed during transfer preflight: " + folder.path);
+      }
+      if (count != folder.names.size() || stat(folder.path.c_str(), &current) ||
+          !SameLocalRevision(folder.revision, current))
+        throw std::runtime_error("Directory changed during transfer preflight: " + folder.path);
+    }
     for (const auto &item : distinctFolders) {
       control.Check();
       RequireWitness(item.second);

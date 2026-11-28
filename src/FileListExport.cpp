@@ -19,9 +19,9 @@ std::string TextCell(const std::string &text) {
 }
 }
 namespace Listi {
-std::vector<ExportRow> FreezeFileList(const PaneModel &model) {
+std::vector<ExportRow> FreezeFileList(const PaneModel &model, const std::vector<PaneEntry *> &order) {
   std::vector<ExportRow> rows;
-  for (const auto *entry : model.Visible()) {
+  for (const auto *entry : order) {
     if (entry->parent || entry->unmountedDisk)
       continue;
     const auto type = entry->kind == 2 ? "link" : entry->directory ? "folder" : "file";

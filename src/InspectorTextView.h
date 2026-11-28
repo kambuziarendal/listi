@@ -2,11 +2,13 @@
 #pragma once
 #include "ScrollTextView.h"
 #include <deque>
+#include <functional>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace Inspector {
+class Document;
 namespace Syntax {
 enum class Family;
 }
@@ -15,7 +17,10 @@ enum class Family;
 // Each native input event (including a selection replacement) is one undo.
 class InspectorTextView : public ScrollTextView {
 public:
-  InspectorTextView(const std::string &path, const std::string &text);
+  InspectorTextView(const std::string &path, const Document &document,
+                    std::function<void()> onLimit = {});
+  bool Fits(int32 from, int32 to, std::string_view insert) const;
+  void KeyDown(const char *, int32) override;
   void MessageReceived(BMessage *) override;
   void Paste(BClipboard *) override;
 
@@ -43,6 +48,9 @@ private:
   using Edit = std::vector<Change>;
   static size_t Cost(const Edit &edit);
 
+  void RejectOversize() const;
+  std::function<void()> onLimit;
+  const Document &document;
   Syntax::Family language;
   std::deque<Edit> undo, redo;
   Edit pending;

@@ -10,6 +10,7 @@ class FileDetails : public BView {
 public:
   virtual PaneEntry *ScrollRow(const std::string *path, float &top) = 0;
   using BView::BView;
+  virtual std::vector<PaneEntry *> DisplayedRows() const = 0;
   virtual PaneSort Sorting() = 0;
   virtual void Sort(PaneSort) = 0;
   virtual void SetActive(bool) = 0;

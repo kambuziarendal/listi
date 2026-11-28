@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 #pragma once
-class PaneModel;
+class Pane;
 namespace Listi {
-void ShowFileListExport(const PaneModel &model);
+void ShowFileListExport(const Pane &pane);
 }

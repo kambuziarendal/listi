@@ -67,9 +67,12 @@ public:
     }
   }
 
-  std::string CopyFirstThreeCells(BView &screen) {
+  std::string CopyCells(BView &screen, int endRow = 0, int endCol = 2) {
     const auto width = std::ceil(screen.StringWidth("M"));
-    const BPoint first(6, 6), third(6 + 2 * width, 6);
+    font_height metrics;
+    screen.GetFontHeight(&metrics);
+    const auto height = std::ceil(std::ceil(metrics.ascent) + metrics.descent + metrics.leading);
+    const BPoint first(6, 6), third(6 + endCol * width, 6 + endRow * height);
     screen.MouseDown(first);
     screen.MouseMoved(third, B_INSIDE_VIEW, nullptr);
     screen.MouseUp(third);
@@ -439,6 +442,30 @@ int main() {
           }),
           "can detach after closing the floating window");
     detached = Floating(app);
+    auto copiedLinesMatch = [&](bool history) {
+      return WithWindow(detached, [&](BWindow &) {
+        auto *screen = panel->FindView("terminal screen");
+        if (!screen)
+          return false;
+        if (history) {
+          BMessage key(B_KEY_DOWN);
+          const char bytes[] = {B_PAGE_UP, 0};
+          key.AddString("bytes", bytes);
+          key.AddInt32("modifiers", B_SHIFT_KEY);
+          for (int i = 0; i < 4; ++i)
+            panel->HandleKey(&key);
+        }
+        const int cols = int((screen->Bounds().Width() - 10) / std::ceil(screen->StringWidth("M")));
+        return clipboard.CopyCells(*screen, 2, 0) == std::string(cols + 1, 'x') + "\nY";
+      });
+    };
+    Check(Enter(detached, "set -- $(stty size); printf '\\033[3J\\033[2J\\033[H'; "
+                          "printf '%*s' $((1+$2)) '' | tr ' ' x; printf '\\nY\\n'") &&
+          Until([&] { return copiedLinesMatch(false); }),
+          "clipboard joins a wrapped line but preserves a real newline");
+    Check(Enter(detached, "set -- $(stty size); for ((i=0;i<2*$1;i++)); do echo Z; done; touch scrolled") &&
+          Until([&] { return fs::exists(fixture.path / "scrolled") && copiedLinesMatch(true); }),
+          "clipboard preserves the same logical lines in scrollback");
     Check(Enter(detached, "set -- $(stty size); for ((i=0;i<2*$1;i++)); do "
                           "printf '%03d\\n' \"$i\"; done; exit") &&
               Until([&] { return PanelMatches(detached, panel, 1, false); }),
@@ -447,14 +474,14 @@ int main() {
             auto *screen = panel->FindView("terminal screen");
             if (!screen)
               return false;
-            const auto first = clipboard.CopyFirstThreeCells(*screen);
+            const auto first = clipboard.CopyCells(*screen);
             auto page = [&](char code) {
               BMessage key(B_KEY_DOWN);
               const char bytes[] = {code, 0};
               key.AddString("bytes", bytes);
               key.AddInt32("modifiers", B_SHIFT_KEY);
               panel->HandleKey(&key);
-              return clipboard.CopyFirstThreeCells(*screen);
+              return clipboard.CopyCells(*screen);
             };
             const auto previous = page(B_PAGE_UP);
             return previous.size() == 3 &&

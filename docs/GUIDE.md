@@ -564,6 +564,10 @@ capabilities. A successful listing does not establish member-data integrity.
   and supported moves. Removing an archive member is not local Trash. Editing
   rebuilds the container and needs scratch space for extracted content and the
   new archive; layout, comments and format-specific metadata may change.
+  A read-only archive cannot be edited. Replacing a writable archive keeps
+  its owner, group and permissions. If Listi cannot preserve them, it leaves
+  the original in place. Renaming CPIO members preserves their numeric
+  owner and group, including those of members that were not selected.
 - Supported encrypted ZIP, 7z and RAR inputs use a masked password flow.
   Passwords are kept in process memory rather than saved in settings.
 - Selected local multipart 7z and RAR naming families are supported for reading.
@@ -621,7 +625,11 @@ manually. This is not write-back from arbitrary Open or Open With applications.
 SMB, SFTP, FTP and FTPS use the panel and job interface. Capabilities and recovery
 behaviour vary by protocol and server. Comparison or previews can cause network
 reads, including downloading complete files. Keep credentials out of shared URLs,
-screenshots and bug reports.
+screenshots and bug reports. A failed first login can be retried from **Connect**
+without restarting. After a successful directory listing, that server account
+stays bound for the session so existing panels and queued jobs keep their account.
+FTP browsing warns when entries have unknown types and omits them rather than
+opening them as regular files.
 
 A network copy transfers file contents, not Haiku BFS attributes. Downloads
 apply available portable permissions and modification time. Uploads verify the

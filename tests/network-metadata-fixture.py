@@ -83,6 +83,10 @@ class MetadataFS(AbstractedFS):
             leaf = name.rstrip().decode()
             if leaf in {"missing-mode", "private-memo"}:
                 attrs = re.sub(rb"unix\.mode=[^;]*;", b"", attrs, flags=re.I)
+            if leaf in {"no-type", "unknown-type"}:
+                attrs = re.sub(rb"type=[^;]*;", b"", attrs, flags=re.I)
+                if leaf == "unknown-type":
+                    attrs += b"type=OS.fixture=opaque;"
             if leaf == "reported-mode":
                 attrs = re.sub(rb"unix\.mode=[^;]*;", b"", attrs, flags=re.I) + b"unix.mode=0640;"
             replacement = FACTS.get(leaf)
@@ -338,6 +342,10 @@ def main():
     (ftp_root / "missing-mode").mkdir()
     (ftp_root / "missing-mode" / "private-memo").write_bytes(b"private")
     (ftp_root / "reported-mode").write_bytes(b"explicit")
+    types = ftp_root / "type-facts"
+    types.mkdir()
+    for name in ("regular", "no-type", "unknown-type"):
+        (types / name).write_bytes(b"fixture type")
     for name in FACTS:
         (ftp_root / name).write_bytes(b"fixture contents\n")
     for directory in ("mlsd", "list-only", "list-all"):

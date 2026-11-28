@@ -732,9 +732,15 @@ int main() {
     fs::remove(destination);
     fs::remove(incoming);
   }
-  for (const std::string name : {"report.pdf", ".settings", "notes"}) {
+  const auto reported = pathconf(out.c_str(), _PC_NAME_MAX);
+  const auto nameLimit = reported > 0 ? std::min<long>(reported, B_FILE_NAME_LENGTH - 1)
+                                      : B_FILE_NAME_LENGTH - 1;
+  Check(nameLimit > 8, "fixture supports long names");
+  const std::string boundary = std::string(nameLimit - 5, 'x') + "øabc";
+  for (const std::string &name : std::vector<std::string>{"report.pdf", ".settings", "notes", boundary}) {
     const auto incoming = root / name, existing = out / name;
-    const std::string stem = name == "report.pdf" ? "report" : name;
+    const std::string stem = name == "report.pdf" ? "report" :
+                             name == boundary ? std::string(nameLimit - 5, 'x') : name;
     const std::string extension = name == "report.pdf" ? ".pdf" : "";
     const auto occupied = out / (stem + " (2)" + extension);
     const auto candidate = out / (stem + " (3)" + extension);

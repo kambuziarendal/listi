@@ -586,10 +586,10 @@ struct Archive {
       if (time.value.vt == VT_FILETIME) {
         uint64_t ticks = (uint64_t(time.value.filetime.dwHighDateTime) << 32) |
                          time.value.filetime.dwLowDateTime;
-        if (ticks >= 116444736000000000ULL) {
-          e.modified = (ticks - 116444736000000000ULL) / 10000000;
-          e.modifiedKnown = true;
-        }
+        // Divide before shifting the epoch: even pre-1970 fractions then
+        // have a nonnegative remainder, as required by timespec.
+        e.SetModification(int64_t(ticks / 10000000) - 11644473600LL,
+                          long(ticks % 10000000) * 100);
       }
       out.push_back(std::move(e));
       names.insert(out.back().name);
@@ -1191,6 +1191,7 @@ std::vector<FileEntry> SevenZipList(const Location &location,
       child.permissions = entry.permissions;
       child.modified = entry.modified;
       child.modifiedKnown = entry.modifiedKnown;
+      child.modifiedFraction = entry.modifiedFraction;
     } else {
       Require(inserted || child.directory,
               "Archive has conflicting file and folder paths");

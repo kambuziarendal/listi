@@ -25,8 +25,12 @@ public:
   std::atomic<int> navigations{0}, closes{0};
   ConnectionReceiver() : BLooper("connection test receiver") {}
   void MessageReceived(BMessage *message) override {
-    if (message->what == kNavigate)
+    if (message->what == kNavigate) {
+      const auto attempt = message->GetInt64("connectionAttempt", 0);
+      if (attempt) // This test receiver stands in for a successful directory scan.
+        Listi::FinishConnectionAttempt(message->GetString("path", ""), attempt, true);
       ++navigations;
+    }
     else if (message->what == kTestClose)
       ++closes;
     else

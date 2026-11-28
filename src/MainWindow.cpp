@@ -1265,7 +1265,7 @@ public:
       Listi::ForgetArchivePasswords();
       break;
     case kExportFileList:
-      Listi::ShowFileListExport(pane.ExportModel());
+      Listi::ShowFileListExport(pane);
       break;
     case kResumeArchiveEdits:
       ResumeArchiveEditors(prefs.editor.String());

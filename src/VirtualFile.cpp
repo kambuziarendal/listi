@@ -43,6 +43,12 @@ bool IsListiPrivateEntry(const std::string &path) {
 namespace {
 std::mutex connectionsMutex;
 std::map<std::string, const Connection> connections;
+struct ConnectionAttempt {
+  int64_t id;
+  Connection auth;
+};
+std::map<std::string, ConnectionAttempt> pendingConnections;
+int64_t nextConnectionAttempt = 0;
 auto Credentials(const Connection &auth) {
   return std::tie(auth.username, auth.password, auth.domain, auth.privateKey,
                   auth.knownHosts, auth.keyPassphrase);
@@ -83,8 +89,45 @@ void RequireConnection(const std::string &url) {
   if (!location.Local() && !location.Archive())
     BoundConnection(location);
 }
-Connection GetConnection(const std::string &url) {
-  return BoundConnection(ParseLocation(url));
+int64_t BeginConnectionAttempt(const std::string &url, const Connection &auth) {
+  const auto location = ParseLocation(url);
+  if (location.Local() || location.Archive())
+    throw std::runtime_error("Not a network address.");
+  const auto route = location.CanonicalAuthority();
+  std::lock_guard<std::mutex> guard(connectionsMutex);
+  const auto bound = connections.find(route);
+  if (bound != connections.end() && Credentials(bound->second) != Credentials(auth))
+    throw std::runtime_error("This server already has a different connection. Restart Listi to change accounts or credentials.");
+  const auto id = ++nextConnectionAttempt;
+  pendingConnections.insert_or_assign(route, ConnectionAttempt{id, auth});
+  return id;
+}
+Connection GetConnection(const std::string &url, int64_t attempt) {
+  const auto location = ParseLocation(url);
+  if (!attempt)
+    return BoundConnection(location);
+  std::lock_guard<std::mutex> guard(connectionsMutex);
+  const auto it = pendingConnections.find(location.CanonicalAuthority());
+  if (it == pendingConnections.end() || it->second.id != attempt)
+    throw std::runtime_error("Connection attempt was superseded.");
+  return it->second.auth;
+}
+void FinishConnectionAttempt(const std::string &url, int64_t attempt, bool accepted) {
+  const auto route = ParseLocation(url).CanonicalAuthority();
+  std::lock_guard<std::mutex> guard(connectionsMutex);
+  const auto it = pendingConnections.find(route);
+  if (it == pendingConnections.end() || it->second.id != attempt) {
+    if (accepted)
+      throw std::runtime_error("Connection attempt was superseded.");
+    return;
+  }
+  auto auth = std::move(it->second.auth);
+  pendingConnections.erase(it);
+  if (accepted) {
+    const auto bound = connections.try_emplace(route, auth).first;
+    if (Credentials(auth) != Credentials(bound->second))
+      throw std::runtime_error("This server already has a different connection.");
+  }
 }
 std::vector<FileEntry> ListFiles(const std::string &p,
                                  const TransferControl &c,
@@ -175,6 +218,8 @@ void ReadRegularLocalFile(const std::string &p, const DataSink &sink,
   c.Check();
   // Opening a special file must not block a worker before cancellation can run.
   int fd = open(p.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+  if (fd < 0 && expected && (errno == EACCES || errno == EPERM))
+    throw WitnessAccessDenied(p + ": permission denied");
   if (fd < 0)
     Fail(p);
   try {

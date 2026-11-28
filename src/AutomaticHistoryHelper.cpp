@@ -92,9 +92,9 @@ public:
       break;
     case kVersions: {
       const int32 i = message->GetInt32("pair", -1);
-      if (i < 0 || size_t(i) >= approved.size() || !MatchesApproved(i)) break;
+      if (i < 0 || size_t(i) >= sources.size() || !MatchesApproved(i)) break;
       BMessage request(kFolderHistory);
-      request.AddString("source", approved[i].GetString("path", 0, ""));
+      request.AddString("source", sources[i]->Text());
       BMessenger listi(kSignature);
       status_t result;
       if (listi.IsValid()) result = listi.SendMessage(&request);
@@ -176,7 +176,7 @@ private:
       auto index = field / 2;
       auto *open = new BMessage(kVersions);
       open->AddInt32("pair", index);
-      versions[index] = new BButton("versions", "Versions…", open);
+      versions[index] = new BButton(("versions" + std::to_string(index + 1)).c_str(), "Versions…", open);
       row.Add(versions[index]);
     }
     row.End();
@@ -187,9 +187,12 @@ private:
   }
 
   bool MatchesApproved(size_t i) const {
-    return i < approved.size() &&
-        strcmp(sources[i]->Text(), approved[i].GetString("path", 0, "")) == 0 &&
-        strcmp(stores[i]->Text(), approved[i].GetString("path", 1, "")) == 0;
+    for (const auto &pair : approved) {
+      if (strcmp(sources[i]->Text(), pair.GetString("path", 0, "")) == 0 &&
+          strcmp(stores[i]->Text(), pair.GetString("path", 1, "")) == 0)
+        return true;
+    }
+    return false;
   }
 
   void UpdateVersions() {
@@ -215,7 +218,7 @@ private:
     for (auto *button : browse) button->SetEnabled(!enabled && !working);
     enable->SetEnabled(!enabled && !working);
     disable->SetEnabled(enabled);
-    run->SetEnabled(enabled && !working && state.GetBool("tile", false));
+    run->SetEnabled(enabled && !working);
     const char *text = state.GetString("status", "");
     status->SetText(text);
     status->SetToolTip(text);
@@ -280,15 +283,13 @@ public:
         break;
       case kTick:
         if (!Enabled()) break;
-        if (!BDeskbar().HasItem(kHistoryDeskbarItem)) {
-          Disable();
-          break;
-        }
+        // The tile is a settings shortcut, not the source of consent. Deskbar
+        // may be restarting while an enabled helper is due for a check.
         if (!worker.joinable() && system_time() >= next)
           StartRun();
         break;
       case kRun:
-        if (Enabled() && !worker.joinable() && BDeskbar().HasItem(kHistoryDeskbarItem))
+        if (Enabled() && !worker.joinable())
           StartRun();
         break;
       case kFinished:
@@ -318,7 +319,6 @@ private:
     BMessage state(config);
     state.what = kState;
     state.AddBool("working", worker.joinable());
-    state.AddBool("tile", BDeskbar().HasItem(kHistoryDeskbarItem));
     state.AddString("status", status.c_str());
     return state;
   }

@@ -20,7 +20,7 @@ namespace fs=std::filesystem;
 using Listi::HistoryStore;
 namespace {
 std::atomic_bool *cancelAfterWrite = nullptr;
-fs::path subtreeToMove, movedSubtree, fileToEdit;
+fs::path subtreeToMove, movedSubtree, fileToEdit, extraToCreate;
 const struct stat *oversizedFixture = nullptr;
 bigtime_t historyClock = 0;
 const char *failItem = nullptr;
@@ -64,6 +64,11 @@ extern "C" ssize_t __wrap_write(int fd, const void *bytes, size_t count) {
     const int prior = open(fileToEdit.c_str(), O_WRONLY);
     assert(prior >= 0 && __real_write(prior, "modified", 8) == 8 && close(prior) == 0);
     fileToEdit.clear();
+  }
+  if (!extraToCreate.empty() && written > 0 && fs::is_directory(extraToCreate.parent_path())) {
+    const int extra = open(extraToCreate.c_str(), O_CREAT | O_EXCL | O_WRONLY, 0600);
+    assert(extra >= 0 && __real_write(extra, "keep", 4) == 4 && close(extra) == 0);
+    extraToCreate.clear();
   }
   if (cancelAfterWrite && written > 0) {
     *cancelAfterWrite = true;
@@ -131,6 +136,7 @@ int main() {
   }
   auto source=base/"source", store=base/"store";
   fs::create_directories(source/"dir");
+  fs::create_directory(source/"a-empty");
   fs::create_directory(store);
   make(source/"dir/note", "original");
   make(source/"same", "original");
@@ -205,6 +211,24 @@ int main() {
     }
     assert(false);
   };
+  {
+    const auto empty = base/"empty-source", snapshots = base/"empty-store";
+    fs::create_directory(empty);
+    fs::create_directory(snapshots);
+    HistoryStore emptyHistory(empty, snapshots);
+    emptyHistory.Save(cancel);
+    const std::string before = emptyHistory.Points().GetString("point", "");
+    attr(empty, "Project", B_STRING_TYPE, "alpha", 6);
+    emptyHistory.Save(cancel);
+    const std::string after = emptyHistory.Points().GetString("point", "");
+    std::string notice;
+    const auto changes = Listi::DescribeVersion(emptyHistory, after, before, notice, cancel);
+    assert(changes.size() == 1 && changes.at(".").change == "Changed");
+    emptyHistory.Save(cancel);
+    const std::string same = emptyHistory.Points().GetString("point", "");
+    assert(Listi::DescribeVersion(emptyHistory, same, after, notice, cancel).empty());
+    std::cout << "PASS history lists a root-only attribute change, not an unchanged root" << std::endl;
+  }
   checkAttr(source/"dir/note", "Empty", B_RAW_TYPE, "", 0);
   assert(count()==0 && fs::is_empty(store));
   history.Save(cancel);
@@ -291,6 +315,17 @@ int main() {
   assert(cancel && !cancelAfterWrite && count() == 5);
   constexpr char incomplete[] = "Incomplete Listi restore. Do not use as a finished copy.";
   cancel = false;
+  for (const auto &relative : {"extra.txt", "a-empty/extra.txt"}) {
+    const auto destination = base/(std::string("unexpected-") + fs::path(relative).parent_path().string());
+    const auto extra = destination/relative;
+    extraToCreate = extra;
+    reject([&]{ history.Restore(first, destination, cancel); }, "extra restored entry",
+           "Unexpected entry in restored folder: extra.txt");
+    std::string preserved;
+    std::ifstream(extra) >> preserved;
+    assert(extraToCreate.empty() && preserved == "keep");
+    checkAttr(destination, "Listi:RestoreIncomplete-1", B_STRING_TYPE, incomplete, sizeof(incomplete));
+  }
   const auto swapped = base/"swapped";
   subtreeToMove = swapped/"dir";
   movedSubtree = base/"moved-dir";

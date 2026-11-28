@@ -2,6 +2,7 @@
 #include "ImagePreview.h"
 #include "InspectorDocument.h"
 #include "InspectorEditor.h"
+#include "InspectorTextView.h"
 #include <Alert.h>
 #include <Application.h>
 #include <Button.h>
@@ -287,6 +288,38 @@ int main() {
   BApplication app("application/x-vnd.Listi-InspectorEditorTest");
   char tmp[] = "/tmp/Listi-editor-XXXXXX";
   Check(mkdtemp(tmp) != nullptr, "private test directory");
+  for (bool crlf : {false, true}) {
+    for (bool bom : {false, true}) {
+      const std::string limitPath = std::string(tmp) + "/limit.txt";
+      std::string prefix = bom ? "\xef\xbb\xbf" : "";
+      prefix += crlf ? "\r\n" : "\n";
+      std::ofstream(limitPath) << prefix << std::string(Inspector::kDocumentLimit - prefix.size(), 'a');
+      Inspector::Document doc(limitPath);
+      auto *host = new BWindow(BRect(20,20,300,120), "Edit limit", B_TITLED_WINDOW, 0);
+      auto *field = new Inspector::InspectorTextView(limitPath, doc);
+      host->AddChild(field);
+      field->Select(1, 2);
+      BClipboard clip("listi-limit-test");
+      Check(clip.Lock(), "lock edit limit clipboard");
+      clip.Clear();
+      clip.Data()->AddData("text/plain", B_MIME_TYPE, "XY", 2);
+      clip.Commit();
+      clip.Unlock();
+      field->Paste(&clip);
+      int32 a, b;
+      field->GetSelection(&a, &b);
+      Check(a == 1 && b == 2 && field->Content() == doc.Text(),
+            "oversized ordinary paste preserves the selection and draft");
+      field->Select(2, 2);
+      field->KeyDown("X", 1);
+      Check(field->Content() == doc.Text(), "encoded limit rejects extra typed byte");
+      field->Select(1, 2);
+      field->KeyDown("X", 1);
+      Check(field->Content()[1] == 'X', "equal-sized selection replacement fits");
+      host->Quit();
+      unlink(limitPath.c_str());
+    }
+  }
   const std::string path = std::string(tmp) + "/example.py";
   const std::string disk = "#!/bin/python\r\nreturn café\r\nreturn two\r\n";
   const std::string original = "#!/bin/python\nreturn café\nreturn two\n";

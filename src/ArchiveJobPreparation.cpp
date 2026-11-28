@@ -61,6 +61,8 @@ Job PrepareArchiveEditTarget(const std::string &archive,
   struct stat archiveStat;
   Require(!lstat(archive.c_str(), &archiveStat) && S_ISREG(archiveStat.st_mode),
           "Archive is unavailable.");
+  Require((archiveStat.st_mode & 0222) && !access(archive.c_str(), W_OK),
+          "Archive is read-only. The original was not changed.");
   job.expectedSources[archive] = {int32_t(archiveStat.st_dev),
                                   int64_t(archiveStat.st_ino)};
   auto set = FindArchiveVolumes(archive);

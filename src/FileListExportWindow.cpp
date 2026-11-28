@@ -3,6 +3,7 @@
 #include "DirectoryFinalization.h"
 #include "ExclusiveFileOutput.h"
 #include "FileListExport.h"
+#include "Pane.h"
 #include <Alert.h>
 #include <Button.h>
 #include <Directory.h>
@@ -41,9 +42,9 @@ class ExportWindow : public BWindow {
     save->SetEnabled(n != 0);
   }
 public:
-  explicit ExportWindow(const PaneModel &model)
+  explicit ExportWindow(const Pane &pane)
       : BWindow(BRect(0, 0, 620, 300), "Export file list", B_TITLED_WINDOW,
-                B_AUTO_UPDATE_SIZE_LIMITS), rows(FreezeFileList(model)) {
+                B_AUTO_UPDATE_SIZE_LIMITS), rows(FreezeFileList(pane.ExportModel(), pane.DisplayedRows())) {
     selected = new BRadioButton("selected", "Selected items", new BMessage('scop'));
     all = new BRadioButton("all", "All visible items", new BMessage('scop'));
     save = new BButton("save", "Save CSV…", new BMessage('pick'));
@@ -106,7 +107,7 @@ public:
   }
 };
 }
-void ShowFileListExport(const PaneModel &model) {
-  (new ExportWindow(model))->Show();
+void ShowFileListExport(const Pane &pane) {
+  (new ExportWindow(pane))->Show();
 }
 }

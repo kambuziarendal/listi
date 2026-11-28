@@ -85,6 +85,7 @@ public:
     return entry && !entry->unmountedDisk ? entry->path : "";
   }
   const char *Path() const { return path.String(); }
+  std::vector<PaneEntry *> DisplayedRows() const;
   const PaneModel &ExportModel() const { return entries; }
   void BindTransferDestination(Listi::Job &) const;
   bool CancelSelectionGesture();
@@ -169,7 +170,8 @@ private:
   void RestoreScroll(BPoint);
 
   void StartNavigation(const std::string &, int target = -1,
-                       bool trash = false, bool restore = false, bool refresh = false);
+                       bool trash = false, bool restore = false, bool refresh = false,
+                       int64 connectionAttempt = 0);
   void UpdateNavigation();
   BTextControl *filter;
   BButton *clearFilter, *clearEmptyFilter;

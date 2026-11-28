@@ -425,6 +425,7 @@ void vterm_parser_set_emit_nul(VTerm *vt, bool emit);
 // -----------
 
 typedef struct {
+  void (*before_scroll)(VTermRect rect, int downward, int rightward, void *user);
   int (*putglyph)(VTermGlyphInfo *info, VTermPos pos, void *user);
   int (*movecursor)(VTermPos pos, VTermPos oldpos, int visible, void *user);
   int (*scrollrect)(VTermRect rect, int downward, int rightward, void *user);
@@ -538,7 +539,7 @@ typedef struct {
   int (*settermprop)(VTermProp prop, VTermValue *val, void *user);
   int (*bell)(void *user);
   int (*resize)(int rows, int cols, void *user);
-  int (*sb_pushline)(int cols, const VTermScreenCell *cells, void *user);
+  int (*sb_pushline)(int continuation, int cols, const VTermScreenCell *cells, void *user);
   int (*sb_popline)(int cols, VTermScreenCell *cells, void *user);
   int (*sb_clear)(void* user);
 } VTermScreenCallbacks;

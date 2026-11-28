@@ -66,10 +66,12 @@ HistoryRows DescribeVersion(const HistoryStore &history, const std::string &poin
                         std::string &status, const std::atomic_bool &cancel) {
   HistoryRows rows;
   bool truncated = false;
-  Collect(history.Browse(point), "", rows, 0, truncated, cancel);
+  const auto root = history.Browse(point);
+  Collect(root, "", rows, 0, truncated, cancel);
   if (!previous.empty()) {
     HistoryRows before;
-    Collect(history.Browse(previous), "", before, 0, truncated, cancel);
+    const auto priorRoot = history.Browse(previous);
+    Collect(priorRoot, "", before, 0, truncated, cancel);
     if (!truncated) {
       for (auto &[path, row] : rows) {
         auto it = before.find(path);
@@ -80,6 +82,10 @@ HistoryRows DescribeVersion(const HistoryStore &history, const std::string &poin
           before.erase(it);
         }
       }
+      const auto mode = root.GetInt32("mode", 0);
+      if (mode != priorRoot.GetInt32("mode", 0) ||
+          Revision(root, cancel) != Revision(priorRoot, cancel))
+        rows.emplace(".", HistoryRow{".", {}, "Changed", static_cast<mode_t>(mode)});
       for (auto &[path, row] : before) {
         row.change = "Removed";
         row.mode = 0;

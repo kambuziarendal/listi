@@ -8,6 +8,10 @@ p7zip 17.05, LC_ALL=en_US.UTF-8, password `Listi-test-only`.
 p7zip command incorrectly records that synthetic link as a regular file,
 so its output is not used as the symlink oracle.
 
+`times.7z` was created with 7-Zip 25.01 on Linux (Store). Its three one-byte
+files have UTC modification times of Unix epoch minus one second, epoch,
+and 1700000000.125 seconds.
+
 RAR fixtures are unmodified public libarchive test fixtures from
 https://github.com/libarchive/libarchive/tree/master/libarchive/test :
 

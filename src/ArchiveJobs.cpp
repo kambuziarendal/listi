@@ -243,6 +243,12 @@ void CopyMetadata(const std::string &fromPath, int output,
   struct stat st;
   BNode from(fromPath.c_str());
   Require(from.GetStat(&st) == B_OK, "Cannot inspect archive metadata.");
+  struct stat staged;
+  Require(!fstat(output, &staged), "Cannot inspect staged archive ownership.");
+  if (st.st_uid != staged.st_uid || st.st_gid != staged.st_gid)
+    Require(!fchown(output, st.st_uid, st.st_gid),
+            "Cannot preserve archive owner and group. Original archive retained.");
+  // Changing ownership may clear set-id bits; restore mode afterwards.
   Require(!fchmod(output, st.st_mode & 07777),
           "Cannot preserve archive permissions.");
   char name[B_ATTR_NAME_LENGTH];
@@ -272,14 +278,14 @@ void CopyMetadata(const std::string &fromPath, int output,
 }
 // Apply the same subtree removal or rename to the original member headers.
 // Extraction identities belong to our scratch directory, not the TAR users.
-void ChangeTarMetadataPaths(TarMemberMap &metadata, const std::string &from,
+void ChangeMemberMetadataPaths(TarMemberMap &metadata, const std::string &from,
                          const std::string &to = {}) {
   auto change = [&](TarMemberMap::iterator it) {
     auto member = metadata.extract(it);
     if (!to.empty()) {
       member.key().replace(0, from.size(), to);
       Require(metadata.insert(std::move(member)).inserted,
-              "Conflicting TAR ownership after rename. Original archive retained.");
+              "Conflicting member ownership after rename. Original archive retained.");
     }
   };
   auto exact = metadata.find(from);
@@ -384,17 +390,17 @@ void VerifyPortableMove(const TarMemberMap &members, const std::string &target,
   }
 }
 
-void VerifyTarMetadata(const std::string &path, const std::string &format,
+void VerifyMemberMetadata(const std::string &path, const std::string &format,
                      const TarMemberMap &expected, const Hooks &hooks) {
   if (expected.empty())
     return;
   TarMemberMap actual;
   Require(DetectArchiveEditFormat(path, hooks, &actual) == format,
-          "Updated TAR format changed. Source entries were retained.");
+          "Updated archive format changed. Source entries were retained.");
   for (const auto &[name, member] : expected) {
     const auto found = actual.find(name);
     Require(found != actual.end() && found->second == member,
-            "Updated TAR metadata or ownership differs for " + name + ". Source entries were retained.");
+            "Updated member metadata or ownership differs for " + name + ". Source entries were retained.");
   }
 }
 void VerifyMovedEntry(const std::string &, const std::string &,
@@ -487,7 +493,7 @@ Result RunArchiveEdit(const Job &job, const Hooks &hooks,
       Require(!lstat(target.c_str(), &st),
               "An archive entry selected for removal no longer exists.");
       RemoveTree(target, internal);
-      ChangeTarMetadataPaths(metadata, relative);
+      ChangeMemberMetadataPaths(metadata, relative);
     }
     for (const auto &path : job.archiveFolders) {
       check();
@@ -509,7 +515,7 @@ Result RunArchiveEdit(const Job &job, const Hooks &hooks,
       Require(
           entry.MoveTo(&parent, Leaf(to).c_str(), false) == B_OK,
           "Could not rename or move the archive entry. Existing entries were not replaced.");
-      ChangeTarMetadataPaths(metadata, from, to);
+      ChangeMemberMetadataPaths(metadata, from, to);
     }
     if (!job.sources.empty()) {
       const auto relative = MemberPath(job.archivePath),
@@ -569,7 +575,7 @@ Result RunArchiveEdit(const Job &job, const Hooks &hooks,
           replaced->second.created.reset();
           replaced->second.mode = st.st_mode & 0777;
           replaced->second.modified = st.st_mtim.tv_sec;
-          replaced->second.nanoseconds = st.st_mtim.tv_nsec;
+          replaced->second.nanoseconds = format == "cpio" ? 0 : st.st_mtim.tv_nsec;
         };
       }
       auto added = Run(add, adding);
@@ -618,7 +624,7 @@ Result RunArchiveEdit(const Job &job, const Hooks &hooks,
         if (hooks.progress)
           hooks.progress(job.destination, 0);
       };
-      VerifyTarMetadata(outputPath, format, metadata, internal);
+      VerifyMemberMetadata(outputPath, format, metadata, internal);
       const auto root = OpenArchive(outputPath, verify);
       Require(
           !root.empty(),
@@ -644,15 +650,19 @@ Result RunArchiveEdit(const Job &job, const Hooks &hooks,
             "Cannot open the archive directory before publishing. Original archive was retained.");
     const auto targetLeaf = Leaf(job.destination);
     FD originalFd(openat(parent.n, targetLeaf.c_str(),
-                         O_RDONLY | O_NOFOLLOW | O_NONBLOCK));
+                         O_RDWR | O_NOFOLLOW | O_NONBLOCK));
+    Require(originalFd.n >= 0, "Archive is no longer writable. Original archive retained.");
     struct stat original, named;
-    Require(originalFd.n >= 0 && !fstat(originalFd.n, &original) &&
+    Require(!fstat(originalFd.n, &original) &&
                 S_ISREG(original.st_mode) &&
                 ArchivePasswordIdentity(original) == originalSet.files.front().identity,
             "The archive changed while it was being edited. Nothing was changed.");
     Require(!fstatat(stageDir.n, "updated", &named, AT_SYMLINK_NOFOLLOW) &&
                 Unchanged(verifiedOutput, named),
             "The verified output changed. Original archive was retained.");
+    Require((original.st_mode & 0222) && original.st_mode == named.st_mode &&
+                original.st_uid == named.st_uid && original.st_gid == named.st_gid,
+            "Archive ownership or permissions could not be preserved. Original archive retained.");
     // Haiku has no revision-conditional rename. Check the target name against
     // the validated descriptor immediately before replacing it in that parent.
     Require(!fstatat(parent.n, targetLeaf.c_str(), &named, AT_SYMLINK_NOFOLLOW) &&
@@ -665,7 +675,9 @@ Result RunArchiveEdit(const Job &job, const Hooks &hooks,
     // Rename may update ctime. Capture the new version from our still-open
     // verified output, never from whatever now occupies the destination path.
     struct stat published;
-    Require(!fstat(output.n, &published) && published.st_size == verifiedOutput.st_size &&
+    Require(!fstat(output.n, &published) && published.st_mode == original.st_mode &&
+                published.st_uid == original.st_uid && published.st_gid == original.st_gid &&
+                published.st_size == verifiedOutput.st_size &&
                 published.st_mtim.tv_sec == verifiedOutput.st_mtim.tv_sec &&
                 published.st_mtim.tv_nsec == verifiedOutput.st_mtim.tv_nsec,
             "Archive was published, but its verified contents could not be confirmed.");
@@ -866,7 +878,7 @@ Result RunArchiveLocalMove(const Job &job, const Hooks &hooks) {
     if (!target.Archive())
       VerifyPortableMove(fromTar, job.destination, verify);
     else if (IsTarFormat(published.archiveFormat))
-      VerifyTarMetadata(target.archive, published.archiveFormat, movedMetadata, internal);
+      VerifyMemberMetadata(target.archive, published.archiveFormat, movedMetadata, internal);
     else
       VerifyPortableMove(movedMetadata, job.destination, verify, published.archiveFormat, &result);
     for (size_t i = 0; i < additions.size(); ++i)
@@ -1014,7 +1026,7 @@ Result RunArchiveMove(const Job &job, const Hooks &hooks) {
       TransferControl verify;
       verify.proceed = internal.proceed;
       if (tarTarget)
-        VerifyTarMetadata(target.archive, add.archiveFormat, movedMetadata, internal);
+        VerifyMemberMetadata(target.archive, add.archiveFormat, movedMetadata, internal);
       else
         VerifyPortableMove(movedMetadata, job.destination, verify);
       for (const auto &path : job.sources)

@@ -2,6 +2,7 @@
 #include "FileListExport.h"
 #include "PaneModel.h"
 #include <cassert>
+#include <algorithm>
 #include <iostream>
 int main() {
   PaneModel model;
@@ -20,10 +21,12 @@ int main() {
   model.Filter("");
   model.Sort({0, false});
   model.RestoreSelection(selection);
-  const auto rows = Listi::FreezeFileList(model);
+  auto order = model.Visible();
+  std::reverse(order.begin(), order.end()); // Attribute order can differ from model order.
+  const auto rows = Listi::FreezeFileList(model, order);
   assert(rows.size() == 22);
   for (size_t i = 0; i < rows.size(); ++i) {
-    const auto *entry = model.Visible()[i];
+    const auto *entry = order[i];
     std::string expected = entry->name;
     if (expected == "=1+2")
       expected = "'=1+2";
@@ -35,7 +38,7 @@ int main() {
     assert(rows[i].csv.find(",file,," + timestamp + "\r\n") != std::string::npos);
   }
   model.Filter("Håkon");
-  assert(Listi::FreezeFileList(model).size() == 1);
+  assert(Listi::FreezeFileList(model, model.Visible()).size() == 1);
   model.Clear();
   int n = 0;
   std::cout << Listi::kExportHeader;

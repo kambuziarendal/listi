@@ -498,7 +498,7 @@ RestoredEntry RestoredIdentity(int fd, const std::string &name, const BMessage *
 // Revisit completed siblings from the still-open root before clearing its marker.
 // Only the active ancestry needs an open descriptor, even for wide trees.
 void VerifyRestoredEntries(int parent, const std::vector<RestoredEntry> &entries,
-                           const std::atomic_bool &cancel) {
+                           const std::atomic_bool &cancel, bool wholeDirectory) {
   for (const auto &entry : entries) {
     CheckCancel(cancel);
     struct stat info{};
@@ -520,13 +520,25 @@ void VerifyRestoredEntries(int parent, const std::vector<RestoredEntry> &entries
               named.st_dev == opened.st_dev && named.st_ino == opened.st_ino &&
               Unchanged(opened, named), changed);
     }
-    if (!entry.children.empty()) {
+    if (S_ISDIR(entry.revision.st_mode)) {
       FD dir(openat(parent, entry.name.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC),
              changed);
       const auto opened = Stat(dir.fd);
       Require(opened.st_dev == entry.revision.st_dev && opened.st_ino == entry.revision.st_ino, changed);
-      VerifyRestoredEntries(dir.fd, entry.children, cancel);
+      VerifyRestoredEntries(dir.fd, entry.children, cancel, true);
     }
+  }
+  if (wholeDirectory) {
+    // Every expected name was verified above; reject any additional entry,
+    // including entries inside a directory recorded as empty.
+    std::set<std::string_view> expected;
+    for (const auto &entry : entries) expected.insert(entry.name);
+    VisitNames(parent, SIZE_MAX, [&](const char *name) {
+      CheckCancel(cancel);
+      Require(expected.erase(name) == 1, "Unexpected entry in restored folder: " + std::string(name));
+      return true;
+    });
+    Require(expected.empty(), "Restored folder contents changed.");
   }
 }
 
@@ -847,7 +859,7 @@ void HistoryStore::Restore(const std::string &point, const std::string &destinat
     CheckCancel(cancel);
     state->store->Verify();
     parent->Flush();
-    VerifyRestoredEntries(single ? parent->Descriptor() : output.fd, entries, cancel);
+    VerifyRestoredEntries(single ? parent->Descriptor() : output.fd, entries, cancel, !single);
     verifyCopy();
     CheckCancel(cancel);
     // Do not check cancellation after this commit point. The restored bytes,

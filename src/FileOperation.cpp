@@ -10,6 +10,7 @@
 #include "ArchiveJobs.h"
 #include "ImageConvert.h"
 #include "NamedEntry.h"
+#include "LeafName.h"
 #include "JobSnapshot.h"
 #include "MoveVolume.h"
 #include "RemovableCopy.h"
@@ -594,10 +595,20 @@ struct Runner {
     const auto leaf = Leaf(dst);
     const auto dot = leaf.find_last_of('.');
     const auto split = directory || dot == 0 || dot == std::string::npos ? leaf.size() : dot;
-    const auto prefix = Join(ParentLocation(dst), leaf.substr(0, split));
+    const auto parent = ParentLocation(dst);
+    const auto reported = pathconf(parent.c_str(), _PC_NAME_MAX);
+    const size_t limit = reported > 0 ? std::min<long>(reported, B_FILE_NAME_LENGTH - 1)
+                                      : B_FILE_NAME_LENGTH - 1;
+    const auto extension = leaf.substr(split);
     for (uint64_t number = 2;; ++number) {
       Check();
-      const auto proposed = prefix + " (" + std::to_string(number) + ")" + leaf.substr(split);
+      const auto suffix = " (" + std::to_string(number) + ")";
+      if (suffix.size() > limit)
+        return {};
+      const auto name = suffix.size() + extension.size() < limit
+          ? SuffixedLeafName(leaf.substr(0, split), suffix + extension, limit)
+          : SuffixedLeafName(leaf, suffix, limit);
+      const auto proposed = Join(parent, name);
       struct stat node;
       if (lstat(proposed.c_str(), &node))
         return errno == ENOENT ? proposed : "";

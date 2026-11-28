@@ -15,7 +15,7 @@
 #include <Bitmap.h>
 #include <MessageFilter.h>
 #include <ColumnListView.h>
-#include <ColumnTypes.h>
+#include "ChronologicalColumn.h"
 #include <Entry.h>
 #include <LayoutBuilder.h>
 #include <Window.h>
@@ -172,12 +172,12 @@ struct DateField : BDateField {
   uint64 fontRevision = 0;
   explicit DateField(time_t *value) : BDateField(value) {}
 };
-class DateColumn : public BDateColumn {
+class DateColumn : public ChronologicalColumn {
 public:
   BFont font;
   uint64 fontRevision = 1;
   explicit DateColumn(const BFont &value)
-      : BDateColumn("Modified", 160, 80, 280), font(value) {}
+      : ChronologicalColumn("Modified", 160, 80, 280), font(value) {}
   void DrawField(BField *field, BRect rect, BView *view) override {
     auto date = static_cast<DateField *>(field);
     view->SetFont(&font);
@@ -495,6 +495,14 @@ public:
     BLayoutBuilder::Group<>(this, B_VERTICAL, 0).Add(list);
   }
   ~DetailsView() { list->syncing = true; }
+  std::vector<PaneEntry *> DisplayedRows() const override {
+    std::vector<PaneEntry *> result;
+    const int32 count = list->CountRows();
+    result.reserve(count);
+    for (int32 i = 0; i < count; ++i)
+      result.push_back(static_cast<FileRow *>(list->RowAt(i))->entry);
+    return result;
+  }
   PaneSort Sorting() override {
     // SaveState is the native API for inspecting header-selected sort order.
     BMessage state;

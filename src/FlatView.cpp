@@ -18,7 +18,7 @@
 #include "ShelfWindow.h"
 #include <Button.h>
 #include <ColumnListView.h>
-#include <ColumnTypes.h>
+#include "ChronologicalColumn.h"
 #include <GroupView.h>
 #include <LayoutBuilder.h>
 #include <MenuField.h>
@@ -62,16 +62,6 @@ public:
       return result;
     const auto &a = static_cast<FlatField<Field> *>(left)->path;
     const auto &b = static_cast<FlatField<Field> *>(right)->path;
-    return (a > b) - (a < b);
-  }
-};
-// BDateColumn narrows the subtraction of two time_t values to int.
-class ChronologicalColumn : public BDateColumn {
-public:
-  using BDateColumn::BDateColumn;
-  int CompareFields(BField *left, BField *right) override {
-    const auto a = static_cast<BDateField *>(left)->Seconds();
-    const auto b = static_cast<BDateField *>(right)->Seconds();
     return (a > b) - (a < b);
   }
 };

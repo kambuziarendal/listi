@@ -102,8 +102,26 @@ void CheckSftpAuthentication(const std::string &server, const std::string &local
     auth.username = "agent-password";
     auth.privateKey = local + "/no-key";
   }
-  if (mode == "wrong-password")
-    auth.password = "incorrect";
+  if (mode == "wrong-password") {
+    auto typo = auth;
+    typo.password = "incorrect";
+    TransferControl scan;
+    scan.connectionAttempt = BeginConnectionAttempt(server, typo);
+    bool rejected = false;
+    try {
+      ListFiles(ChildLocation(server, "Private"), scan);
+    } catch (const std::runtime_error &) {
+      rejected = true;
+    }
+    FinishConnectionAttempt(server, scan.connectionAttempt, false);
+    Expect(rejected, "first listing rejected mistyped password");
+    scan.connectionAttempt = BeginConnectionAttempt(server, auth);
+    Expect(!ListFiles(ChildLocation(server, "Private"), scan).empty(), "corrected credentials list the same server");
+    FinishConnectionAttempt(server, scan.connectionAttempt, true);
+    Expect(GetConnection(server).password == auth.password && !SetConnection(server, typo),
+           "successful account stays bound for queued work");
+    return;
+  }
   const std::string validHosts = auth.knownHosts;
   if (mode == "change-pin" || mode == "port-pins") {
     auth.knownHosts = local + "/known_hosts";
@@ -665,6 +683,19 @@ int main() {
         CheckScaling(sftp, local, n);
       std::filesystem::remove_all(local);
       return 0;
+    }
+    const auto types = ChildLocation(ftp, "type-facts");
+    std::string typeWarning;
+    TransferControl browsing;
+    browsing.listingWarning = &typeWarning;
+    const auto verified = ListFiles(types, browsing);
+    Expect(verified.size() == 1 && verified.front().name == "regular" && !typeWarning.empty(),
+           "browser lists explicit FTP files and warns about missing and unknown types");
+    for (const std::string name : {"regular", "no-type", "unknown-type"}) {
+      const auto copied = Copy(ChildLocation(types, name), local);
+      Expect(name == "regular" ? copied.completed == 1 && Read(local + "/" + name) == "fixture type"
+                               : !copied.errors.empty() && !std::filesystem::exists(local + "/" + name),
+             "FTP copy requires an explicit transferable type: " + name);
     }
     CheckFtpCompare(ftp, local);
     CheckUncertainOperations(ftp, local);
