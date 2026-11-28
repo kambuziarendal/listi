@@ -59,7 +59,7 @@ struct Remote {
 };
 std::map<std::string, Remote> files;
 std::map<std::string, Listi::SftpPeer> peers;
-unsigned mutationRequests = 0;
+unsigned mutationRequests = 0, statRequests = 0;
 bool foldDirectoryNames = false;
 std::string StoragePath(std::string path) {
   constexpr char alias[] = "/drafts";
@@ -162,6 +162,7 @@ void ReadArchive(const Location &, const DataSink &, const TransferControl &) {
 }
 bool StatNetwork(const Location &l, FileEntry &entry, const TransferControl &c,
                  const FileEntry *) {
+  ++statRequests;
   if (expireDuringCleanup && c.cleanup)
     c.cleanup->deadline = NetworkCleanupBudget::Clock::now();
   // The target is statted before staging, then again after Ready.
@@ -371,7 +372,7 @@ int main() {
   auto reset = [&] {
     peers.clear();
     peers["fixture"] = {"remote:22", "fixture-key", 1, false};
-    mutationRequests = 0;
+    mutationRequests = statRequests = 0;
     postCancelReadCalls = 0;
     commitFailed = expireDuringCleanup = false;
     cleanupReadBytes = 0;
@@ -979,6 +980,43 @@ int main() {
               !prompts && fixtureTree() == expected,
           collision ? "upward SFTP merge rejects a projected child inside the source before delivery"
                     : "non-overlapping upward SFTP merge delivers all files without changing the source");
+  }
+  {
+    const auto later = std::string(dir) + "/queued-later";
+    std::ofstream(later) << "selected";
+    Job queued{Action::Copy, {source, later}, "sftp://fixture/out"};
+    for (const auto &path : queued.sources) {
+      struct stat st;
+      if (lstat(path.c_str(), &st))
+        return 1;
+      queued.expectedSources[path] = {int32_t(st.st_dev), int64_t(st.st_ino)};
+    }
+    std::filesystem::rename(later, later + ".original");
+    std::ofstream(later) << "replacement";
+    for (bool displayed : {false, true}) {
+      reset();
+      if (displayed)
+        queued.displayedRemoteDestination = "fixture-parent";
+      auto before = fixtureTree();
+      r = RunVirtual(queued, hooks);
+      check(!r.completed && !r.partialCopies && !statRequests && !mutationRequests &&
+                errorHas(r, "Selected source changed") && r.outcomes.size() == 2 &&
+                fixtureTree() == before && readBytes(later) == "replacement" &&
+                readBytes(later + ".original") == "selected",
+            "stale later local selection rejects the upload before SFTP destination checks");
+    }
+    reset();
+    cancelled = true;
+    r = RunVirtual(queued, hooks);
+    check(r.cancelled && !r.completed && !statRequests && !mutationRequests,
+          "cancelled upload does not inspect the replaced source or contact its destination");
+    reset();
+    InterruptedVolumes().Block(later);
+    r = RunVirtual(queued, hooks);
+    check(!r.completed && errorHas(r, kUnavailableVolumeText) && !statRequests && !mutationRequests,
+          "blocked local source is rejected before identity lookup or SFTP I/O");
+    unlink(later.c_str());
+    unlink((later + ".original").c_str());
   }
   // A local daemon's /out may expose a directory with an unrelated local
   // prefix. A new output name, not just a replacement, must respect the

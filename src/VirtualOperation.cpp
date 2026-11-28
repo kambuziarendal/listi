@@ -148,6 +148,11 @@ bool SameLocal(const struct stat &a, const struct stat &b) {
          a.st_ctim.tv_sec == b.st_ctim.tv_sec &&
          a.st_ctim.tv_nsec == b.st_ctim.tv_nsec;
 }
+void CheckFrozenSource(const std::string &path, const NodeIdentity &expected) {
+  struct stat st;
+  if (lstat(path.c_str(), &st) || st.st_dev != expected.device || st.st_ino != expected.inode)
+    throw std::runtime_error("Selected source changed; operation stopped.");
+}
 bool WithinSftpSelection(const std::string &path, const std::set<std::string> &sources) {
   if (sources.empty())
     return false;
@@ -386,13 +391,10 @@ struct Runner {
       job.checkDestinationWindow();
     if (InterruptedVolumes().Contains(selectedSource))
       throw std::runtime_error(selectedSource + ": " + kUnavailableVolumeText);
-    struct stat st;
     auto source = job.expectedSources.find(selectedSource);
-    if (source != job.expectedSources.end() &&
-        (lstat(source->first.c_str(), &st) ||
-         st.st_dev != source->second.device ||
-         st.st_ino != source->second.inode))
-      throw std::runtime_error("Selected source changed; operation stopped.");
+    if (source != job.expectedSources.end())
+      CheckFrozenSource(source->first, source->second);
+    struct stat st;
     for (const auto &item : directories)
       if (stat(item.first.c_str(), &st) || !S_ISDIR(st.st_mode) ||
           st.st_dev != item.second.device || st.st_ino != item.second.inode)
@@ -536,6 +538,16 @@ struct Runner {
         throw std::runtime_error("Folder tree exceeds the transfer limit");
       CheckExistingOutputs(child.path, ChildLocation(dst, child.name), control, count, depth + 1);
     }
+  }
+  void CheckDisplayedDestination() {
+    if (!job.displayedRemoteDestination)
+      return;
+    const bool named = job.action == Action::Rename || job.action == Action::MakeDirectory;
+    const auto parent = named ? ParentLocation(job.destination) : ParseLocation(job.destination).URL();
+    FileEntry shown;
+    shown.providerIdentity = *job.displayedRemoteDestination;
+    remoteDirectories.emplace(parent, RemoteDirectory{shown, {}});
+    VerifyRemoteDirectories(Control(parent));
   }
   void PreflightSftpTransfer() {
     const bool moving = job.action == Action::Move;
@@ -1325,14 +1337,34 @@ Result RunVirtual(const Job &job, const Hooks &hooks) {
     runner.Guard();
     if (job.action == Action::Copy || job.action == Action::Move)
       CheckNetworkTransferDestination(job.sources, ParseLocation(job.destination));
-    if (job.displayedRemoteDestination) {
-      const bool named = job.action == Action::Rename || job.action == Action::MakeDirectory;
-      const auto parent = named ? ParentLocation(job.destination)
-                                : ParseLocation(job.destination).URL();
-      FileEntry shown;
-      shown.providerIdentity = *job.displayedRemoteDestination;
-      runner.remoteDirectories.emplace(parent, Runner::RemoteDirectory{shown, {}});
-      runner.VerifyRemoteDirectories(runner.Control(parent));
+    if ((job.action == Action::Copy || job.action == Action::Move) &&
+        ParseLocation(job.destination).scheme == "sftp") {
+      try {
+        // The displayed destination and the worker preflight both do network
+        // I/O. Validate the complete frozen local selection before either.
+        const auto control = runner.Control(job.destination, false);
+        for (const auto &[path, expected] : job.expectedSources) {
+          control.Check();
+          if (InterruptedVolumes().ContainsDevice(expected.device) ||
+              InterruptedVolumes().ContainsResolved(path))
+            throw std::runtime_error(path + ": " + kUnavailableVolumeText);
+          CheckFrozenSource(path, expected);
+        }
+        runner.CheckDisplayedDestination();
+        runner.PreflightSftpTransfer();
+      } catch (const Cancelled &) {
+        throw;
+      } catch (const std::exception &error) {
+        for (const auto &source : job.sources) {
+          if (!hooks.privateStaging)
+            runner.RecordOutcome({source, "", "unprocessed", error.what()});
+          if (hooks.fileFailed)
+            hooks.fileFailed(source, error.what());
+        }
+        throw;
+      }
+    } else {
+      runner.CheckDisplayedDestination();
     }
     if (job.action == Action::Trash || job.action == Action::Restore)
       throw std::runtime_error("Trash and Restore are available only on local "
@@ -1346,22 +1378,6 @@ Result RunVirtual(const Job &job, const Hooks &hooks) {
       MakeFolder(job.destination, runner.Control(job.destination));
       runner.result.completed = 1;
       return runner.result;
-    }
-    if ((job.action == Action::Copy || job.action == Action::Move) &&
-        ParseLocation(job.destination).scheme == "sftp") {
-      try {
-        runner.PreflightSftpTransfer();
-      } catch (const Cancelled &) {
-        throw;
-      } catch (const std::exception &error) {
-        for (const auto &source : job.sources) {
-          if (!hooks.privateStaging)
-            runner.RecordOutcome({source, "", "unprocessed", error.what()});
-          if (hooks.fileFailed)
-            hooks.fileFailed(source, error.what());
-        }
-        throw;
-      }
     }
     if (hooks.checkOverwrite && job.action == Action::Copy && !IsVirtual(job.destination)) {
       size_t count = 0;
