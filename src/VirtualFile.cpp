@@ -160,18 +160,19 @@ bool StatFile(const std::string &p, FileEntry &e, const TransferControl &c,
   e = Entry(p, st);
   return true;
 }
-void ReadFile(const std::string &p, const DataSink &sink,
-              const TransferControl &c) {
+bool SameLocalRevision(const struct stat &a, const struct stat &b) {
+  return a.st_dev == b.st_dev && a.st_ino == b.st_ino &&
+         a.st_mode == b.st_mode && a.st_size == b.st_size &&
+         a.st_mtim.tv_sec == b.st_mtim.tv_sec &&
+         a.st_mtim.tv_nsec == b.st_mtim.tv_nsec &&
+         a.st_ctim.tv_sec == b.st_ctim.tv_sec &&
+         a.st_ctim.tv_nsec == b.st_ctim.tv_nsec;
+}
+namespace {
+void ReadRegularLocalFile(const std::string &p, const DataSink &sink,
+                          const TransferControl &c, const struct stat *expected,
+                          size_t prefixBytes) {
   c.Check();
-  auto l = ParseLocation(p);
-  if (l.Archive()) {
-    ReadArchive(l, sink, c);
-    return;
-  }
-  if (!l.Local()) {
-    ReadNetwork(l, sink, c);
-    return;
-  }
   // Opening a special file must not block a worker before cancellation can run.
   int fd = open(p.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
   if (fd < 0)
@@ -182,11 +183,14 @@ void ReadFile(const std::string &p, const DataSink &sink,
       Fail(p);
     if (!S_ISREG(before.st_mode))
       throw std::runtime_error("Only regular files can be read: " + p);
+    if (expected && !SameLocalRevision(*expected, before))
+      throw std::runtime_error("Source changed before being read: " + p);
     uint64_t bytes = 0;
     std::vector<char> buf(131072);
-    for (;;) {
+    while (!expected || bytes < prefixBytes) {
       c.Check();
-      ssize_t n = read(fd, buf.data(), buf.size());
+      const auto count = expected ? std::min<uint64_t>(buf.size(), prefixBytes - bytes) : buf.size();
+      ssize_t n = read(fd, buf.data(), count);
       if (n < 0) {
         if (errno == EINTR)
           continue;
@@ -201,18 +205,33 @@ void ReadFile(const std::string &p, const DataSink &sink,
     struct stat after, named;
     if (fstat(fd, &after) || lstat(p.c_str(), &named))
       Fail(p);
-    if (before.st_dev != named.st_dev || before.st_ino != named.st_ino ||
-        before.st_size != after.st_size || bytes != uint64_t(before.st_size) ||
-        before.st_mtim.tv_sec != after.st_mtim.tv_sec ||
-        before.st_mtim.tv_nsec != after.st_mtim.tv_nsec ||
-        before.st_ctim.tv_sec != after.st_ctim.tv_sec ||
-        before.st_ctim.tv_nsec != after.st_ctim.tv_nsec)
+    if (!SameLocalRevision(before, after) || !SameLocalRevision(before, named) ||
+        bytes != (expected ? prefixBytes : uint64_t(before.st_size)))
       throw std::runtime_error("Source changed while being read: " + p);
   } catch (...) {
     close(fd);
     throw;
   }
   close(fd);
+}
+}
+void ReadLocalPrefix(const std::string &p, const struct stat &expected, size_t bytes,
+                     const DataSink &sink, const TransferControl &c) {
+  ReadRegularLocalFile(p, sink, c, &expected, bytes);
+}
+void ReadFile(const std::string &p, const DataSink &sink,
+              const TransferControl &c) {
+  c.Check();
+  auto l = ParseLocation(p);
+  if (l.Archive()) {
+    ReadArchive(l, sink, c);
+    return;
+  }
+  if (!l.Local()) {
+    ReadNetwork(l, sink, c);
+    return;
+  }
+  ReadRegularLocalFile(p, sink, c, nullptr, 0);
 }
 void UploadFile(const std::string &src, const std::string &dst,
                 const TransferControl &c) {

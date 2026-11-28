@@ -8,7 +8,6 @@
 #include <cerrno>
 #include <filesystem>
 #include <map>
-#include <optional>
 #include <set>
 #include <sys/stat.h>
 
@@ -31,7 +30,12 @@ private:
   };
   std::vector<Folder> folders;
   std::map<std::string, std::vector<size_t>> containingName, candidatesByRemoteParent;
-  std::set<std::pair<size_t, std::string>> distinctFolders;
+  struct Witness {
+    std::string path;
+    struct stat revision;
+  };
+  std::map<std::pair<size_t, std::string>, Witness> distinctFolders;
+  std::vector<Witness> distinctFiles;
   size_t comparisons = 0;
   uint64_t witnessBytesRemaining = 32 * 1024 * 1024;
   std::set<std::string> fileParents;
@@ -111,49 +115,69 @@ private:
     return possible;
   }
 
-  std::string WitnessDigest(const std::string &path, uint64_t expected,
-                            const TransferControl &control) {
-    FileEntry current;
-    if (!StatFile(path, current, control) || current.directory || current.link ||
-        !current.sizeKnown || current.size < 0 || uint64_t(current.size) != expected)
-      throw std::runtime_error("File changed during transfer preflight: " + path);
-    if (!IsVirtual(path)) {
-      struct stat st;
-      if (lstat(path.c_str(), &st) || !S_ISREG(st.st_mode))
-        throw std::runtime_error("File changed during transfer preflight: " + path);
+  static void RequireWitness(const Witness &witness) {
+    struct stat current;
+    if (lstat(witness.path.c_str(), &current) || !SameLocalRevision(witness.revision, current))
+      throw std::runtime_error("File changed during transfer preflight: " + witness.path);
+  }
+
+  bool DifferentFile(const Witness &local, const std::string &remotePath,
+                     const FileEntry &remote, const TransferControl &control) {
+    const auto size = local.revision.st_size;
+    if (!S_ISREG(local.revision.st_mode) || remote.directory || remote.link ||
+        !remote.sizeKnown || size < 0)
+      return false;
+    if (remote.size != size) {
+      RequireWitness(local);
+      return true;
     }
-    Sha256 hash;
-    ReadFile(path, [&](const char *bytes, size_t size) {
-      if (size > expected)
-        throw std::runtime_error("File changed during transfer preflight: " + path);
-      expected -= size;
-      witnessBytesRemaining -= size;
-      hash.Update(bytes, size);
-    }, control);
-    if (expected)
-      throw std::runtime_error("File changed during transfer preflight: " + path);
-    return hash.Finish();
+    // A different prefix is enough to establish a difference; equal prefixes
+    // never establish identity or prove the remaining bytes are different.
+    const auto bytes = std::min({uint64_t(size), uint64_t(1024 * 1024),
+                                 witnessBytesRemaining / 2});
+    if (!bytes)
+      return false;
+    witnessBytesRemaining -= bytes * 2;
+    Sha256 localHash, remoteHash;
+    ReadLocalPrefix(local.path, local.revision, bytes,
+                    [&](const char *data, size_t n) { localHash.Update(data, n); }, control);
+    ReadSftpPrefix(ParseLocation(remotePath), remote, bytes,
+                   [&](const char *data, size_t n) { remoteHash.Update(data, n); }, control);
+    FileEntry current;
+    if (!StatFile(remotePath, current, control) || !remote.SameRevision(current))
+      throw std::runtime_error("File changed during transfer preflight: " + remotePath);
+    RequireWitness(local);
+    return localHash.Finish() != remoteHash.Finish();
   }
 
   // Missing listed names already ruled out this candidate. Inspect other
   // children too: an identical file alone does not identify its parent.
   bool DifferentFolder(size_t index, const std::string &remoteParent,
-                       const Names &listed, const TransferControl &control, bool compareContent = false) {
+                       const Names &listed, const TransferControl &control,
+                       bool compareContent = false, const std::string &preferred = {}) {
     const auto &candidate = folders[index];
     const auto key = std::make_pair(index, remoteParent);
-    if (distinctFolders.count(key))
+    const auto found = distinctFolders.find(key);
+    if (found != distinctFolders.end()) {
+      RequireWitness(found->second);
       return true;
-    std::vector<std::pair<std::string, uint64_t>> smallFiles;
+    }
+    struct ContentCandidate {
+      Witness local;
+      std::string remotePath;
+      FileEntry remote;
+    };
+    std::vector<ContentCandidate> otherFiles;
     for (const auto &name : candidate.names) {
       CompareStep(control);
       const bool visible = listed.count(name) != 0;
       if (!visible && name.front() == '.')
         continue; // A server may hide private entries; omission is not proof.
       const auto remotePath = ChildLocation(remoteParent, name);
-      const auto local = ChildLocation(candidate.path, name);
-      struct stat st;
-      if (lstat(local.c_str(), &st))
-        throw std::runtime_error("Local directory view changed: " + local);
+      Witness local{ChildLocation(candidate.path, name), {}};
+      auto &st = local.revision;
+      if (lstat(local.path.c_str(), &st))
+        throw std::runtime_error("Local directory view changed: " + local.path);
       if (!S_ISREG(st.st_mode) && !S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode))
         continue; // An unselected special entry is not an identity witness.
       FileEntry remote;
@@ -161,7 +185,8 @@ private:
         if (!StatFile(remotePath, remote, control)) {
           if (visible)
             throw std::runtime_error("SFTP directory view changed: " + remoteParent);
-          distinctFolders.insert(key);
+          RequireWitness(local);
+          distinctFolders.emplace(key, std::move(local));
           return true;
         }
       } catch (const UnsupportedSftpEntry &) {
@@ -170,20 +195,18 @@ private:
       if (remote.directory != bool(S_ISDIR(st.st_mode)) ||
           remote.link != bool(S_ISLNK(st.st_mode)) ||
           (S_ISREG(st.st_mode) && remote.sizeKnown && remote.size != st.st_size)) {
-        distinctFolders.insert(key);
+        RequireWitness(local);
+        distinctFolders.emplace(key, std::move(local));
         return true;
       }
-      if (compareContent && S_ISREG(st.st_mode) && remote.sizeKnown &&
-          st.st_size > 0 && st.st_size <= 1024 * 1024)
-        smallFiles.emplace_back(name, st.st_size);
+      if (compareContent && name != preferred && S_ISREG(st.st_mode) &&
+          remote.sizeKnown && st.st_size > 0)
+        otherFiles.push_back({std::move(local), remotePath, std::move(remote)});
     }
-    for (const auto &[name, size] : smallFiles) {
+    for (auto &file : otherFiles) {
       CompareStep(control);
-      if (size > witnessBytesRemaining / 2)
-        continue;
-      const auto localHash = WitnessDigest(ChildLocation(candidate.path, name), size, control);
-      if (localHash != WitnessDigest(ChildLocation(remoteParent, name), size, control)) {
-        distinctFolders.insert(key);
+      if (DifferentFile(file.local, file.remotePath, file.remote, control)) {
+        distinctFolders.emplace(key, std::move(file.local));
         return true;
       }
     }
@@ -237,68 +260,68 @@ public:
       if (!selectedLeaf.empty()) {
         if (!AffectsSelectedLeaf(candidate, selectedLeaf, control))
           continue;
-        const auto local = ChildLocation(candidate.path, selectedLeaf);
-        struct stat st;
+        Witness local{ChildLocation(candidate.path, selectedLeaf), {}};
+        const auto remotePath = ChildLocation(folder, selectedLeaf);
         FileEntry remote;
-        if (lstat(local.c_str(), &st) || !S_ISREG(st.st_mode) ||
-            !StatFile(ChildLocation(folder, selectedLeaf), remote, control) ||
-            remote.directory || remote.link)
-          throw std::runtime_error("Cannot establish selected SFTP file identity: " + local);
-        if (remote.sizeKnown && remote.size != st.st_size)
+        if (lstat(local.path.c_str(), &local.revision) || !S_ISREG(local.revision.st_mode) ||
+            !StatFile(remotePath, remote, control) || remote.directory || remote.link)
+          throw std::runtime_error("Cannot establish selected SFTP file identity: " + local.path);
+        if (DifferentFile(local, remotePath, remote, control)) {
+          distinctFiles.push_back(std::move(local));
           continue;
+        }
       }
-      if (DifferentFolder(index, folder, names, control, true))
+      if (DifferentFolder(index, folder, names, control, true, selectedLeaf))
         continue;
       throw std::runtime_error("Cannot distinguish the local destination from a selected SFTP "
                                "source. Choose a separate destination: " + candidate.path);
     }
   }
 
-  using Digest = std::string (*)(const std::string &, const TransferControl &);
   void CheckParent(const Names &names, const std::string &target, const FileEntry *existing,
-                   const TransferControl &control, Digest digest) {
+                   const TransferControl &control) {
     const auto parent = ParentLocation(target);
-    std::optional<std::string> targetHash;
+    const auto leaf = LocationLeaf(target);
     for (const auto index : PossibleParents(parent, names, control)) {
       CompareStep(control);
       const auto &candidate = folders[index];
-      const auto local = ChildLocation(candidate.path, LocationLeaf(target));
       if (!existing) {
         // A new name cannot replace a selected standalone file. But creating
         // even an empty folder or stage inside a selected tree is a mutation.
-        if (!candidate.entireTree)
+        if (!candidate.entireTree || DifferentFolder(index, parent, names, control))
           continue;
       } else {
-        struct stat st;
-        if (lstat(local.c_str(), &st))
-          throw std::runtime_error("Local directory view changed before upload: " + local);
+        Witness local{ChildLocation(candidate.path, leaf), {}};
+        const auto &st = local.revision;
+        if (lstat(local.path.c_str(), &local.revision))
+          throw std::runtime_error("Local directory view changed before upload: " + local.path);
         if (!candidate.entireTree && !selectedFiles.count({st.st_dev, st.st_ino}))
           continue;
-        const bool regular = S_ISREG(st.st_mode) && !existing->directory && !existing->link;
-        if (regular && existing->sizeKnown && existing->size != st.st_size)
+        FileEntry current;
+        if (!StatFile(target, current, control) || !existing->SameRevision(current))
+          throw std::runtime_error("File changed during transfer preflight: " + target);
+        // A different sibling cannot distinguish two hard links to the
+        // selected file. Check only that file when aliases are possible.
+        if (DifferentFile(local, target, current, control)) {
+          distinctFiles.push_back(std::move(local));
           continue;
-        if (st.st_nlink == 1 && DifferentFolder(index, parent, names, control, true))
-          continue;
-        if (regular) {
-          // Two separate folders can both contain just 'memo'. Different
-          // bytes rule out the candidate without trusting timestamps.
-          if (!targetHash) {
-            FileEntry current;
-            if (!StatFile(target, current, control) || current.directory || current.link ||
-                !existing->SameRevision(current))
-              throw std::runtime_error("File changed during transfer preflight: " + target);
-            targetHash = digest(target, control);
-          }
-          if (lstat(local.c_str(), &st) || !S_ISREG(st.st_mode))
-            throw std::runtime_error("File changed during transfer preflight: " + local);
-          if (digest(local, control) != *targetHash)
-            continue;
         }
+        if (st.st_nlink == 1 && DifferentFolder(index, parent, names, control, true, leaf))
+          continue;
       }
-      if (!existing && DifferentFolder(index, parent, names, control))
-        continue;
       throw std::runtime_error("Cannot distinguish the SFTP destination from a selected local "
                                "source. Choose a separate destination: " + target);
+    }
+  }
+
+  void RecheckWitnesses(const TransferControl &control) const {
+    for (const auto &item : distinctFolders) {
+      control.Check();
+      RequireWitness(item.second);
+    }
+    for (const auto &witness : distinctFiles) {
+      control.Check();
+      RequireWitness(witness);
     }
   }
 };

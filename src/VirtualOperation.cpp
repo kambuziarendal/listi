@@ -140,14 +140,6 @@ std::string TransferIdentity(const std::string &path) {
     return location.URL();
   return location.CanonicalAuthority() + EncodePath(location.path);
 }
-bool SameLocal(const struct stat &a, const struct stat &b) {
-  return a.st_dev == b.st_dev && a.st_ino == b.st_ino &&
-         a.st_mode == b.st_mode && a.st_size == b.st_size &&
-         a.st_mtim.tv_sec == b.st_mtim.tv_sec &&
-         a.st_mtim.tv_nsec == b.st_mtim.tv_nsec &&
-         a.st_ctim.tv_sec == b.st_ctim.tv_sec &&
-         a.st_ctim.tv_nsec == b.st_ctim.tv_nsec;
-}
 void CheckFrozenSource(const std::string &path, const NodeIdentity &expected) {
   struct stat st;
   if (lstat(path.c_str(), &st) || st.st_dev != expected.device || st.st_ino != expected.inode)
@@ -222,6 +214,7 @@ struct SftpDownloadPreflight {
         throw std::runtime_error("Cannot establish exact SFTP name: " + folder);
       localOutputs.CheckSourceFolder(it->second, folder, leaf, control);
     }
+    localOutputs.RecheckWitnesses(control);
   }
 };
 
@@ -298,7 +291,7 @@ struct SftpTransferPreflight {
       // mkdir, upload and replacement checks its nearest existing parent.
       if (parentExists && (!exists || !input.directory))
         localSelection.CheckParent(Names(ParentLocation(target)), target,
-                                   exists ? &entry : nullptr, control, RemoteDigest);
+                                   exists ? &entry : nullptr, control);
     }
     if (input.directory) {
       // Check projected names even for new trees, but do not query destination
@@ -668,6 +661,7 @@ struct Runner {
       else
         check.CheckOutput(selectedSource, inputs[i], output);
     }
+    check.localSelection.RecheckWitnesses(control);
     protectedSftpSources = std::move(check.sourcePaths);
     localUploadPlan = std::move(check.localPlan);
     selectedSource.clear();
@@ -721,7 +715,7 @@ struct Runner {
       if (!lstat(target.c_str(), &now) &&
           ((S_ISDIR(expected.st_mode) && S_ISDIR(now.st_mode) &&
             expected.st_dev == now.st_dev && expected.st_ino == now.st_ino) ||
-           (S_ISREG(expected.st_mode) && SameLocal(expected, now))))
+           (S_ISREG(expected.st_mode) && SameLocalRevision(expected, now))))
         return;
     }
     throw std::runtime_error("SFTP download plan changed. Refresh and try again: " + target);
@@ -969,7 +963,7 @@ struct Runner {
       struct stat after {};
       const bool nowExists = lstat(dst.c_str(), &after) == 0;
       if ((!nowExists && errno != ENOENT) || nowExists != exists ||
-          (exists && !SameLocal(before, after)))
+          (exists && !SameLocalRevision(before, after)))
         throw std::runtime_error(
             "Destination changed during transfer; it was left untouched");
       Hooks local = hooks;

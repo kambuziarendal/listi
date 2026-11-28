@@ -8,6 +8,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <vector>
 
@@ -130,6 +131,9 @@ std::vector<FileEntry> ListFiles(const std::string &,
 bool StatFile(const std::string &, FileEntry &, const TransferControl & = {},
               const FileEntry *discovered = nullptr);
 using DataSink = std::function<void(const char *, size_t)>;
+bool SameLocalRevision(const struct stat &, const struct stat &);
+void ReadLocalPrefix(const std::string &, const struct stat &expected, size_t,
+                     const DataSink &, const TransferControl &);
 void ReadFile(const std::string &, const DataSink &,
               const TransferControl & = {});
 void UploadFile(const std::string &local, const std::string &remote,

@@ -196,22 +196,48 @@ bool StatSftp(const Location &l, FileEntry &entry, const TransferControl &c) {
   });
 }
 
-void ReadSftp(const Location &l, const DataSink &sink, const TransferControl &c) {
+namespace {
+void ReadSftpFile(const Location &l, const DataSink &sink, const TransferControl &c,
+                  const FileEntry *expected, size_t remaining) {
   WithSession(l, c, [&](SftpSession &session) {
     auto *input = session.Open(l.path, LIBSSH2_FXF_READ, false, c);
+    if (expected) {
+      LIBSSH2_SFTP_ATTRIBUTES attributes{};
+      const auto status = session.Request(c, [&] {
+        return libssh2_sftp_fstat(input, &attributes);
+      });
+      session.Require(status, "Inspect open SFTP witness");
+      FileEntry opened;
+      if (!Describe(attributes, opened) || opened.directory || opened.link ||
+          !expected->SameRevision(opened))
+        throw std::runtime_error("SFTP witness changed before being read: " + l.URL());
+    }
     std::array<char, 32768> buffer;
-    for (;;) {
+    while (!expected || remaining) {
+      const auto count = expected ? std::min(buffer.size(), remaining) : buffer.size();
       const auto n = session.Request(c, [&] {
-        return libssh2_sftp_read(input, buffer.data(), buffer.size());
+        return libssh2_sftp_read(input, buffer.data(), count);
       });
       session.Require(n, "Read SFTP file");
       if (!n)
         break;
       sink(buffer.data(), n);
+      if (expected)
+        remaining -= n;
       c.Tick(n);
     }
     session.Close(c);
+    if (expected && remaining)
+      throw std::runtime_error("SFTP witness ended before the expected prefix: " + l.URL());
   });
+}
+}
+void ReadSftp(const Location &l, const DataSink &sink, const TransferControl &c) {
+  ReadSftpFile(l, sink, c, nullptr, 0);
+}
+void ReadSftpPrefix(const Location &l, const FileEntry &expected, size_t bytes,
+                    const DataSink &sink, const TransferControl &c) {
+  ReadSftpFile(l, sink, c, &expected, bytes);
 }
 
 void UploadSftp(const std::string &local, const Location &l, const TransferControl &c) {

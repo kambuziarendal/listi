@@ -7,6 +7,7 @@
 #include "ArchiveVolumes.h"
 #include "FileOperation.h"
 #include "FolderCompare.h"
+#include "LocalTransferSelection.h"
 #include <filesystem>
 #if defined(__HAIKU__) || defined(LISTI_DOWNLOAD_STAGE_PROBE)
 #include "DownloadStageProbe.h"
@@ -95,6 +96,8 @@ bool failCommit = false, failRollback = false, failPartCleanup = false,
      mutateDestination = false, loseBackupReply = false, loseCommitReply = false;
 const std::string destination = "sftp://fixture/out/input";
 std::string unreadableSource, refuseRemoval;
+std::function<void(const std::string &)> afterPrefix;
+std::vector<std::pair<std::string, size_t>> prefixReads;
 enum class LocalPublish { Unexpected, Limited, FlushFailure, CancelAfterPublish };
 LocalPublish localPublish = LocalPublish::Unexpected;
 bool expectPrivatePublication = false;
@@ -289,6 +292,20 @@ void ReadNetwork(const Location &l, const DataSink &sink, const TransferControl 
   }
   c.Tick(data.size());
 }
+void ReadSftpPrefix(const Location &l, const FileEntry &, size_t bytes, const DataSink &sink,
+                    const TransferControl &c) {
+  c.Check();
+  prefixReads.emplace_back(l.URL(), bytes);
+  if (l.URL() == specialSftpName || l.URL() == unreadableSource)
+    throw std::runtime_error("Witness read denied");
+  const auto &data = files.at(StoragePath(l.URL())).data;
+  if (bytes > data.size())
+    throw std::runtime_error("Short witness");
+  sink(data.data(), bytes);
+  if (afterPrefix)
+    afterPrefix(l.URL());
+  c.Tick(bytes);
+}
 void UploadNetwork(const std::string &local, const Location &l, const TransferControl &c) {
   ++mutationRequests;
   std::ifstream stream(local);
@@ -393,6 +410,8 @@ int main() {
     canonicalAlias.clear();
     omittedSftpName.clear();
     specialSftpName.clear();
+    afterPrefix = {};
+    prefixReads.clear();
     specialLookups = specialReads = 0;
     changedAfterList.clear();
     changedAfterRemove.clear();
@@ -1211,6 +1230,148 @@ int main() {
                     : "the selected file distinguishes independent folders without accessing a FIFO sibling");
       std::filesystem::remove_all(base);
     }
+  }
+  for (const bool upload : {false, true}) {
+    for (const bool directory : {false, true}) {
+      reset();
+      peers.at("fixture").mayBeLocal = true;
+      files.clear();
+      const auto base = std::string(dir) + "/prefix-backup";
+      const auto local = base + "/album";
+      const auto localEdit = local + "/edit.bin";
+      const std::string remoteOut = "sftp://fixture/out";
+      const auto remote = directory ? remoteOut + "/album" : remoteOut;
+      const auto remoteEdit = remote + "/edit.bin";
+      std::filesystem::create_directories(local);
+      if (chmod(local.c_str(), 0700))
+        return 1;
+      std::string prior(1024 * 1024 + 1, 'x'), edit = prior;
+      edit.front() = 'y';
+      std::ofstream(localEdit) << (upload ? edit : prior);
+      files[remoteEdit] = {upload ? prior : edit};
+      if (directory) {
+        files[remote] = {"", 1, 0, true};
+        files[remote + "/common.txt"] = {"shared"};
+        std::ofstream(local + "/common.txt") << "shared";
+      } else {
+        unreadableSource = remote + "/a-extra.txt";
+        files[unreadableSource] = {"old"};
+        std::ofstream(local + "/a-extra.txt") << "old";
+        if (chmod((local + "/a-extra.txt").c_str(), 0000))
+          return 1;
+      }
+      auto selected = upload ? (directory ? local : localEdit) : (directory ? remote : remoteEdit);
+      auto target = upload ? remoteOut : (directory ? base : local);
+      localPublish = LocalPublish::Limited;
+      r = RunVirtual({Action::Copy, {selected}, target}, hooks);
+      localPublish = LocalPublish::Unexpected;
+      const bool boundedEdit = std::find(prefixReads.begin(), prefixReads.end(),
+          std::make_pair(remoteEdit, size_t(1024 * 1024))) != prefixReads.end();
+      check(r.completed == 1 && r.errors.empty() && boundedEdit &&
+                (directory || prefixReads.size() == 1) &&
+                readBytes(localEdit) == edit && files.at(remoteEdit).data == edit,
+            directory ? "a large changed file distinguishes separate selected folder trees"
+                      : "the selected large-file prefix is read before an unreadable sibling");
+      unreadableSource.clear();
+      std::filesystem::remove_all(base);
+    }
+  }
+  {
+    reset();
+    const auto local = std::string(dir) + "/equal-prefix";
+    const auto localFile = local + "/memo.bin";
+    const std::string remote = "sftp://fixture/out";
+    const auto remoteFile = remote + "/memo.bin";
+    std::filesystem::create_directory(local);
+    std::string data(1024 * 1024 + 1, 'x');
+    std::ofstream(localFile) << data;
+    data.back() = 'y';
+    files[remoteFile] = {data};
+    LocalTransferSelection selection;
+    selection.AddOutput(localFile, {});
+    bool rejected = false;
+    try {
+      selection.CheckSourceFolder({"memo.bin"}, remote, "memo.bin", {});
+    } catch (const std::runtime_error &error) {
+      rejected = std::string_view(error.what()).find("Cannot distinguish") !=
+                 std::string_view::npos;
+    }
+    check(rejected && prefixReads == decltype(prefixReads){{remoteFile, 1024 * 1024}} &&
+              mutationRequests == 0 && readBytes(localFile).back() == 'x' &&
+              files.at(remoteFile).data.back() == 'y',
+          "an equal bounded prefix does not authorize a transfer");
+    std::filesystem::remove_all(local);
+  }
+  for (const bool upload : {false, true}) {
+    reset();
+    const auto local = std::string(dir) + "/unstable-witness";
+    const auto localFile = local + "/memo.txt";
+    const std::string remote = "sftp://fixture/out";
+    const auto remoteFile = remote + "/memo.txt";
+    std::filesystem::create_directory(local);
+    std::ofstream(localFile) << "old";
+    files[remoteFile] = {"new"};
+    LocalTransferSelection selection;
+    FileEntry remoteEntry;
+    StatFile(remoteFile, remoteEntry);
+    if (upload)
+      selection.Add(localFile, {}, {});
+    else
+      selection.AddOutput(localFile, {});
+    afterPrefix = [&](const std::string &) {
+      std::ofstream(local + "/replacement") << "new";
+      std::filesystem::rename(local + "/replacement", localFile);
+    };
+    bool rejected = false;
+    try {
+      if (upload)
+        selection.CheckParent({"memo.txt"}, remoteFile, &remoteEntry, {});
+      else
+        selection.CheckSourceFolder({"memo.txt"}, remote, "memo.txt", {});
+    } catch (const std::runtime_error &error) {
+      rejected = std::string_view(error.what()).find("changed during transfer preflight") !=
+                 std::string_view::npos;
+    }
+    check(rejected && prefixReads.size() == 1 && mutationRequests == 0 &&
+              readBytes(localFile) == "new" && files.at(remoteFile).data == "new",
+          upload ? "read-only upload preflight rejects a changing local witness"
+                 : "read-only download preflight rejects a changing local witness");
+    afterPrefix = {};
+    std::filesystem::remove_all(local);
+  }
+  {
+    reset();
+    const auto local = std::string(dir) + "/cached-witness";
+    const auto localFile = local + "/memo.txt";
+    const std::string remote = "sftp://fixture/out";
+    const auto remoteFile = remote + "/memo.txt";
+    std::filesystem::create_directory(local);
+    std::ofstream(localFile) << "old";
+    files[remoteFile] = {"new"};
+    LocalTransferSelection selection;
+    selection.AddOutput(localFile, {});
+    selection.CheckSourceFolder({"memo.txt"}, remote, "", {});
+    selection.RecheckWitnesses({});
+    std::ofstream(local + "/replacement") << "edit";
+    std::filesystem::rename(local + "/replacement", localFile);
+    bool rejected = false;
+    try {
+      selection.CheckSourceFolder({"memo.txt"}, remote, "", {});
+    } catch (const std::runtime_error &error) {
+      rejected = std::string_view(error.what()).find("changed during transfer preflight") !=
+                 std::string_view::npos;
+    }
+    bool rejectedAtFinish = false;
+    try {
+      selection.RecheckWitnesses({});
+    } catch (const std::runtime_error &error) {
+      rejectedAtFinish = std::string_view(error.what()).find("changed during transfer preflight") !=
+                         std::string_view::npos;
+    }
+    check(rejected && rejectedAtFinish && prefixReads.size() == 1 && mutationRequests == 0 &&
+              readBytes(localFile) == "edit" && files.at(remoteFile).data == "new",
+          "read-only preflight cannot reuse the discarded revision of a cached witness");
+    std::filesystem::remove_all(local);
   }
   // The two routes have identical source/target path texts and the destination
   // contains an existing file. Authorization to replace is not namespace evidence.
