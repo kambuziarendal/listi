@@ -72,7 +72,7 @@ std::string StoragePath(std::string path) {
 bool corruptUpload = false, denyReadback = false, cancelReadback = false;
 bool cancelAtReadyCheck = false, cancelAfterStore = false, hideStoredPart = false;
 bool uncertainRollback = false, replaceStageOnRead = false;
-std::string unresolvedCanonical;
+std::string unresolvedCanonical, canonicalAlias;
 std::string changeIdentityOnRead, tightenOnRead, downgradeListing;
 std::string changedAfterList, changedAfterRemove;
 std::string lostRemoval, unreadableLookup, lostMove, swapDuringMove;
@@ -195,6 +195,8 @@ std::string CanonicalSftpPath(const Location &entry, const TransferControl &cont
   control.Check();
   if (entry.URL() == unresolvedCanonical)
     throw std::runtime_error("Canonical path unavailable for fixture entry");
+  if (entry.URL() == canonicalAlias)
+    return "/work";
   return ParseLocation(StoragePath(entry.URL())).path;
 }
 std::set<std::string> ListSftpNames(const Location &folder, const TransferControl &c) {
@@ -364,6 +366,7 @@ int main() {
     tightenOnRead.clear();
     unreadableLookup.clear();
     unresolvedCanonical.clear();
+    canonicalAlias.clear();
     changedAfterList.clear();
     changedAfterRemove.clear();
     lostRemoval.clear();
@@ -928,6 +931,66 @@ int main() {
               files.at(mergeFolder ? destination + "/child" : destination).data == "chosen bytes" &&
               files.at(unreadableLookup).data == "untouched",
           "existing SFTP target checks literal names without inspecting unrelated siblings");
+  }
+  auto fixtureTree = [] {
+    std::map<std::string, std::pair<bool, std::string>> tree;
+    for (const auto &[path, entry] : files)
+      tree[path] = {entry.directory, entry.data};
+    return tree;
+  };
+  for (bool collision : {false, true}) {
+    reset();
+    const std::string project = "sftp://fixture/project";
+    const auto target = project + "/album", selection = target + "/album";
+    const auto childName = collision ? "/album" : "/next";
+    const auto child = selection + childName;
+    files[project] = files[target] = files[selection] = files[child] = {"", 1, 0, true};
+    files[selection + "/memo"] = {"selected"};
+    files[child + "/memo"] = {"child data"};
+    files[selection + "/z-last"] = {"end"};
+    files[target + "/unrelated"] = {"old"};
+    auto expected = fixtureTree();
+    if (!collision) {
+      expected[target + "/next"] = {true, ""};
+      expected[target + "/next/memo"] = {false, "child data"};
+      expected[target + "/memo"] = {false, "selected"};
+      expected[target + "/z-last"] = {false, "end"};
+    }
+    int prompts = 0;
+    Hooks observe = hooks;
+    observe.conflict = [&](const auto &) { ++prompts; return Decision::Replace; };
+    r = RunVirtual({Action::Copy, {selection}, project}, observe);
+    check(r.completed == int(!collision) && !r.partialCopies && r.errors.empty() == !collision &&
+              !prompts && fixtureTree() == expected,
+          collision ? "upward SFTP merge rejects a projected child inside the source before delivery"
+                    : "non-overlapping upward SFTP merge delivers all files without changing the source");
+  }
+  for (auto action : {Action::Copy, Action::Move}) {
+    for (bool reverse : {false, true}) {
+      for (bool occupied : {false, true}) {
+        reset();
+        const std::string alias = "sftp://fixture/Archive";
+        const auto target = alias + "/sub";
+        files[alias] = files[target] = files[work] = files[work + "/sub"] = {"", 1, 0, true};
+        files[pickedFile] = {"selected"};
+        files[work + "/extra"] = {"preserve"};
+        if (occupied)
+          files[work + "/sub/input"] = {"keep"};
+        canonicalAlias = alias;
+        Job batch{action, reverse ? std::vector<std::string>{work, pickedFile}
+                                  : std::vector<std::string>{pickedFile, work}, target};
+        for (const auto &path : batch.sources)
+          StatFile(path, batch.expectedRemoteSources[path]);
+        const auto expected = fixtureTree();
+        int prompts = 0;
+        Hooks observe = hooks;
+        observe.conflict = [&](const auto &) { ++prompts; return Decision::Replace; };
+        r = RunVirtual(batch, observe);
+        check(!r.completed && !r.partialCopies && !done && !prompts &&
+                  errorHas(r, "Cannot establish canonical SFTP path") && fixtureTree() == expected,
+              "a non-canonical ancestor in the SFTP destination blocks the entire transfer");
+      }
+    }
   }
   for (const auto &blockedPath : {in, in + "/second", out}) {
     reset();

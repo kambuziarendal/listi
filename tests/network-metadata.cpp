@@ -395,8 +395,22 @@ void CheckSftpCompare(const std::string &sftp, const std::string &local) {
   const auto sparse = ChildLocation(sftp, "compare-late");
   const auto changing = CompareFolders({reference, sparse, true});
   Expect(!changing.complete && changing.error.find("changed during comparison") != std::string::npos &&
-             changing.error.find(sparse + "/0") != std::string::npos,
+             changing.error.find(sparse + "/0") != std::string::npos &&
+             changing.error.find("All displayed results are provisional") != std::string::npos,
          "final sparse listing rechecks the first hashed file after another file is opened");
+  const auto visible = SelectCompareRows(changing, false, 8);
+  Expect(changing.entries.size() == 8 && changing.verified == 0 &&
+             changing.sizeOnly == 0 && changing.different == 0 && changing.unverified == 8 &&
+             visible.total == 8 && visible.indices.size() == 8,
+         "unfinished final checks revoke all eight SHA results and expose them in the filter");
+  bool changedFileVisible = false;
+  for (const auto index : visible.indices) {
+    const auto &row = changing.entries.at(index);
+    Expect(row.state == CompareState::Unverified && row.leftHash.empty() && row.rightHash.empty(),
+           "no stale hash or match remains on provisional row " + row.relative);
+    changedFileVisible |= row.relative == "0";
+  }
+  Expect(changedFileVisible, "changed file 0 is present in the differences filter");
   const auto stable = CompareFolders({reference, sparse, true});
   Expect(stable.complete && stable.verified == 7 && stable.different == 1,
          "fresh comparison of sparse listings sees seven matches and the changed file");

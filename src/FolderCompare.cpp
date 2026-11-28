@@ -380,7 +380,8 @@ CompareResult CompareFolders(const CompareRequest &r,
   } catch (const std::exception &e) {
     result.error = e.what();
   }
-  if (!finalChecksPassed) {
+  if (!finalChecksPassed && !result.entries.empty()) {
+    result.error += " All displayed results are provisional because final checks did not finish.";
     for (auto &entry : result.entries) {
       if (entry.leftHash.empty() && entry.rightHash.empty())
         continue;

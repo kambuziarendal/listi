@@ -147,9 +147,20 @@ bool SameLocal(const struct stat &a, const struct stat &b) {
          a.st_ctim.tv_sec == b.st_ctim.tv_sec &&
          a.st_ctim.tv_nsec == b.st_ctim.tv_nsec;
 }
-// Read-only safety checks for an SFTP copy batch. A verified spelling and
+bool WithinSftpSelection(const std::string &path, const std::set<std::string> &sources) {
+  if (sources.empty())
+    return false;
+  for (auto candidate = path;; candidate = ParentLocation(candidate)) {
+    if (sources.count(TransferIdentity(candidate)))
+      return true;
+    if (ParseLocation(candidate).path == "/")
+      return false;
+  }
+}
+
+// Read-only safety checks for an SFTP transfer batch. A verified spelling and
 // canonical path are namespace evidence, not a persistent SFTP v3 object ID.
-struct SftpCopyPreflight {
+struct SftpTransferPreflight {
   const TransferControl &control;
   std::set<std::string> sourcePaths, checkedParents, outputs;
   std::map<std::string, std::set<std::string>> names;
@@ -185,13 +196,9 @@ struct SftpCopyPreflight {
     }
   }
 
-  bool WithinSelection(const std::string &path) const {
-    for (auto candidate = path;; candidate = ParentLocation(candidate)) {
-      if (sourcePaths.count(TransferIdentity(candidate)))
-        return true;
-      if (ParseLocation(candidate).path == "/")
-        return false;
-    }
+  void CheckOutputName(const std::string &target) {
+    if (WithinSftpSelection(target, sourcePaths) || !outputs.insert(TransferIdentity(target)).second)
+      throw std::runtime_error("SFTP destination overlaps a selected source or output: " + target);
   }
 
   void CheckOutput(const std::string &source, const FileEntry &input,
@@ -204,9 +211,7 @@ struct SftpCopyPreflight {
       throw std::runtime_error("Links are not followed during archive/network transfers: " + source);
     if (depth && ParseLocation(source).scheme == "sftp")
       CheckPath(source);
-    const auto key = TransferIdentity(target);
-    if (!outputs.insert(key).second || WithinSelection(target))
-      throw std::runtime_error("SFTP destination overlaps a selected source or output: " + target);
+    CheckOutputName(target);
     FileEntry entry;
     const bool exists = parentExists && StatFile(target, entry, control);
     if (exists) {
@@ -215,10 +220,6 @@ struct SftpCopyPreflight {
       CheckPath(target);
     }
     if (input.directory) {
-      const auto prefix = key + "/";
-      const auto selected = sourcePaths.lower_bound(prefix);
-      if (selected != sourcePaths.end() && selected->compare(0, prefix.size(), prefix) == 0)
-        throw std::runtime_error("An SFTP merge folder contains a selected source: " + target);
       // Check projected names even for new trees, but do not query destination
       // children beneath a folder which has not been created yet.
       for (const auto &child : ListFiles(source, control))
@@ -248,7 +249,7 @@ struct Runner {
       const auto location = ParseLocation(path);
       if (!StatFile(path, current, control) || !current.directory || current.link ||
           expected.revision.providerIdentity != current.providerIdentity ||
-          (job.action == Action::Copy && location.scheme == "sftp" &&
+          ((job.action == Action::Copy || job.action == Action::Move) && location.scheme == "sftp" &&
            CanonicalSftpPath(location, control) != location.path)) {
         expected.exactFolders.reset();
         throw std::runtime_error("Remote destination folder changed: " + path);
@@ -361,6 +362,7 @@ struct Runner {
       claims.replaceable->erase(leaf);
   }
   std::string selectedSource;
+  std::set<std::string> protectedSftpSources;
   void Guard() {
     if (job.checkDestinationWindow)
       job.checkDestinationWindow();
@@ -517,11 +519,12 @@ struct Runner {
       CheckExistingOutputs(child.path, ChildLocation(dst, child.name), control, count, depth + 1);
     }
   }
-  void PreflightSftpCopy() {
+  void PreflightSftpTransfer() {
+    const bool moving = job.action == Action::Move;
     auto control = Control(job.destination, false);
     // These are read-only checks, not transfer progress.
     control.progress = {};
-    SftpCopyPreflight check{control, {}, {}, {}, {}};
+    SftpTransferPreflight check{control, {}, {}, {}, {}};
     check.CheckParents(ParseLocation(job.destination).URL());
     std::vector<FileEntry> inputs;
     inputs.reserve(job.sources.size());
@@ -536,33 +539,42 @@ struct Runner {
       if (location.scheme == "sftp")
         check.CheckParents(ParentLocation(location.URL()));
       FileEntry entry;
-      if (!StatFile(source, entry, control) || entry.link)
-        throw std::runtime_error("Cannot establish source entry for SFTP copy: " + source);
+      if (!StatFile(source, entry, control) || (!moving && entry.link))
+        throw std::runtime_error("Cannot establish source entry for SFTP transfer: " + source);
       const auto expected = job.expectedRemoteSources.find(source);
-      if (expected != job.expectedRemoteSources.end() &&
+      if (!moving && expected != job.expectedRemoteSources.end() &&
           !MatchesRemoteSelection(expected->second, entry))
         throw std::runtime_error("Selected network entry changed before copying: " + source);
       if (location.scheme == "sftp") {
-        check.CheckPath(location.URL());
+        // Rename moves the link itself, not its referent. Its parent was checked above.
+        if (!entry.link)
+          check.CheckPath(location.URL());
         check.sourcePaths.insert(TransferIdentity(source));
       }
       inputs.push_back(std::move(entry));
     }
-    if (check.WithinSelection(job.destination))
+    if (WithinSftpSelection(job.destination, check.sourcePaths))
       throw std::runtime_error("A selected source contains the SFTP destination folder");
     for (size_t i = 0; i < job.sources.size(); ++i) {
       selectedSource = job.sources[i];
       control = Control(selectedSource, false);
       control.progress = {};
-      check.CheckOutput(selectedSource, inputs[i],
-                        ChildLocation(job.destination, LocationLeaf(selectedSource)));
+      const auto output = ChildLocation(job.destination, LocationLeaf(selectedSource));
+      // Move submits one rename, not a recursive merge.
+      if (moving)
+        check.CheckOutputName(output);
+      else
+        check.CheckOutput(selectedSource, inputs[i], output);
     }
+    protectedSftpSources = std::move(check.sourcePaths);
     selectedSource.clear();
   }
   void Copy(const std::string &src, const std::string &dst, int depth = 0,
             const FileEntry *discovered = nullptr) {
     if (depth > 128 || ++visited > 200000)
       throw std::runtime_error("Folder tree exceeds the transfer limit");
+    if (WithinSftpSelection(dst, protectedSftpSources))
+      throw std::runtime_error("SFTP destination overlaps a selected source: " + dst);
     if (InterruptedVolumes().Contains(src))
       throw std::runtime_error(src + ": " + kUnavailableVolumeText);
     const auto parent = ParentLocation(dst);
@@ -1299,9 +1311,10 @@ Result RunVirtual(const Job &job, const Hooks &hooks) {
       runner.result.completed = 1;
       return runner.result;
     }
-    if (job.action == Action::Copy && ParseLocation(job.destination).scheme == "sftp") {
+    if ((job.action == Action::Copy || job.action == Action::Move) &&
+        ParseLocation(job.destination).scheme == "sftp") {
       try {
-        runner.PreflightSftpCopy();
+        runner.PreflightSftpTransfer();
       } catch (const Cancelled &) {
         throw;
       } catch (const std::exception &error) {
