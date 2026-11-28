@@ -40,6 +40,7 @@ class SftpSession;
 struct SftpPeer {
   std::string endpoint, hostKey;
   int keyType;
+  bool mayBeLocal = true;
   bool IndependentOf(const SftpPeer &other) const {
     // One daemon can offer multiple key types, or listen on multiple addresses.
     return endpoint != other.endpoint && keyType == other.keyType && hostKey != other.hostKey;

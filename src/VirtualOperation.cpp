@@ -6,6 +6,7 @@
 #include "StagingSpace.h"
 #include "Sha256.h"
 #include "SftpFile.h"
+#include "LocalUploadSelection.h"
 #include "RecoveryInventory.h"
 #include "UnavailableVolume.h"
 #include "VirtualFile.h"
@@ -161,10 +162,21 @@ bool WithinSftpSelection(const std::string &path, const std::set<std::string> &s
 // Read-only safety checks for an SFTP transfer batch. A verified spelling and
 // canonical path are namespace evidence, not a persistent SFTP v3 object ID.
 struct SftpTransferPreflight {
+  explicit SftpTransferPreflight(const TransferControl &control) : control(control) {}
+
   const TransferControl &control;
   std::set<std::string> sourcePaths, checkedParents, outputs;
   std::map<std::string, std::set<std::string>> names;
   size_t visited = 0;
+  LocalUploadSelection localSelection;
+  std::map<std::string, bool> localPlan;
+
+  const std::set<std::string> &Names(const std::string &folder) {
+    auto found = names.find(folder);
+    if (found == names.end())
+      found = names.emplace(folder, ListSftpNames(ParseLocation(folder), control)).first;
+    return found->second;
+  }
 
   void CheckPath(const std::string &path) {
     const auto location = ParseLocation(path);
@@ -173,10 +185,7 @@ struct SftpTransferPreflight {
     if (location.path == "/")
       return;
     const auto parent = ParentLocation(path);
-    auto listing = names.find(parent);
-    if (listing == names.end())
-      listing = names.emplace(parent, ListSftpNames(ParseLocation(parent), control)).first;
-    if (!listing->second.count(LocationLeaf(path)))
+    if (!Names(parent).count(LocationLeaf(path)))
       throw std::runtime_error("Cannot establish exact SFTP name: " + path);
   }
 
@@ -218,6 +227,14 @@ struct SftpTransferPreflight {
       if (entry.link || entry.directory != input.directory)
         throw std::runtime_error("Cannot safely merge with the SFTP destination: " + target);
       CheckPath(target);
+    }
+    if (!localSelection.Empty()) {
+      localPlan.emplace(TransferIdentity(target), exists);
+      // An existing merge folder is not modified by opening it. Each actual
+      // mkdir, upload and replacement checks its nearest existing parent.
+      if (parentExists && (!exists || !input.directory))
+        localSelection.CheckParent(Names(ParentLocation(target)), target,
+                                   exists ? &entry : nullptr, control, RemoteDigest);
     }
     if (input.directory) {
       // Check projected names even for new trees, but do not query destination
@@ -363,6 +380,7 @@ struct Runner {
   }
   std::string selectedSource;
   std::set<std::string> protectedSftpSources;
+  std::map<std::string, bool> localUploadPlan;
   void Guard() {
     if (job.checkDestinationWindow)
       job.checkDestinationWindow();
@@ -524,9 +542,13 @@ struct Runner {
     auto control = Control(job.destination, false);
     // These are read-only checks, not transfer progress.
     control.progress = {};
-    SftpTransferPreflight check{control, {}, {}, {}, {}};
+    SftpTransferPreflight check{control};
     const auto destination = ParseLocation(job.destination);
     check.CheckParents(destination.URL());
+    const bool localUpload = !moving &&
+        std::any_of(job.sources.begin(), job.sources.end(), [](const auto &source) {
+          return ParseLocation(source).Local();
+        }) && BindSftpPeer(destination, control).mayBeLocal;
     std::vector<FileEntry> inputs;
     inputs.reserve(job.sources.size());
     for (const auto &source : job.sources) {
@@ -557,6 +579,8 @@ struct Runner {
           check.CheckPath(location.URL());
         check.sourcePaths.insert(TransferIdentity(source));
       }
+      if (localUpload && location.Local())
+        check.localSelection.Add(source, entry, control);
       inputs.push_back(std::move(entry));
     }
     if (WithinSftpSelection(job.destination, check.sourcePaths))
@@ -573,6 +597,7 @@ struct Runner {
         check.CheckOutput(selectedSource, inputs[i], output);
     }
     protectedSftpSources = std::move(check.sourcePaths);
+    localUploadPlan = std::move(check.localPlan);
     selectedSource.clear();
   }
   void Copy(const std::string &src, const std::string &dst, int depth = 0,
@@ -632,6 +657,11 @@ struct Runner {
       throw std::runtime_error(
           "Links are not followed during archive/network transfers");
     bool exists = StatFile(dst, target, control);
+    if (!localUploadPlan.empty()) {
+      const auto planned = localUploadPlan.find(TransferIdentity(dst));
+      if (planned == localUploadPlan.end() || planned->second != exists)
+        throw std::runtime_error("SFTP upload plan changed. Refresh and try again: " + dst);
+    }
     if (exists && target.link)
       throw std::runtime_error(
           "Destination is a link; choose a real folder or file");

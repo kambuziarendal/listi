@@ -7,6 +7,7 @@
 #include "ArchiveVolumes.h"
 #include "FileOperation.h"
 #include "FolderCompare.h"
+#include <filesystem>
 #if defined(__HAIKU__) || defined(LISTI_DOWNLOAD_STAGE_PROBE)
 #include "DownloadStageProbe.h"
 #endif
@@ -74,7 +75,7 @@ std::string StoragePath(std::string path) {
 bool corruptUpload = false, denyReadback = false, cancelReadback = false;
 bool cancelAtReadyCheck = false, cancelAfterStore = false, hideStoredPart = false;
 bool uncertainRollback = false, replaceStageOnRead = false;
-std::string unresolvedCanonical, canonicalAlias;
+std::string unresolvedCanonical, canonicalAlias, omittedSftpName;
 std::string changeIdentityOnRead, tightenOnRead, downgradeListing;
 std::string changedAfterList, changedAfterRemove;
 std::string lostRemoval, unreadableLookup, lostMove, swapDuringMove;
@@ -215,7 +216,7 @@ std::set<std::string> ListSftpNames(const Location &folder, const TransferContro
   }
   for (const auto &[path, file] : files) {
     c.Check();
-    if (ParentLocation(path) == folder.URL())
+    if (ParentLocation(path) == folder.URL() && path != omittedSftpName)
       names.insert(LocationLeaf(path));
   }
   return names;
@@ -369,6 +370,7 @@ int main() {
   };
   auto reset = [&] {
     peers.clear();
+    peers["fixture"] = {"remote:22", "fixture-key", 1, false};
     mutationRequests = 0;
     postCancelReadCalls = 0;
     commitFailed = expireDuringCleanup = false;
@@ -379,6 +381,7 @@ int main() {
     unreadableLookup.clear();
     unresolvedCanonical.clear();
     canonicalAlias.clear();
+    omittedSftpName.clear();
     changedAfterList.clear();
     changedAfterRemove.clear();
     lostRemoval.clear();
@@ -977,6 +980,49 @@ int main() {
           collision ? "upward SFTP merge rejects a projected child inside the source before delivery"
                     : "non-overlapping upward SFTP merge delivers all files without changing the source");
   }
+  // A local daemon's /out may expose a directory with an unrelated local
+  // prefix. A new output name, not just a replacement, must respect the
+  // selection. Collect all sources before examining either projected root.
+  const auto localTree = std::string(dir) + "/guarded-local";
+  std::filesystem::create_directories(localTree + "/inner");
+  std::ofstream(localTree + "/inner/memo") << "original";
+  std::ofstream(localTree + "/inner/.hidden") << "preserve";
+  for (bool reverse : {false, true}) {
+    reset();
+    peers.at("fixture").mayBeLocal = true;
+    files.clear();
+    files["sftp://fixture/out/memo"] = {"original"};
+    omittedSftpName = "sftp://fixture/out/.hidden";
+    files[omittedSftpName] = {"preserve"};
+    const auto before = fixtureTree();
+    const std::vector<std::string> selection = reverse
+        ? std::vector<std::string>{localTree, source} : std::vector<std::string>{source, localTree};
+    int prompts = 0;
+    Hooks observed = hooks;
+    observed.conflict = [&](const auto &) { ++prompts; return Decision::Replace; };
+    r = RunVirtual({Action::Copy, selection, "sftp://fixture/out"}, observed);
+    check(!r.completed && !r.partialCopies && !prompts && !mutationRequests &&
+              errorHas(r, "selected local source") && fixtureTree() == before &&
+              readBytes(localTree + "/inner/memo") == "original" &&
+              readBytes(localTree + "/inner/.hidden") == "preserve",
+          "a possible remapped local directory rejects every root before creating a new name");
+  }
+  for (bool sameBytes : {false, true}) {
+    reset();
+    peers.at("fixture").mayBeLocal = true;
+    files.clear();
+    const std::string remoteMemo = "sftp://fixture/out/memo";
+    files[remoteMemo] = {sameBytes ? "original" : "separate"};
+    int prompts = 0;
+    Hooks observed = hooks;
+    observed.conflict = [&](const auto &) { ++prompts; return Decision::Replace; };
+    r = RunVirtual({Action::Copy, {localTree + "/inner/memo"}, "sftp://fixture/out"}, observed);
+    check(!r.partialCopies && r.completed == int(!sameBytes) && prompts == int(!sameBytes) &&
+              r.errors.empty() == !sameBytes && (mutationRequests != 0) == !sameBytes &&
+              files.at(remoteMemo).data == "original",
+          "local file conflict requires evidence that the actual replacement is outside the selection");
+  }
+  std::filesystem::remove_all(localTree);
   // The two routes have identical source/target path texts and the destination
   // contains an existing file. Authorization to replace is not namespace evidence.
   for (const std::string trial : {"same-key", "same-peer", "other-key-type", "unknown", "independent"}) {

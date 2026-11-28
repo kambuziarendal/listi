@@ -8,12 +8,40 @@
 #include <cstring>
 #include <fcntl.h>
 #include <memory>
+#include <netinet/in.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 namespace Listi {
 namespace {
+// Classify the connected address, not a URL spelling or a second DNS result.
+bool MayBeLocal(curl_socket_t socket) {
+  sockaddr_storage address{};
+  socklen_t length = sizeof(address);
+  if (getpeername(socket, reinterpret_cast<sockaddr *>(&address), &length))
+    return true;
+  if (address.ss_family == AF_INET) {
+    auto &v4 = reinterpret_cast<sockaddr_in &>(address);
+    if ((ntohl(v4.sin_addr.s_addr) >> 24) == 127)
+      return true;
+    v4.sin_port = 0;
+  } else if (address.ss_family == AF_INET6) {
+    auto &v6 = reinterpret_cast<sockaddr_in6 &>(address);
+    v6.sin6_port = 0;
+  } else {
+    return true;
+  }
+  // No connect, listen or packets: ask the kernel if the address can be bound
+  // locally. Only a definite nonlocal address can dispense with the guard.
+  const int probe = ::socket(address.ss_family, SOCK_STREAM, 0);
+  if (probe < 0)
+    return true;
+  const bool local = !bind(probe, reinterpret_cast<sockaddr *>(&address), length) ||
+                     errno != EADDRNOTAVAIL;
+  close(probe);
+  return local;
+}
 struct DialControl {
   const TransferControl &control;
   std::exception_ptr failure;
@@ -111,7 +139,8 @@ SftpPeer SftpSession::Peer() const {
       port <= 0)
     throw std::runtime_error("Cannot identify the connected SFTP server.");
   // Connect() has already checked this exact binary host key against the route's pin.
-  return {"[" + std::string(address) + "]:" + std::to_string(port), std::string(key, length), type};
+  return {"[" + std::string(address) + "]:" + std::to_string(port), std::string(key, length), type,
+          MayBeLocal(socket)};
 }
 
 SftpSession::~SftpSession() {

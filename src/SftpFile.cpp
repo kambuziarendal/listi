@@ -27,7 +27,8 @@ auto WithSession(const Location &location, const TransferControl &control, F act
         const auto bound = control.sftpSessions->boundPeers.find(route);
         if (bound != control.sftpSessions->boundPeers.end()) {
           const auto peer = slot->Peer();
-          if (peer.endpoint != bound->second.endpoint || peer.hostKey != bound->second.hostKey)
+          if (peer.endpoint != bound->second.endpoint || peer.hostKey != bound->second.hostKey ||
+              (!bound->second.mayBeLocal && peer.mayBeLocal))
             throw std::runtime_error("SFTP server changed during transfer. Refresh and try again.");
         }
       }
